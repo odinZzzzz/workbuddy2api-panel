@@ -929,15 +929,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// rotateBackoff 占用在途名额）。更要紧的是：继续轮转后末端会落到
 			// 「其余保持 503」，把确定失败的请求伪装成"账号不可用、稍后再试"，
 			// 客户端于是对必然失败的请求无限重试。立即透传上游原文回 400。
-			if kind == upstream.ErrBadParams {
+			if kind == upstream.ErrBadParams || kind == upstream.ErrChannelInvalid {
+				// 渠道校验（11128 "conversation id missing"）与请求体解析失败同一哲学：
+				// 头族是否齐全由**出站构造**决定，换账号不改变任何头——轮转必然重复失败，
+				// 且会掩盖真实病因（用户看到"请求被拦截，请重新发送"，误以为是内容问题）。
+				// 立即透传上游原文回 400，让渠道维度的失败可见。
 				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 				fail(acct.UID)
 				msg := string(respBody)
+				code := "bad_params"
 				if strings.TrimSpace(msg) == "" {
 					msg = "chat request body was rejected by upstream"
 				}
-				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
-					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
+				if kind == upstream.ErrChannelInvalid {
+					code = "channel_invalid"
+					if strings.TrimSpace(msg) == "" {
+						msg = "chat request was rejected by upstream channel validation"
+					}
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, code, msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
 				return
@@ -1406,6 +1417,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrImageInvalid:
 		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
+	case upstream.ErrChannelInvalid:
+		// 渠道校验拦截（400 + 11128 "conversation id missing"）：出站头族不齐（缺
+		// X-Conversation-* 三件套任一项）。头是网关构造的，换账号不改变任何头——
+		// 零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked 待遇）；
+		// chatCompletions 已 fail-fast 400 透传原文、终止轮转。
+		// 修好 injectConversationHeaders 后本分支应不再触发（保留作可观测兜底：
+		// 若真机仍命中，说明渠道校验还要求别的头，届时按 400 原文排查）。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关侧不再截断，均为客户端畸形 JSON）。换了账号照样 400，

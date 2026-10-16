@@ -41,6 +41,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrChannelInvalid                // 渠道校验拦截（400 + 11128 "conversation id missing" / unapproved channel）→ 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -68,6 +69,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrChannelInvalid:
+		return "channel_invalid"
 	case ErrAccountFault:
 		return "account_fault"
 	case ErrClient:
@@ -151,6 +154,25 @@ var contentBlockedMarkers = []string{
 	"blocked by security policy",
 	"unapproved channel",
 	"illegal api invocation",
+}
+
+// channelInvalidMarkers 渠道校验拦截关键词（HTTP 400）。
+//
+// 定位：与内容策略拦截（contentBlockedMarkers）**同码不同因**——上游对两者都回
+// code=11128，但 msg 不同：
+//   - "blocked by security policy" → 内容审核（ErrContentBlocked，走降级重试）
+//   - "conversation id missing"    → **渠道校验**（本次新增 ErrChannelInvalid）
+//
+// 区分必要性：渠道校验失败是「请求没带齐官方客户端头族」，重试一万次也不会成功
+// ——头是同一个头。若误归 ErrContentBlocked，applyErrorPolicy 会走降级重试链，
+// 把确定性失败伪装成"内容被拦"，既误导排查又白烧账号配额。
+//
+// displayTips 原文印证这是渠道维度而非内容维度：
+// 「这次调用没通过渠道校验，可能不是官方客户端发出的。请用官方版本重新发送。」
+//
+// 注："unapproved channel" 已是 contentBlockedMarkers 成员（历史语义），此处不重复。
+var channelInvalidMarkers = []string{
+	"conversation id missing",
 }
 
 // badParamsMarkers 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
@@ -576,6 +598,13 @@ func Classify(status int, body string) ErrKind {
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
 	if status >= 400 {
+		// 渠道校验先判：与内容策略同为 11128，但语义是「头族不齐」而非「内容被审」。
+		// 必须在 contentBlockedMarkers 之前——否则被更宽的内容拦截层吞掉，走降级重试。
+		for _, m := range channelInvalidMarkers {
+			if strings.Contains(lower, m) {
+				return ErrChannelInvalid
+			}
+		}
 		for _, m := range contentBlockedMarkers {
 			if strings.Contains(lower, m) {
 				return ErrContentBlocked
