@@ -1,10 +1,12 @@
 // Package headers 构造三类上游请求头（common / chat / billing / refresh）。
-// 规则来自 docs/api-reference.md §0/§4/§6。
+// 规则来自抓包实测（docs/api-reference.md §0/§4/§6 —— 该文档不在本仓库，见
+// session/ids.go 与下方 injectConversationHeaders 的实测注释）。
 package upstream
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"net/http"
 	"strings"
 
@@ -185,7 +187,8 @@ func (c *Client) injectCodeBuddyRequest(req *http.Request) {
 // 复用同值；TraceID 透传入站值（空 = 回落 conversationRequestID）。
 // messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
 type ChatMeta struct {
-	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
+	ConversationID        string // X-Conversation-ID：body 提取的入站值（透传优先，空则回落 SessionKey/现造）
+	SessionKey            string // 会话粘性键：ConversationID 为空时的次级兜底（无 body 会话概念的调用方填）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
 }
@@ -256,8 +259,11 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 
 // injectConversationHeaders 注入官方客户端会话头族（issue #35 后台聚合）。
 // 头族分四层，各司其职：
-//   - X-Conversation-ID：会话级，多轮稳定（body 的 conversationId）。空则不发——
-//     透传客户端原值优先，客户端没给就不伪造，避免误导后台建错会话。
+//   - X-Conversation-ID：会话级，多轮稳定（body 的 conversationId）。透传客户端原值
+//     优先；客户端没给时**不再留空**——上游按「三件套是否齐全」做渠道校验，缺任一头
+//     即 400 code=11128 "conversation id missing"（displayMsg「请求被拦截，请重新发送」，
+//     displayTips「这次调用没通过渠道校验，可能不是官方客户端发出的」）。兜底顺序：
+//     meta.ConversationID → meta.SessionKey → 现造 32 hex（见 resolveConversationID）。
 //   - X-Conversation-Request-ID：**对话轮级聚合主键**，必发。一次 user send 内的
 //     所有 tool call/重试/换号/降级复用同一个 → 后台按它聚合成一条（不再碎片化）。
 //   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex）。
@@ -274,9 +280,7 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 		convReqID = session.NewMessageID()
 	}
 	messageID := session.NewMessageID()
-	if meta.ConversationID != "" {
-		req.Header.Set("X-Conversation-ID", meta.ConversationID)
-	}
+	req.Header.Set("X-Conversation-ID", c.resolveConversationID(meta))
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)
@@ -293,6 +297,38 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	req.Header.Set("X-B3-TraceId", b3Trace)
 	req.Header.Set("X-B3-SpanId", messageID[:16])
 	req.Header.Set("X-B3-Sampled", "1")
+}
+
+// resolveConversationID 解析本次出站 X-Conversation-ID 的取值，**恒非空**。
+//
+// 上游渠道校验要求 X-Conversation-ID / X-Conversation-Request-ID /
+// X-Conversation-Message-ID 三件套齐全：缺任一头即 400 code=11128
+// "conversation id missing"（displayTips「这次调用没通过渠道校验」）。此前本头是
+// 条件发送（meta 空则跳过），于是三个调用方必然缺头——blackcat/autotask 传零值
+// ChatMeta{}，handler 在无会话键时 convID 也为空。改为恒发，语义与
+// ConversationRequestID 的零值兜底（上方 convReqID）一致。
+//
+// 兜底优先级（透传优先，不伪造客户端原值）：
+//  1. meta.ConversationID —— 客户端 body 的 conversationId，或 handler 的 sessKey；
+//  2. meta.SessionKey     —— 零值 ChatMeta 的调用方（blackcat/autotask）无 body 会话
+//     概念，用它保持「同会话稳定」而非每请求乱跳；
+//  3. 现造 32 hex         —— 一次性合成对话（无任何会话身份），对齐官方形态。
+//
+// 与 ConversationRequestID 的差异：本头是**会话级**（多轮稳定，利于上游 prompt
+// cache 与后台按对话聚合），故优先复用稳定键；RequestID 是轮级聚合主键，各自独立。
+func (c *Client) resolveConversationID(meta ChatMeta) string {
+	if meta.ConversationID != "" {
+		return meta.ConversationID
+	}
+	if meta.SessionKey != "" {
+		return meta.SessionKey
+	}
+	// 走到这里说明调用方连会话键都没给（零值 meta）。此前该形态直接不发头 →
+	// 必被渠道校验拦截。现造一个并留痕：真机验证时能区分「我们没发」与「发了
+	// 上游不认」——前者是本分支命中，后者不会出现本日志。
+	id := session.NewMessageID()
+	log.Printf("chat: minted fallback X-Conversation-ID (zero-value ChatMeta) id=%s", id)
+	return id
 }
 
 // validTraceID 判断 B3 TraceId 是否合法：16 或 32 位 hex（大小写均可）。

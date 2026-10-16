@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 const (
@@ -445,8 +446,15 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	h.Set("X-Domain", c.chatBase(a))
 	h.Set("X-Product", "SaaS")
 	h.Set("X-User-Id", a.UID)
+	// 渠道校验三件套：本路径手搓头、不走 ChatHeaders，此前只设了 X-Conversation-ID，
+	// 缺 Request-ID / Message-ID 两个——上游按「三件套齐全」校验，缺任一即 400
+	// code=11128 "conversation id missing"（渠道校验拦截）。此处补齐，头集其余部分
+	// 刻意保持原样（本路径走 c.HTTP 与独立 UA，有意与主 chat 路径区分）。
+	messageID := session.NewMessageID()
 	h.Set("X-Conversation-ID", conversationID)
-	h.Set("X-Request-ID", fmt.Sprintf("%d", time.Now().UnixNano()))
+	h.Set("X-Conversation-Request-ID", conversationID)
+	h.Set("X-Conversation-Message-ID", messageID)
+	h.Set("X-Request-ID", messageID)
 	h.Set("X-Agent-Intent", "craft")
 	h.Set("X-Agent-Type", "main")
 	h.Set("X-IDE-Name", "WorkBuddy")
