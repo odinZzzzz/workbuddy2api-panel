@@ -3,8 +3,15 @@ name: go-binaries
 # 可运行二进制构建/发布：
 #   - PR / push main → 测试 + 五平台编译验证（产物仅存 artifact，不发布）
 #   - push v* tag    → 同上 + 打包上传到 GitHub Release（zip/tar.gz + checksums）
+#   - 手动 dispatch  → inputs.tag 留空 = 只构建验证；填 tag（或在上方「Use workflow from」
+#                      下拉框直接选一个 tag）则等同该 tag 的发布，作为「事件没来」时的补发通道
 # 固化的发布纪律（曾两次人祸，见仓库 HANDOFF）：-s -w 剥离、二进制版本串 == 源码
 # appVersion、tag 版本 == 源码版本（-ci 后缀的测试 tag 豁免，用于演练发布线）。
+#
+# 踩过的坑（2026-10 实测）：fork 出来的仓库在 Settings → Actions 启用之前，任何 push 都不
+# 产生 run；用 GitHub 网页 Release 界面建的 tag 也不产生 push 事件 —— 这两种情况下 publish
+# 都一动不动且不报错。遇到「推了 tag 但 Release 没更新」，先用 workflow_dispatch 指定 tag
+# 补发，别急着重打 tag。
 on:
   push:
     branches: [main]
@@ -18,9 +25,14 @@ on:
       - "config.example.json"
       - ".github/workflows/go-binaries.yml"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（如 v1.13.0）；留空 = 只构建验证，不发 Release"
+        required: false
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -29,8 +41,31 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      # 本次要发布的 tag；空串 = 不发布（PR / push main / 未填 tag 的 dispatch）
+      tag: ${{ steps.rel.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: 解析发布 tag
+        id: rel
+        run: |
+          REQ="${{ inputs.tag }}"
+          if [ -n "$REQ" ]; then
+            TAG="$REQ"
+          else
+            case "$GITHUB_REF" in
+              refs/tags/*) TAG="$GITHUB_REF_NAME" ;;
+              *) TAG="" ;;
+            esac
+          fi
+          if [ -n "$TAG" ] && [ "$TAG" = "${TAG#v}" ]; then
+            echo "::error::tag 必须以 v 开头（当前：$TAG）"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "resolved publish tag: '${TAG:-<none>}'"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -51,6 +86,8 @@ jobs:
           - { goos: darwin, goarch: arm64, ext: .tar.gz }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -98,47 +135,76 @@ jobs:
           path: ${{ env.name }}
           retention-days: 7
 
-  # 仅 tag 触发：校验 tag == 源码版本（-ci 演练 tag 豁免）→ 汇总资产 → 建 Release
+  # tag push（或 dispatch 指定 tag）才发布：校验 tag == 源码版本（-ci 演练 tag 豁免）
+  # → 汇总资产 → 建/更新 Release
   publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build]
+    if: needs.test.outputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.test.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.test.outputs.tag }}
           fetch-depth: 0   # 取历史 tag 算 compare 链接
       - name: tag 与源码版本一致性断言
         run: |
           SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
           SRC="${SRC%-panel}"   # appVersion 带 -panel 后缀，比对前剥掉
-          TAG="${GITHUB_REF_NAME#v}"
-          if [[ "$GITHUB_REF_NAME" != *-ci ]]; then
-            if [[ "$TAG" != "$SRC" ]]; then
-              echo "::error::tag $GITHUB_REF_NAME 与源码 appVersion=$SRC 不一致（先提交版本号再打 tag）"
-              exit 1
-            fi
-          else
-            echo "演练 tag（-ci 后缀）跳过一致性断言：tag=$TAG src=$SRC"
-          fi
+          VER="${TAG#v}"
+          case "$TAG" in
+            *-ci) echo "演练 tag（-ci 后缀）跳过一致性断言：tag=$VER src=$SRC" ;;
+            *)
+              if [ "$VER" != "$SRC" ]; then
+                echo "::error::tag $TAG 与源码 appVersion=$SRC 不一致（先提交版本号再打 tag）"
+                exit 1
+              fi
+              echo "版本一致：tag=$TAG src=$SRC"
+              ;;
+          esac
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: checksums
-        run: cd dist && sha256sum *.zip *.tar.gz > checksums.txt && ls -la
+      - name: 资产清点 + checksums
+        run: |
+          cd dist
+          ls -1 *.zip *.tar.gz
+          N=$(ls -1 *.zip *.tar.gz | wc -l | tr -d ' ')
+          if [ "$N" != "5" ]; then
+            echo "::error::期望 5 个平台包，实际 $N 个（download-artifact 没捞到全部？）"
+            exit 1
+          fi
+          sha256sum *.zip *.tar.gz > checksums.txt
+          ls -la
       - name: 上一版 tag（compare 链接用）
         id: prev
         run: |
-          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
-          echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+      - name: 生成 Release 说明
+        env:
+          PREV: ${{ steps.prev.outputs.prev }}
+        run: |
+          {
+            echo "CI 自动构建发布（五平台二进制 + checksums）。"
+            echo
+            if [ -n "$PREV" ]; then
+              echo "完整变更：https://github.com/${{ github.repository }}/compare/${PREV}...${TAG}"
+            else
+              echo "首次发布，无上一版 tag 可比。"
+            fi
+          } > release-notes.md
+          cat release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}-panel
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          body: |
-            CI 自动构建发布（五平台二进制 + checksums）。
-
-            完整变更：https://github.com/${{ github.repository }}/compare/${{ steps.prev.outputs.prev }}...${{ github.ref_name }}
+          # dispatch 场景下 github.ref 是分支，必须显式给 tag_name
+          tag_name: ${{ needs.test.outputs.tag }}
+          name: ${{ needs.test.outputs.tag }}
+          prerelease: ${{ contains(needs.test.outputs.tag, '-') }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
           files: dist/*
