@@ -391,3 +391,172 @@ func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(h)
 }
+
+// ── 句式级指纹（DSH 自我介绍句 / GUI 描述段 / 品牌缩减）─────────────────────
+//
+// 这三条规则来自两家的真机实测（2026-10）：上游对「自我介绍句式 + 品牌」做句式判定，
+// 不是对品牌名判定；同一句在 system / developer / assistant 里 400，在 user / tool
+// 里 200。因此规则必须①认句式而非品牌、②只在身份载体上生效。
+const (
+	dshIdentity = "You are an AI agent powered by DeepSeek Harness."
+	dshCoding   = "You are a coding agent powered by the deepseek-v4.1-flash model."
+	dshNeutral  = "You are a helpful AI assistant."
+)
+
+// TestDshIdentityRewritten 两句真实原文整句替换为中性句（不留残句）。
+func TestDshIdentityRewritten(t *testing.T) {
+	for _, in := range []string{dshIdentity, dshCoding} {
+		if out := sanitizeText(in); out != dshNeutral {
+			t.Errorf("%q -> %q want %q", in, out, dshNeutral)
+		}
+	}
+}
+
+// TestDshIdentityBuiltOnVariant built on 变体同样命中（按句式而非品牌判定）。
+func TestDshIdentityBuiltOnVariant(t *testing.T) {
+	in := "You are an AI assistant built on DeepSeek."
+	if out := sanitizeText(in); out != dshNeutral {
+		t.Errorf("%q -> %q", in, out)
+	}
+}
+
+// TestDshIdentityCaseInsensitive 全大写变体也必须命中：预检的 strings.Contains 快速
+// 路径是大小写敏感的，只在特征表里补小写串会让改写层永远执行不到（两家都踩过）。
+func TestDshIdentityCaseInsensitive(t *testing.T) {
+	in := "YOU ARE AN AI AGENT POWERED BY DEEPSEEK HARNESS."
+	if out := sanitizeText(in); out != dshNeutral {
+		t.Errorf("upper-case variant missed: %q -> %q", in, out)
+	}
+	if !hasFingerprint("you are an ai agent powered by x.") {
+		t.Error("hasFingerprint 应认得小写句式")
+	}
+}
+
+// TestDshModelNameWithDotsFullyReplaced 模型名自带点（deepseek-v4.1-flash）：句尾必须
+// 按「点 + 空白/行尾」收口，否则会停在 "v4."、把 "1-flash model." 留在正文里。
+func TestDshModelNameWithDotsFullyReplaced(t *testing.T) {
+	out := sanitizeText(dshCoding)
+	if strings.Contains(out, "1-flash") || strings.Contains(out, "model.") {
+		t.Errorf("句子只替换了一半: %q", out)
+	}
+}
+
+// TestDshFollowingInstructionsPreserved 句号后的内容原样保留（那是客户端的行为契约），
+// 且句尾空白要接回去——吃掉的话 "assistant.Then answer briefly." 会粘成一句。
+func TestDshFollowingInstructionsPreserved(t *testing.T) {
+	in := dshIdentity + "\nUse the read tool to inspect files.\nDo not guess."
+	out := sanitizeText(in)
+	if !strings.Contains(out, "Use the read tool to inspect files.\nDo not guess.") {
+		t.Errorf("后文被改动: %q", out)
+	}
+	if strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("指纹残留: %q", out)
+	}
+	in2 := dshIdentity + " Then answer briefly."
+	if out2 := sanitizeText(in2); !strings.Contains(out2, "assistant. Then answer briefly.") {
+		t.Errorf("句尾空白被吃掉: %q", out2)
+	}
+}
+
+// TestDshRewriteIdempotent 幂等：同一 body 会被预处理两次（PrepareBody 与 ChatStream）。
+func TestDshRewriteIdempotent(t *testing.T) {
+	once := sanitizeText(dshIdentity)
+	if twice := sanitizeText(once); twice != once {
+		t.Errorf("非幂等: %q -> %q", once, twice)
+	}
+}
+
+// TestDshPlainTextNotTouched 反例：普通自我介绍与无关句子不得改写。
+func TestDshPlainTextNotTouched(t *testing.T) {
+	for _, in := range []string{
+		"You are a helpful assistant.",
+		"You are a helpful AI assistant built for coding tasks",
+		"The agent powered by the harness failed.",
+		"please use main branch for this repo",
+	} {
+		if out := sanitizeText(in); out != in {
+			t.Errorf("不应改写: %q -> %q", in, out)
+		}
+	}
+}
+
+// TestDshGuiParagraphRewritten GUI 描述段：上游按「A 句 + B 句连续出现」整段判定，
+// 改任一句都会失配。这里只改 A 句尾的语序，品牌与句意不变。
+func TestDshGuiParagraphRewritten(t *testing.T) {
+	in := `You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", they mean this GUI.`
+	out := sanitizeText(in)
+	if !strings.Contains(out, "whose URL is named in the runtime context.") {
+		t.Errorf("GUI 段句尾未改写: %q", out)
+	}
+	if strings.Contains(out, "whose URL the runtime context names") {
+		t.Errorf("原句尾仍在: %q", out)
+	}
+	if !strings.Contains(out, `When the user refers to "this page", they mean this GUI.`) {
+		t.Errorf("后一句被改动: %q", out)
+	}
+}
+
+// TestBrandShrinkKeepsIdentifiers 品牌缩减只吃空格/制表符：路径与下划线标识符必须
+// 原样保留（带连字符/下划线的形态在实测里是放行的）。
+func TestBrandShrinkKeepsIdentifiers(t *testing.T) {
+	in := "DeepSeek Harness lives at /opt/deepseek-harness/app and deepseek_harness."
+	out := sanitizeText(in)
+	if strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("品牌未缩减: %q", out)
+	}
+	if !strings.Contains(out, "/opt/deepseek-harness/app") || !strings.Contains(out, "deepseek_harness") {
+		t.Errorf("路径/标识符被改坏: %q", out)
+	}
+}
+
+// TestSanitizeMessagesScopeByRole 作用域：只有身份载体（system / developer /
+// assistant）走句式层；user / tool 是用户数据，实测上游对它们放行，改了只会让模型
+// 看到与磁盘不一致的内容。
+func TestSanitizeMessagesScopeByRole(t *testing.T) {
+	ms := []any{
+		map[string]any{"role": "system", "content": dshIdentity},
+		map[string]any{"role": "developer", "content": dshIdentity},
+		map[string]any{"role": "assistant", "content": dshIdentity},
+		map[string]any{"role": "user", "content": dshIdentity},
+		map[string]any{"role": "tool", "content": dshIdentity},
+	}
+	if !sanitizeMessages(ms) {
+		t.Fatal("sanitizeMessages 应报告改动")
+	}
+	for i, want := range []string{dshNeutral, dshNeutral, dshNeutral, dshIdentity, dshIdentity} {
+		got, _ := ms[i].(map[string]any)["content"].(string)
+		if got != want {
+			t.Errorf("role=%v content=%q want %q", ms[i].(map[string]any)["role"], got, want)
+		}
+	}
+}
+
+// TestToolCallArgsNotIdentityScoped tool_calls 参数是应用数据，不做句式改写
+// （逐字表与 header 剥离照旧生效）。
+func TestToolCallArgsNotIdentityScoped(t *testing.T) {
+	ms := []any{map[string]any{
+		"role": "assistant",
+		"tool_calls": []any{map[string]any{
+			"function": map[string]any{"name": "f", "arguments": `{"note":"` + dshIdentity + `"}`},
+		}},
+	}}
+	if sanitizeMessages(ms) {
+		t.Fatal("tool_calls 参数不应被句式层改写")
+	}
+}
+
+// TestPrepareBodySanitizesDshPrompt 出站边界：PrepareBody 之后 wire body 里不得残留
+// DSH 自我介绍句；developer 角色（DSH 的运行时上下文用它承载）同样要覆盖。
+func TestPrepareBodySanitizesDshPrompt(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[` +
+		`{"role":"system","content":"` + dshIdentity + `"},` +
+		`{"role":"developer","content":"` + dshCoding + `"}]}`)
+	out := PrepareBodyOpt(body, true)
+	s := string(out)
+	if strings.Contains(s, "DeepSeek Harness") {
+		t.Errorf("wire body 仍含 DSH 指纹: %s", s)
+	}
+	if strings.Count(s, dshNeutral) != 2 {
+		t.Errorf("两句都该替换为中性句: %s", s)
+	}
+}

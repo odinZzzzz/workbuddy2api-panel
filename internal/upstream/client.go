@@ -41,7 +41,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrChannelInvalid                // 渠道校验拦截（400 + 11128 "conversation id missing" / unapproved channel）→ 请求级错误：不罚号、不轮转，末端透传原文
+	ErrChannelInvalid                // 渠道校验拦截（400 + 渠道校验业务码 + 渠道校验文案 / "conversation id missing"）→ 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -170,9 +170,67 @@ var contentBlockedMarkers = []string{
 // displayTips 原文印证这是渠道维度而非内容维度：
 // 「这次调用没通过渠道校验，可能不是官方客户端发出的。请用官方版本重新发送。」
 //
-// 注："unapproved channel" 已是 contentBlockedMarkers 成员（历史语义），此处不重复。
+// 注："unapproved channel" 仍是 contentBlockedMarkers 成员，**不要**搬到这里：它是我们
+// 线上 400 的原文，必须继续走 ErrContentBlocked → 降级重试（搬走等于废掉唯一救回路径）。
+// 本切片只收「文案明确说是渠道校验」的形态，见 IsChannelCheck。
 var channelInvalidMarkers = []string{
 	"conversation id missing",
+}
+
+// channelCheckCode / channelCheckCodeDashed 渠道校验的业务码两种写法（上游都出现过）。
+// 用 hasBusinessCode 做**结构化**比较（遍历 code 字段），不做整段子串匹配：错误体还带
+// requestId 等字段，裸串匹配会撞在 ID 上（与 IsModelBlocked 同口径）。
+const (
+	channelCheckCode       = "11128"
+	channelCheckCodeDashed = "11-128"
+)
+
+// HasChannelCheckCode 报告 body 的业务码是否属于渠道校验家族。
+//
+// 只用于「这个 400 是不是渠道校验码」这一层判断，**不**单独作为分类依据：同一个码还承载
+// 内容审核拦截，那种必须保持原行为（见 IsChannelCheck）。
+func HasChannelCheckCode(body string) bool {
+	if body == "" {
+		return false
+	}
+	// 轻量预检：两个码都只含数字与横线，先做一次子串筛，命中才解析 JSON。
+	if !strings.Contains(body, channelCheckCode) && !strings.Contains(body, channelCheckCodeDashed) {
+		return false
+	}
+	return hasBusinessCode(body, channelCheckCode) || hasBusinessCode(body, channelCheckCodeDashed)
+}
+
+// IsChannelCheck 判上游的「渠道校验」拒绝：业务码 + 文案**双条件**。
+//
+// 为什么必须双条件：同一个业务码还承载内容审核拦截（"blocked by security policy" /
+// "unapproved channel"），那种必须保持原行为（不罚号、走降级重试）。只认码会把内容
+// 拦截一并归成渠道校验，当场废掉唯一的救回路径。
+//
+// 为什么文案集**不含** "unapproved channel"：那正是我们线上 400 的原文，它必须继续落
+// contentBlockedMarkers → ErrContentBlocked 才能走降级重试。
+//
+// 为什么这个判定必须先于 accountFaultMarkers：上游渠道校验的封套可能带历史遗留的
+// msg:"request illegal"，而那条历史语义是「账号被封 → 硬禁用」。误判的后果是账号在面板
+// 上显示「已禁用（需重新登录）」而凭证完全正常，用户重扫也没用（2026-10 现场）。
+func IsChannelCheck(body string) bool {
+	if !HasChannelCheckCode(body) {
+		return false
+	}
+	lower := strings.ToLower(body)
+	// **内容/指纹拦截优先**：同一个码也承载「内容审核」与「指纹误报」，而真实封套会把
+	// 两套文案一起给出——2026-10-27 真机抓到的 11-128 响应同时含
+	//   msg: "Illegal API invocation from an unapproved channel"（内容/指纹措辞）
+	//   displayTips.en: "…channel verification… from an official client…"（渠道措辞）
+	// 若让渠道校验先赢，这条就从「降级重试 → 200」退化成「硬 400 给客户端」，
+	// 等于把唯一的救回路径关掉。所以带内容拦截措辞的一律不算渠道校验。
+	for _, m := range contentBlockedMarkers {
+		if strings.Contains(lower, m) {
+			return false
+		}
+	}
+	return strings.Contains(body, "渠道校验") ||
+		strings.Contains(lower, "channel verification") ||
+		strings.Contains(lower, "official client")
 }
 
 // badParamsMarkers 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
@@ -528,6 +586,11 @@ func Classify(status int, body string) ErrKind {
 		if strings.Contains(body, m) {
 			return ErrSessionDead
 		}
+	}
+	// 渠道校验（同码不同因）：必须在 accountFaultMarkers 之前判，理由见 IsChannelCheck。
+	// 归 ErrChannelInvalid —— 请求级（头/指纹不齐，换号无用）：不罚号、不轮转、透传原文。
+	if IsChannelCheck(body) {
+		return ErrChannelInvalid
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
