@@ -36,6 +36,20 @@ func (g *degradeGate) Trigger() {
 	}
 }
 
+// Snapshot 一次取回「是否降级 + 结束时刻」，供 /status 与面板展示。
+//
+// 为什么必须能读出来：降级期是**静默改变出站提示词**——一次 400 就换来「今天所有请求
+// 都在用另一套 system prompt」，而客户端那边只表现为「模型变笨了」。不暴露状态的话，
+// 这类故障只能靠人猜。未触发/已过期时返回 (false, 零值)。
+func (g *degradeGate) Snapshot() (bool, time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !time.Now().Before(g.until) {
+		return false, time.Time{}
+	}
+	return true, g.until
+}
+
 // nextMidnightCST 返回 now 之后最近的 Asia/Shanghai 00:00 时刻（纯函数，方便单测）。
 //
 // 边界语义：

@@ -76,3 +76,26 @@ func TestDegradeGateTriggerNoRenewal(t *testing.T) {
 		t.Errorf("Trigger during active should not renew: first=%v second=%v", first, second)
 	}
 }
+
+// TestDegradeGateSnapshot 只读快照：未触发 → (false, 零值)；触发后 → (true, 次日 00:00)。
+// 这个快照是「降级可见性」的唯一出口（/status 与面板 overview 都走它）。
+func TestDegradeGateSnapshot(t *testing.T) {
+	var g degradeGate
+	if active, until := g.Snapshot(); active || !until.IsZero() {
+		t.Fatalf("fresh gate snapshot = (%v, %v), want (false, zero)", active, until)
+	}
+	g.Trigger()
+	active, until := g.Snapshot()
+	if !active {
+		t.Fatal("Trigger 后 Snapshot 应报告 active")
+	}
+	if until.IsZero() {
+		t.Fatal("active 时 until 不能是零值（面板要显示恢复时刻）")
+	}
+	g.mu.Lock()
+	want := g.until
+	g.mu.Unlock()
+	if !until.Equal(want) {
+		t.Errorf("Snapshot until=%v want %v", until, want)
+	}
+}

@@ -56,6 +56,10 @@ type Config struct {
 	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
 	StickyCount func() int
 
+	// DegradeStatus 提示词降级窗口快照（active, until）；nil 时 overview 报「未降级」。
+	// 只读：触发只发生在网关请求路径上，面板不提供手动开关。
+	DegradeStatus func() (bool, time.Time)
+
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
@@ -233,6 +237,13 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
 	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
 	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
+	degradeActive := false
+	var degradeUntilAny any
+	if p.cfg.DegradeStatus != nil {
+		if active, until := p.cfg.DegradeStatus(); active {
+			degradeActive, degradeUntilAny = true, until
+		}
+	}
 	sticky := 0
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
@@ -253,6 +264,10 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
+		// degrade_active / degrade_until 提示词降级窗口：降级期出站 system prompt 已被
+		// 静默换成中性提示词，客户端只表现为「模型变笨」。前端据此亮橙色标记。
+		"degrade_active": degradeActive,
+		"degrade_until":  degradeUntilAny,
 	})
 }
 

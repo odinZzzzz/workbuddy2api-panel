@@ -216,6 +216,13 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
+	// 提示词降级状态：降级期意味着「出站 system prompt 已被静默换掉」，
+	// 客户端只会表现为模型变笨。此键让运维一眼看到「今天是不是在降级」。
+	degradeActive, degradeUntil := h.degrade.Snapshot()
+	var degradeUntilAny any
+	if degradeActive {
+		degradeUntilAny = degradeUntil
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
@@ -244,8 +251,18 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
 		},
+		// degrade_active / degrade_until 提示词降级窗口（进程内存，重启清零；
+		// 未降级时 active=false、until=null）。零回归：只增键。
+		"degrade_active": degradeActive,
+		"degrade_until":  degradeUntilAny,
 	})
 }
+
+// DegradeSnapshot 暴露只读降级状态（供面板 /overview 展示）。
+//
+// 只读：触发仍只发生在 chatCompletions 内部（内容拦截误报），面板不能也不该手动
+// 开关降级——那样会把「上游真的拦内容」伪装成「已处理」。
+func (h *Handler) DegradeSnapshot() (bool, time.Time) { return h.degrade.Snapshot() }
 
 // countsMapFrom 把 CountsDetailed 五元组打包成 /status 的域分组建模。
 func countsMapFrom(total, healthy, cooling, disabled, inFlightFull int) map[string]int {
@@ -873,7 +890,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
 				releaseHeld()
-				log.Printf("content-blocked (likely fingerprint false positive) -> degraded prompt retry")
+				// 降级是**静默换掉出站提示词**，必须留下能定位的现场：哪个域、哪个模型、
+				// 哪个号、第几次尝试、换到什么时候。没有这行时只能从「模型变笨了」倒推。
+				_, degradeUntil := h.degrade.Snapshot()
+				log.Printf("WARN: [degrade] content-blocked (likely system-prompt fingerprint false positive) -> serving degraded prompt until %s (realm=%q model=%q acct=%s attempt=%d)",
+					degradeUntil.Format(time.RFC3339), realm, bareModel,
+					logfmt.Label(acct.UID, acct.Nickname), i+1)
 				continue
 			}
 			if kind == upstream.ErrContentBlocked {
@@ -1400,6 +1422,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
 		if strings.Contains(strings.ToLower(body), "request illegal") {
+			// 第二道护栏：渠道校验家族的业务码**永远不是** 11140 账号封禁——同码不同因，
+			// 封禁码是 11140。没有这条时，一次渠道校验变体就能把好号打进「已禁用（需重新
+			// 登录）」：面板显示需要重扫，而凭证从来没问题（2026-10 现场，见 client.go
+			// IsChannelCheck 注释）。第一道在 Classify，这里兜将来分类路径变化的底。
+			if upstream.HasChannelCheckCode(body) {
+				h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "channel check (not a ban)")
+				return
+			}
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
 		}

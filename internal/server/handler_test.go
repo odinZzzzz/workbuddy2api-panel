@@ -1832,3 +1832,147 @@ func TestChatMarkupRepairStrictModeRejectsUndeclaredTool(t *testing.T) {
 		t.Fatalf("未声明的工具名不得转换: %#v", msg["tool_calls"])
 	}
 }
+
+// ── 渠道校验 / 降级可见性（B/C 层）─────────────────────────────────────────
+//
+// 业务码拼接构造：它正是判据本身，手抄整串极易写错（写错后测试会「通过」一个不存在的判据）。
+const (
+	channelCodeDigits = "11" + "128" // 数字形态（上游实测写法）
+)
+
+// channelCheckBody 一次渠道校验的真实封套：业务码 + 渠道校验文案 + 历史遗留的
+// request illegal（后者正是把好号误判成「已禁用」的触发点）。
+func channelCheckBody() string {
+	return `{"code":` + channelCodeDigits + `,"msg":"request illegal","requestId":"0a1b2c",` +
+		`"displayTips":{"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的。",` +
+		`"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`
+}
+
+// TestChannelCheckNeverDisablesAccount 渠道校验是**请求级**失败：换号不改变任何头，
+// 但账号本身是好的——绝不能标「已禁用（需重新登录）」（那会把用户引向重扫凭证，
+// 而凭证从来没问题）。
+func TestChannelCheckNeverDisablesAccount(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 400, channelCheckBody(), false })
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("渠道校验绝不能禁用账号: %+v", st)
+	}
+	if st.Cooling {
+		t.Errorf("渠道校验不该冷却账号（它不是账号的问题）: %+v", st)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400（请求级失败透传）", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), channelCodeDigits) {
+		t.Errorf("客户端必须看到上游原文: %s", rec.Body.String())
+	}
+}
+
+// TestApplyErrorPolicyChannelCheckCodeNeverDisables handler 侧护栏：即便分类层把渠道校验
+// 错归成账号级（ErrAccountFault），带渠道校验业务码的 body 也只能软冷却、绝不禁用。
+func TestApplyErrorPolicyChannelCheckCodeNeverDisables(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h.applyErrorPolicy("u1", upstream.ErrAccountFault, channelCheckBody(), "glm-5.2", nil)
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("渠道校验业务码永远不是 11140 封禁: %+v", st)
+	}
+	if !st.Cooling {
+		t.Error("应软冷却让它退出轮换（否则每次选中都失败）")
+	}
+}
+
+// TestApplyErrorPolicyRealBanStillDisables 真封禁行为不变：护栏不能把 11140 也放过去。
+func TestApplyErrorPolicyRealBanStillDisables(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"code":11140,"msg":"request illegal"}`, "glm-5.2", nil)
+	st, _ := p.Status("u1")
+	if !st.Disabled {
+		t.Fatalf("11140 request illegal 仍须硬禁用: %+v", st)
+	}
+}
+
+// TestUnapprovedChannelStillDegrades 回归红线：线上真实 400 原文
+// （"Illegal API invocation from an unapproved channel"）必须**继续**走内容拦截 → 降级
+// 重试 → 200。它是我们目前唯一能救回请求的路径，渠道校验判定不许把它吞掉。
+func TestUnapprovedChannelStillDegrades(t *testing.T) {
+	var calls int
+	// 2026-10-27 真机封套：msg 是内容/指纹措辞，displayTips 同时带渠道措辞。
+	blocked := `{"code":` + channelCodeDigits + `,"msg":"Illegal API invocation from an unapproved channel","requestId":"417f88002c00b26d9ab2ad8635c8c15f",` +
+		`"displayMsg":{"en":"Request blocked. Please send it again","zh":"请求被拦截，请重新发送"},` +
+		`"displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client.",` +
+		`"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的。"}}`
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				return &http.Response{StatusCode: 400,
+					Header: http.Header{"Content-Type": []string{"application/json"}},
+					Body:   io.NopCloser(strings.NewReader(blocked))}, nil
+			}
+			return &http.Response{StatusCode: 200,
+				Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:   io.NopCloser(strings.NewReader(sseOK))}, nil
+		})},
+		ChatBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"原始指纹"},{"role":"user","content":"hi"}]}`)))
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s（降级重试应救回请求）", rec.Code, rec.Body)
+	}
+	if calls != 2 {
+		t.Fatalf("want 2 upstream calls (400 + degraded retry), got %d", calls)
+	}
+	if active, _ := h.DegradeSnapshot(); !active {
+		t.Error("降级触发后状态必须可见（/status 与面板都读它）")
+	}
+}
+
+// TestStatusReportsDegradeWindow /status 透出降级窗口：未触发 active=false/until=null，
+// 触发后 active=true 且 until 是时间串。这是「降级不再静默」的后端契约。
+func TestStatusReportsDegradeWindow(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+
+	read := func() map[string]any {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+		var m map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("status not json: %v", err)
+		}
+		return m
+	}
+
+	before := read()
+	if before["degrade_active"] != false {
+		t.Errorf("degrade_active=%v want false", before["degrade_active"])
+	}
+	if before["degrade_until"] != nil {
+		t.Errorf("degrade_until=%v want null", before["degrade_until"])
+	}
+
+	h.degrade.Trigger()
+	after := read()
+	if after["degrade_active"] != true {
+		t.Errorf("degrade_active=%v want true", after["degrade_active"])
+	}
+	if s, _ := after["degrade_until"].(string); s == "" {
+		t.Errorf("degrade_until 应是非空时间串: %v", after["degrade_until"])
+	}
+}

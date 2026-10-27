@@ -262,6 +262,9 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	// 面板在 handler 之前构造，但 overview 要展示提示词降级状态（handler 内部状态）：
+	// 用迟绑闭包，请求期才解引用（服务尚未启动时 h 必已赋值；nil 兜底只为构造期安全）。
+	var h *server.Handler
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -274,6 +277,12 @@ func main() {
 		StickyCount: sessCount,
 		Version:     appVersion,
 		Live:        live,
+		DegradeStatus: func() (bool, time.Time) {
+			if h == nil {
+				return false, time.Time{}
+			}
+			return h.DegradeSnapshot()
+		},
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -291,7 +300,7 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
-	h := server.NewHandler(server.Config{
+	h = server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,

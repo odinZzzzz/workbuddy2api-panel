@@ -621,6 +621,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
       <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navRedis">-</span></div>
+      <div class="row" style="margin-top:5px;display:none" id="navDegradeRow"><span class="tag warn" id="navDegrade" title="出站 system prompt 已被换成中性提示词：客户端 system 提示词指纹被上游误判为渠道校验（400）。到期自动恢复，也可重启网关立即恢复。">提示词降级中</span></div>
     </div>
   </nav>
 
