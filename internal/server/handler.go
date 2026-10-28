@@ -136,6 +136,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Responses API 兼容层（Codex 0.165+ 只发这个端点）：内部翻译成 chat 请求体，
+	// 复用同一条治理链路（选号/轮转/熔断/粘性/脱敏/工具标记还原），见 responses.go。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)

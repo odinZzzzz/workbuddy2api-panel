@@ -709,6 +709,7 @@ http://127.0.0.1:7863/panel/
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/responses` | Bearer（`api_key` 非空时） | OpenAI **Responses API** 兼容层；流式 SSE 事件 / 非流式单对象；内部翻译成 chat 请求复用同一条治理链路（见[Responses API 兼容层](#responses-api-兼容层)） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
@@ -724,6 +725,70 @@ http://127.0.0.1:7863/panel/
 响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
 
 **宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+
+### Responses API 兼容层
+
+`POST /v1/responses` 让 **Codex CLI ≥ 0.165** 这类只发 Responses API 的客户端能直连本网关
+（该版本已移除 `wire_api = "chat"`，只认 `POST /v1/responses`；此前直连会 404）。
+
+**实现方式：边界翻译，不复制治理逻辑。** 处理器把 Responses 请求体翻译成一份
+`chat/completions` 请求体，然后**直接调用既有的 chat 处理器**，用一个 ResponseWriter
+适配器把 chat SSE 逐帧翻译回 Responses SSE。因此选号、轮转、熔断、冷却、会话粘性、
+指纹脱敏、提示词改写、原生工具调用标记还原（DSML）、用量统计与请求日志全部原样生效，
+两条协议的行为不会各自漂移。见 `internal/server/responses.go`。
+
+| Responses 字段 | 映射到 chat | 说明 |
+|---|---|---|
+| `instructions` | `messages[0]`（system） | 置顶插入 |
+| `input`（字符串 / item 数组） | `messages` | `message` → role/content；`function_call` → `assistant.tool_calls`（**相邻多个合并进同一条 assistant 消息**，chat 协议要求）；`function_call_output` → `tool` 消息；`reasoning` 丢弃（不回传上游，不伪造） |
+| `content` parts | 纯文本 → **字符串**；含图片 → `parts` 数组 | 纯文本落成数组形态会被上游报 `11101`（实测），故降级为字符串；`input_image` → `image_url` |
+| `tools[]`（扁平 `function`） | `tools[].function`（嵌套） | 非 `function` 类型（`web_search`/`local_shell` 等）网关不支持，忽略 |
+| `tool_choice` / `parallel_tool_calls` | 同名 | `{type:function,name}` 结构互转 |
+| `max_output_tokens` | `max_tokens` | |
+| `reasoning.effort` | `reasoning_effort` | 网关再按模型档位自动降级 |
+| `text.format`（json_schema） | `response_format` | |
+
+回程事件（流式）：`response.created` → `response.in_progress` →（文本）
+`response.output_item.added` + `response.content_part.added` + `response.output_text.delta`×N
++ `response.output_text.done` + `response.content_part.done` + `response.output_item.done`；
+（工具调用）`response.output_item.added` + `response.function_call_arguments.delta`×N
++ `response.function_call_arguments.done` + `response.output_item.done`；末尾统一
+`response.completed`（带 `usage` 与完整 `output`）。上游 error 帧 → `response.failed`。
+
+**非流式**（`stream:false`）：上游仍是流式（chat 侧恒流式），本层只累积不转发，
+末尾一次性返回标准 `response` 对象。
+
+**错误透传**：上游/网关返回非 200（全部账号冷却 503、内容拦截 400 等）时，本层
+**原样透传状态码与 OpenAI 错误 JSON**，不翻译成 SSE——错误语义与 `/v1/chat/completions` 完全一致。
+
+```bash
+# 非流式
+curl -s http://127.0.0.1:7863/v1/responses \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"cn:deepseek-v4.1-flash","input":"只回复两个字：收到","stream":false}'
+
+# 流式
+curl -N http://127.0.0.1:7863/v1/responses \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"cn:deepseek-v4.1-flash","input":"数到三","stream":true}'
+```
+
+Codex 侧配置（直连网关，不经 cc-switch 等本地代理）：
+
+```toml
+model_provider = "workbuddy"
+model = "cn:deepseek-v4.1-flash"
+
+[model_providers.workbuddy]
+name = "WorkBuddy2API"
+base_url = "http://ct-game.com:7863/v1"
+wire_api = "responses"
+experimental_bearer_token = "<api_key>"
+```
+
+**已知边界**：不实现 `GET /v1/responses/{id}`（`store:false` 语义，Codex 不依赖）；
+`include` / `store` / `prompt_cache_key` 等字段忽略；Responses 的 `reasoning` 输出项不回传
+（上游思维链经 `reasoning_content` 走 chat 侧，不映射成 Responses 的 reasoning item）。
 
 ### 流式行为细节
 

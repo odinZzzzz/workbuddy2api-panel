@@ -46,3 +46,5 @@ docs/
 *.zip
 server.exe
 .DS_Store
+wb2api-linux-amd64
+wb2api-linux-*
