@@ -60,6 +60,10 @@
     "mode": "passthrough",
     "file": ""
   },
+  "anthropic": {
+    "default_model": "cn:deepseek-v4.1-flash",
+    "aliases": {}
+  },
   "upstash": {
     "url": "",
     "token": ""

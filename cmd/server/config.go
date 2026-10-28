@@ -164,6 +164,18 @@ type Config struct {
 		File string `json:"file"`
 	} `json:"prompt"`
 
+	// Anthropic Anthropic Messages 兼容层（POST /v1/messages）的模型名映射。
+	// Anthropic 系客户端（Claude Code / cc-switch 的 claude 通道）发的是
+	// claude-sonnet-5 这类原生命名，上游没有这些模型（11102）。这里把它们改写成
+	// 网关真实模型 id，客户端零配置即可用。
+	Anthropic struct {
+		// DefaultModel claude-* 前缀未在 Aliases 命中时的回落目标。
+		// 空 = 不改写（原样透传，上游会返回模型不可用）。
+		DefaultModel string `json:"default_model"`
+		// Aliases 精确名映射，例如 {"claude-sonnet-5": "cn:deepseek-v4.1-flash"}。
+		Aliases map[string]string `json:"aliases"`
+	} `json:"anthropic"`
+
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
 

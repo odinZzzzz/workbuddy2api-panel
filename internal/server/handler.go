@@ -56,6 +56,13 @@ type Config struct {
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
 
+	// AnthropicDefaultModel / AnthropicAliases 供 /v1/messages 做模型名映射：
+	// Anthropic 系客户端（Claude Code 等）发的是 claude-* 原生命名，上游没有这些
+	// 模型，需要改写成网关真实模型 id。Aliases 精确命中优先，其次 claude-* 前缀
+	// 回落到 DefaultModel；都没配置则原样透传（见 anthropic.go）。
+	AnthropicDefaultModel string
+	AnthropicAliases      map[string]string
+
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
@@ -139,6 +146,10 @@ func NewHandler(cfg Config) *Handler {
 	// Responses API 兼容层（Codex 0.165+ 只发这个端点）：内部翻译成 chat 请求体，
 	// 复用同一条治理链路（选号/轮转/熔断/粘性/脱敏/工具标记还原），见 responses.go。
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	// Anthropic Messages 兼容层（Claude Code / cc-switch 的 claude 通道）：
+	// 鉴权同时接受 Authorization: Bearer 与 x-api-key，见 anthropic.go。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuthAPIKey(h.anthropicMessages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuthAPIKey(h.anthropicCountTokens))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -175,6 +186,19 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withAuthAPIKey 用于 Anthropic 协议端点：同时接受 Authorization: Bearer 与
+// x-api-key（Claude 系 SDK 用后者）。错误信封也按 Anthropic 形状返回，
+// 否则 Claude Code 只会看到一句无法解析的 JSON。
+func (h *Handler) withAuthAPIKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !httpauth.VerifyAPIKey(r, h.loadLive().APIKey) {
+			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
 			return
 		}
 		next(w, r)

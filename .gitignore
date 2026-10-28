@@ -48,3 +48,7 @@ server.exe
 .DS_Store
 wb2api-linux-amd64
 wb2api-linux-*
+
+# 本地 Windows 启动脚本（机器特定，不入库）
+start-wb2api.cmd
+start-wb2api-hidden.vbs

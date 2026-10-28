@@ -710,6 +710,7 @@ http://127.0.0.1:7863/panel/
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
 | `POST /v1/responses` | Bearer（`api_key` 非空时） | OpenAI **Responses API** 兼容层；流式 SSE 事件 / 非流式单对象；内部翻译成 chat 请求复用同一条治理链路（见[Responses API 兼容层](#responses-api-兼容层)） |
+| `POST /v1/messages` / `POST /v1/messages/count_tokens` | Bearer **或** `x-api-key` | Anthropic **Messages API** 兼容层（Claude Code / cc-switch claude 通道）；流式 Anthropic SSE 事件 / 非流式 message 对象；支持 `claude-*` 模型名映射（见[Anthropic Messages 兼容层](#anthropic-messages-兼容层)） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
@@ -725,6 +726,75 @@ http://127.0.0.1:7863/panel/
 响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
 
 **宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+
+### Anthropic Messages 兼容层
+
+`POST /v1/messages` + `POST /v1/messages/count_tokens` 让 **Claude Code**、cc-switch 的 claude
+通道等 Anthropic 协议客户端能直连本网关。
+
+实现取向与 Responses 层一致：**边界翻译，不复制治理逻辑**——请求体翻译成
+`chat/completions` 请求后直接调用既有 chat 处理器，再用 ResponseWriter 适配器把 chat SSE
+翻译回 Anthropic SSE。选号/轮转/熔断/冷却/粘性/脱敏/提示词/DSML 工具标记还原全部原样生效。
+
+| Anthropic 字段 | 映射到 chat | 说明 |
+|---|---|---|
+| `system`（字符串或 text block 数组） | `messages[0]`（system） | |
+| `messages[].content`（block 数组） | `messages` | `text` → 文本；`image`（base64/url）→ `image_url` |
+| assistant 的 `tool_use` block | `assistant.tool_calls` | **与同一消息里的 text 合并成一条**（chat 要求 content 与 tool_calls 同属一条消息） |
+| user 的 `tool_result` block | `tool` 消息 | 按 block 出现次序展开，可与其他文本块混排 |
+| `tools[].input_schema` | `tools[].function.parameters` | |
+| `tool_choice` | `auto`→`auto`、`any`→`required`、`tool`→具名 | |
+| `max_tokens` / `temperature` / `top_p` | 同名 | |
+| `stop_sequences` | `stop` | |
+| `thinking.enabled` + `budget_tokens` | `reasoning_effort` | ≥8000 → `max`，否则 `high`（网关再按模型档位降级） |
+
+回程事件：`message_start` → `ping` → `content_block_start` →（`text_delta` 或
+`input_json_delta`）×N → `content_block_stop` → `message_delta`（含 `stop_reason` 与
+`usage.output_tokens`）→ `message_stop`；上游 error 帧 → `error` 事件。
+`stop_reason` 映射：`stop`→`end_turn`、`length`→`max_tokens`、有工具调用→`tool_use`。
+
+**鉴权**：这两条路由同时接受 `Authorization: Bearer <key>` 与 `x-api-key: <key>`
+（Anthropic SDK 用后者），错误信封也按 Anthropic 形状返回（`{"type":"error","error":{...}}`）。
+
+**模型名映射**（关键）：Claude 系客户端发的是 `claude-sonnet-5` 这类原生命名，上游没有这些
+模型（会报 11102）。网关按两级改写：
+
+```json
+{
+  "anthropic": {
+    "default_model": "cn:deepseek-v4.1-flash",
+    "aliases": { "claude-opus-5": "cn:deepseek-v4-pro" }
+  }
+}
+```
+
+- `aliases` 精确命中优先；
+- 未命中且名字以 `claude` 开头 → 回落到 `default_model`；
+- 都不命中 → 原样透传（网关保持透明，让上游如实报「模型不可用」，不悄悄换成别的模型）。
+
+响应里的 `model` 字段**回显客户端请求的名字**，不暴露映射后的真实 id。
+
+`count_tokens` 返回**估算值**（网关没有上游分词器）：文本按字符数/3.2、图片每张 1600、
+再加 16 的帧开销，宁可高估不低估，供 Claude Code 做上下文预算。
+
+```bash
+# 非流式
+curl -s http://127.0.0.1:7863/v1/messages \
+  -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-5","max_tokens":200,"messages":[{"role":"user","content":"hi"}]}'
+
+# 流式
+curl -N http://127.0.0.1:7863/v1/messages \
+  -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-5","max_tokens":200,"stream":true,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+Claude Code 侧：`ANTHROPIC_BASE_URL=http://<host>:7863`（**不带 `/v1`**，SDK 自己拼
+`/v1/messages`）、`ANTHROPIC_AUTH_TOKEN=<api_key>`、`ANTHROPIC_MODEL` 填任意 `claude-*` 名字
+（由上面的映射兜底）或直接填真实模型 id。
+
+**已知边界**：不实现 prompt caching 的 `cache_control` 语义（字段忽略）、`thinking` 输出块不回传、
+`tool_use` 的 `input` 以 JSON 增量流式下发（与官方一致，客户端需自行拼接）。
 
 ### Responses API 兼容层
 

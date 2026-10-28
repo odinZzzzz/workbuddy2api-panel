@@ -41,3 +41,23 @@ func digest(s string) []byte {
 	sum := sha256.Sum256([]byte(s))
 	return sum[:]
 }
+
+// VerifyAPIKey 校验请求携带的密钥，**同时接受两种携带方式**：
+//
+//	Authorization: Bearer <key>   —— OpenAI 系客户端
+//	x-api-key: <key>              —— Anthropic 系客户端（Claude Code 等）
+//
+// 存在原因：/v1/messages 走 Anthropic 协议，其官方 SDK 用 x-api-key；而本网关其余
+// 端点用 Bearer。两种头都指向同一个 api_key，所以这里统一成一个判据，避免
+// 「同一把 key 换个头就 401」的割裂。key 为空表示未启用鉴权，恒放行。
+//
+// 比较口径与 VerifyBearer 完全一致（摘要 + 常量时间），两种头的校验都会执行，
+// 不因第一个头命中就提前返回，保持耗时形状一致。
+func VerifyAPIKey(r *http.Request, key string) bool {
+	if key == "" {
+		return true
+	}
+	okBearer := VerifyBearer(r, key)
+	okXAPIKey := subtle.ConstantTimeCompare(digest(r.Header.Get("x-api-key")), digest(key)) == 1
+	return okBearer || okXAPIKey
+}
