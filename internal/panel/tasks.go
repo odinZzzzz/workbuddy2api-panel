@@ -52,7 +52,16 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks})
+	// auto_tasks：本账号「有自动动作」的任务 → 说明文案，供前端渲染「一键完成」按钮。
+	// 前端不能再靠硬编码表判断——体验专家类任务是按 jump_url 动态识别的，
+	// 由后端算好下发，上游再下发新专家任务时前端零改动。
+	autoTasks := make(map[string]string, len(tasks))
+	for i := range tasks {
+		if act := autoActionForTask(&tasks[i]); act != nil {
+			autoTasks[tasks[i].TaskCode] = act.Desc
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks, "auto_tasks": autoTasks})
 }
 
 // accountTaskAccept 接受任务（报名；幂等）。

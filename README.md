@@ -94,6 +94,25 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | `Hp_Appearance` | +100c +5e | 主题设置 + 皮肤生效事件 |
 | `Expert_lighthouse` | +100c +5e | 轻量云专家召唤+使用链（真实对话 requestId，**可免费领一个月轻量服务器**） |
 | `skill_1` | +100c +5e | 真实对话 + 技能加载事件（skill_info） |
+| `WorkBuddy_Valorant` | +100c +5e | 「无畏契约拼豆专家」召唤+使用链（`ex_xQHHD1u5Jkua`，截止 11-15） |
+
+### 限时「体验某专家」任务（通用识别，零登记）
+
+官方活动任务里的 `体验「X」专家` 系列（`expert_use_*` / `WorkBuddy_Valorant`）**不需要逐个登记**：面板从任务自带的 `jump_url` 里抽 `expertId=ex_...`（任务中心下发的是百分号编码的 deeplink，两种形态都认），直接复用 `Expert_lighthouse` 的召唤+使用链——市场取真实条目 → 召唤链 → 真实对话拿服务端 `requestId` → `agent_task_created` 补 `has_expert`/`expert_id` → `expert_actual_use`。上游以后**再下发新的专家任务，零改动自动可跑**；`jump_url` 只给裸 `workbuddy://expert`、不带 id 的 `WorkBuddy_Valorant` 作为静态兜底登记。
+
+| 任务 | 奖励 | 截止 | 专家 |
+|---|---|---|---|
+| `WorkBuddy_Valorant` | +100c +5e | 11-15 | 无畏契约拼豆专家 `ex_xQHHD1u5Jkua`（静态兜底） |
+| `expert_use_maidehao` | +50c +5e | 11-20 | 卖得好（中国电商运营专家）`ex_GDl31WahyIH0` |
+| `expert_use_douyinyin` | +50c +5e | 11-20 | 斗音音（抖音策略师）`ex_FbY5nlWTqDod` |
+| `expert_use_shangjia_xuanchuan` | +50c +5e | 11-20 | 商家宣传设计师 `ex_Weo3x2EZuSDm` |
+| `expert_use_bowangwang` | +50c +5e | 11-20 | 播旺旺（直播电商教练）`ex_WZY136wV5aMt` |
+
+**判据已实测（2026-10-28，3 个国内号 × 5 条任务 15/15 全部点亮）**：
+
+- 执行前**自动 accept** —— 这是硬前提：`not_accepted` 状态下上游下发 `target=0`，行为事件一律不归账（LOCAL / craft 两形态都试过，进度纹丝不动）；accept 之后 `target=1`，同一条 LOCAL 链一次点亮。
+- 判据形态 = `mode=LOCAL`（`Expert_lighthouse` 同口径），`craft` 变体只是未归账时的兜底（只补使用事件、不重发对话），实测未用到。
+- 两轮都不动就停下等下次调度，不反复烧配额。
 
 **全新账号一键全做完 ≈ +1950 credits +78 能量**，其中仅数个任务涉及真实对话（`Model_chat_GLM5.2` 一条、`expert_5`/`Expert_team_use_3`/`skill_1` 各数条 fast-model 短对话），其余全部为行为事件上报，零对话消耗。
 

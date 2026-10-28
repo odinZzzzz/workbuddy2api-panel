@@ -1330,6 +1330,9 @@ async function loadTasks() {
   try {
     const d = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks');
     const list = d.tasks || [];
+    // 后端下发的「可自动任务」说明（含按 jump_url 动态识别的体验专家类任务）；
+    // 硬编码表 AUTO_TASKS 只作兜底，故上游新增专家任务时前端无需改动。
+    const autoMap = d.auto_tasks || {};
     if (!list.length) {
       st.className = 'state';
       st.textContent = '该账号暂无任务';
@@ -1351,9 +1354,10 @@ async function loadTasks() {
         : t.locked ? '<span class="tag mute">未解锁</span>'
         : t.accept_status === 'accepted' ? '<span class="tag mute">进行中</span>'
         : '<span class="tag mute">未接受</span>';
+      const autoDesc = autoMap[t.task_code] || AUTO_TASKS[t.task_code];
       const acted = t.claimed || t.locked ? ''
         : t.claimable ? '<button class="xs primary" data-t="claim" data-c="' + esc(t.task_code) + '">领取</button>'
-        : AUTO_TASKS[t.task_code] ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(AUTO_TASKS[t.task_code]) + '">一键完成</button>'
+        : autoDesc ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(autoDesc) + '">一键完成</button>'
         : t.accept_status === 'accepted' ? ''
         : '<button class="xs" data-t="accept" data-c="' + esc(t.task_code) + '">接受</button>';
       // 操作指引（description/task_desc）挂 title 提示：如何完成交给用户看

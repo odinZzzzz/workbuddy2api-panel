@@ -46,12 +46,10 @@ func growthPending(t upstream.Task) bool {
 	if t.Locked {
 		return false
 	}
-	if t.Target > 0 && t.Current >= t.Target {
-		// 达标未领：也入队（队列执行后会自动领）——但仅限有自动化动作的任务，
-		// 否则队列执行时会因 autoActionFor 为 nil 直接报错。
-		return autoActionFor(t.TaskCode) != nil
-	}
-	return autoActionFor(t.TaskCode) != nil
+	// 达标未领：也入队（队列执行后会自动领）——但仅限有自动化动作的任务，
+	// 否则队列执行时会因无动作直接报错。autoActionForTask 含「体验专家」通用
+	// 识别（jump_url 带 expertId 即算可自动化），故此处必须传任务对象而非 code。
+	return autoActionForTask(&t) != nil
 }
 
 // tasksScanAll 扫描全部账号：成长任务（未完成+可自动化，含 mp 口径合并）。
@@ -415,10 +413,6 @@ func (p *Panel) acceptPendingTasks(a *auth.Auth) int {
 // runGrowthQueued 执行单个成长任务（动作 + 回读 + 自动领奖；与
 // accountTaskAuto 同语义，结果以文字返回）。
 func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
-	act := autoActionFor(code)
-	if act == nil {
-		return "", fmt.Errorf("任务 %s 无自动动作", code)
-	}
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
 	before, err := p.taskByCode(a, code)
 	if err != nil {
@@ -426,6 +420,11 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	}
 	if before == nil {
 		return "该账号无此任务", nil
+	}
+	// 动作解析放在取到任务之后：体验专家类任务靠 jump_url 里的 expertId 识别。
+	act := autoActionForTask(before)
+	if act == nil {
+		return "", fmt.Errorf("任务 %s 无自动动作", code)
 	}
 	isMP := isMPTaskCode(code)
 	if before.Claimed {

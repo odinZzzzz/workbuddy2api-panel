@@ -13,6 +13,10 @@
 //     （template_used / playbook_prompt_send / wbx_design_canvas_*），纯 API 可点亮（三账号实测）
 //   - expert_5 / Expert_team_use_3：真实专家列表 + 召唤链 + 真实 chat（服务端 requestId）
 //   - expert_actual_use（三账号实测）
+//   - 体验「X」专家类任务（expert_use_* / WorkBuddy_Valorant）：任务 jump_url 里
+//     直接带 expertId=ex_...，故做成**通用识别**（见 autoActionForTask）——
+//     复用 Expert_lighthouse 的召唤+使用链，新专家任务零登记自动覆盖；
+//     WorkBuddy_Valorant 的 jump_url 无 id，作为静态兜底登记（issue #228）。
 //   - Hp_Appearance：appearance/set + appearance_skin_apply 事件（两账号实测）
 //
 // 仍未破解：skill_1（疑似要求真实 Skill 工具调用）。
@@ -29,6 +33,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -127,6 +132,11 @@ var autoActions = []autoAction{
 		TaskCode: "Expert_lighthouse",
 		Desc:     "真实轻量云专家召唤+使用链（chat 链带 has_expert，已验证：两账号点亮）",
 		run:      runExpertLighthouse,
+	},
+	{
+		TaskCode: "WorkBuddy_Valorant",
+		Desc:     "真实「无畏契约拼豆专家」召唤+使用链（jump_url 无 id，静态兜底 ex_xQHHD1u5Jkua，截止 11-15）",
+		run:      runValorantExpert,
 	},
 	{
 		TaskCode: "black_cat",
@@ -629,12 +639,6 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "task_code required")
 		return
 	}
-	act := autoActionFor(body.TaskCode)
-	if act == nil {
-		writeErr(w, http.StatusNotImplemented,
-			"该任务需要客户端内交互（无对应接口），无法自动完成；请按任务说明在官方客户端操作")
-		return
-	}
 	// per-account 互斥：同账号的任务动作正在跑（单任务或全量）时直接 409，
 	// 不并发重跑（动作幂等但 expert/skill 系含真实对话，重跑浪费配额）。
 	if !p.tryLockAccount(uid) {
@@ -644,13 +648,21 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	defer p.unlockAccount(uid)
 	// 前置读取：已完成的任务直接跳过（幂等，不浪费上游调用）。
 	// taskByCode 已双口径（mp 专属码自动回落 mp 列表）。
-	before, err := p.taskByCode(a, act.TaskCode)
+	before, err := p.taskByCode(a, body.TaskCode)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
 		return
 	}
 	if before == nil {
 		writeErr(w, http.StatusNotFound, "该账号没有此任务")
+		return
+	}
+	// 动作解析放在取到任务之后：体验专家类任务靠 jump_url 里的 expertId 识别，
+	// 静态表只覆盖既有任务与 jump_url 无 id 的兜底项。
+	act := autoActionForTask(before)
+	if act == nil {
+		writeErr(w, http.StatusNotImplemented,
+			"该任务需要客户端内交互（无对应接口），无法自动完成；请按任务说明在官方客户端操作")
 		return
 	}
 	isMP := isMPTaskCode(act.TaskCode)
@@ -937,50 +949,231 @@ func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
 	return "已上报真实对话 + skill_info 技能加载事件", nil
 }
 
-// runExpertLighthouse 完成 Expert_lighthouse（体验「腾讯轻量云」专家）。
-// 2026-09-12 判据（真实样本 Sunny row 868）：与 expert_5 同构，但两处差异——
-// chat 链的 agent_task_created 需带 has_expert:true + expert_id（我们默认 false），
-// expert_actual_use 的 mode 为 "LOCAL"（非 craft）。id 固定为轻量云专家
-// ex_2cvvUZQhDyeJ；requestId 必须是真实 chat 的服务端 id。紫川/人杰2 实测点亮。
-func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
-	const lhID = "ex_2cvvUZQhDyeJ"
-	lh := upstream.MarketExpert{
-		ExpertID: lhID, ExpertType: "agent",
-		DisplayNameZH: "腾讯轻量云专家", ProfessionZH: "腾讯轻量云专家", Version: "1.0.2",
+// ---------------------------------------------------------------------------
+// 体验「X」专家类任务（通用）
+// ---------------------------------------------------------------------------
+
+// expertIDPattern 从任务 jump_url 里抽专家 id。两种真实形态都要认
+// （任务中心下发的是第二种，deeplink 被百分号编码）：
+//
+//	workbuddy://experts?expertId=ex_xxx
+//	https://www.workbuddy.cn/work/launch/?deeplink=workbuddy%3A%2F%2Fexperts%3FexpertId%3Dex_xxx
+//
+// 不做整体 URL 解码：QueryUnescape 会把 + 当空格，多一层无谓风险。
+var expertIDPattern = regexp.MustCompile("(?i)expertId(?:=|%3D)(ex_[A-Za-z0-9]+)")
+
+// expertIDFromJumpURL 取任务跳转协议里的专家 id；无则空串。
+func expertIDFromJumpURL(jumpURL string) string {
+	if jumpURL == "" {
+		return ""
 	}
-	// 市场列表若命中真实条目则用其信息（version 等以服务端为准）。
+	if m := expertIDPattern.FindStringSubmatch(jumpURL); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// autoActionForTask 带任务对象的动作解析：先查静态表（既有任务口径不变），
+// 查不到再看 jump_url 是否带 expertId——带上就合成一个「体验专家」通用动作。
+// 上游再下发 expert_use_xxx 之类的新专家任务时零登记自动可跑；
+// jump_url 无 id 的（WorkBuddy_Valorant）由静态表兜底。
+func autoActionForTask(t *upstream.Task) *autoAction {
+	if t == nil {
+		return nil
+	}
+	if act := autoActionFor(t.TaskCode); act != nil {
+		return act
+	}
+	expertID := expertIDFromJumpURL(t.JumpURL)
+	if expertID == "" {
+		return nil
+	}
+	code := t.TaskCode
+	// 标题形如「体验「抖音策略师」」，去掉活动前缀只留专家名（Desc 与兜底展示名共用）。
+	name := strings.Trim(strings.TrimSpace(t.Title), "体验「」")
+	if name == "" {
+		name = code // 标题缺失时退化为任务码，保证 Desc / 兜底展示名不为空
+	}
+	return &autoAction{
+		TaskCode: code,
+		Desc:     fmt.Sprintf("体验「%s」：专家 %s 召唤+使用链（jump_url 自动识别）", name, expertID),
+		run: func(p *Panel, a *auth.Auth) (string, error) {
+			return p.runExpertExperience(a, expertSpec{
+				TaskCode: code, ExpertID: expertID,
+				Name: name, Version: "1.0.0", Fallback: true,
+			})
+		},
+	}
+}
+
+// expertSpec 一次「体验某专家」任务的目标专家。
+// Name/Version 只是市场列表拉不到时的占位值——命中真实条目时以服务端为准。
+type expertSpec struct {
+	TaskCode string
+	ExpertID string
+	Name     string
+	Version  string
+	// Fallback true = 判据尚未实测：LOCAL 形态未归账时补一轮 craft 变体
+	// （同一 conversationId/requestId，只换事件形态，不重发对话）。
+	Fallback bool
+}
+
+// runExpertExperience 「体验某专家」通用实现：市场取真实条目 → 召唤链 → 真实对话
+// 拿服务端 requestId → chat 链（agent_task_created 补 has_expert/expert_id）→
+// expert_actual_use(mode=LOCAL)。与 Expert_lighthouse 同构（三账号实测点亮），
+// 差别只在专家 id 由调用方给。
+func (p *Panel) runExpertExperience(a *auth.Auth, spec expertSpec) (string, error) {
+	// accept 前置（2026-10-28 实测**必需**）：not_accepted 状态下上游下发 target=0，
+	// 行为事件一律不归账——LOCAL 与 craft 两形态都试过，进度纹丝不动；accept 之后
+	// target=1，同一条 LOCAL 链一次点亮。单任务「一键完成」此前不走批量 accept，
+	// 故这里自带前置（幂等：已 accepted/claimed 直接跳过）。
+	if err := p.acceptExpertTask(a, spec.TaskCode); err != nil {
+		return "", err
+	}
+	ex := upstream.MarketExpert{
+		ExpertID: spec.ExpertID, ExpertType: "agent",
+		DisplayNameZH: spec.Name, ProfessionZH: spec.Name, Version: spec.Version,
+	}
+	// 市场列表命中真实条目则用其信息（version / 名称以服务端为准）；拉不到不中止——
+	// 判据校验的是 id 真实性，不是我们携带的元信息。
 	if experts, err := p.cfg.Upstream.MarketExpertList(a, "agent"); err == nil {
 		for _, e := range experts {
-			if e.ExpertID == lhID {
-				lh = e
+			if e.ExpertID == spec.ExpertID {
+				ex = e
 				break
 			}
 		}
 	}
-	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(lh)...); err != nil {
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(ex)...); err != nil {
 		return "", fmt.Errorf("召唤链: %w", err)
 	}
-	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, lhID)
+	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, spec.ExpertID)
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	events := upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model")
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, buildExpertUseEvents(ex, conv, req)...); err != nil {
+		return "", fmt.Errorf("使用事件: %w", err)
+	}
+	msg := fmt.Sprintf("已上报「%s」召唤+使用链（mode=LOCAL，真实对话 requestId）", ex.DisplayNameZH)
+	if !spec.Fallback {
+		return msg, nil
+	}
+	if p.expertTaskAdvanced(a, spec.TaskCode) {
+		return msg + "；进度已归账", nil
+	}
+	// 第一形态没点亮：补 craft 变体（expert_5/Sequential_Tasks_2 用的就是这套）。
+	// 只补一轮、只补使用事件——chat 链上一轮已报过，不重报（避免重复累加其它
+	// 对话类任务的进度），也不重发对话；两轮都不动就停下等下次调度。
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertActualUseEvent(ex, conv, req)); err != nil {
+		return msg + "；LOCAL 未归账，craft 变体上报失败: " + err.Error(), nil
+	}
+	msg += "；LOCAL 未归账，已补 craft 变体"
+	if p.expertTaskAdvanced(a, spec.TaskCode) {
+		return msg + "，进度已归账", nil
+	}
+	return msg + "，进度仍未动（判据待校正，下次调度重试）", nil
+}
+
+// expertAcceptGap accept 后等上游状态流转的时间（实测 2s 足够；与 mp 写动作同节奏）。
+const expertAcceptGap = 2 * time.Second
+
+// needExpertAccept 体验专家任务是否需要先 accept（纯函数，便于单测）。
+// 已领 / 已 accepted / completed 都不需要；not_accepted 与空状态需要。
+func needExpertAccept(t *upstream.Task) bool {
+	if t == nil || t.Claimed {
+		return false
+	}
+	return t.AcceptStatus == "" || t.AcceptStatus == "not_accepted"
+}
+
+// acceptExpertTask 体验专家任务的前置 accept（带登记回读验证）。
+// 未接受的任务上游 target 下发 0，此时上报的行为事件不计进度（实测），
+// 必须先让状态机走到 accepted。已 accepted/completed/claimed 幂等跳过。
+func (p *Panel) acceptExpertTask(a *auth.Auth, code string) error {
+	t, err := p.taskByCode(a, code)
+	if err != nil {
+		return err
+	}
+	if !needExpertAccept(t) {
+		return nil
+	}
+	if err := p.cfg.Upstream.AcceptTasks(a, []string{code}); err != nil {
+		return fmt.Errorf("accept: %w", err)
+	}
+	// 回读确认登记生效：上游存在 200+OK 但未落账的形态（mp 口径实测过），
+	// 那种情况下后续事件全部白报，故以回读 accept_status 为准。
+	time.Sleep(expertAcceptGap)
+	if t2, err := p.taskByCode(a, code); err == nil && t2 != nil {
+		if t2.AcceptStatus == "" || t2.AcceptStatus == "not_accepted" {
+			return fmt.Errorf("accept 未登记生效（回读=%q），等下次调度重试", acceptStatusOr(t2))
+		}
+	}
+	return nil
+}
+
+// buildExpertUseEvents 组装「一次专家对话」的完整事件组：chat 链 + 使用事件。
+// 使用事件走 LOCAL 形态（type 空、cost 0）——Expert_lighthouse 实测点亮的判据口径；
+// craft 形态（type=分类、cost=9000，expert_5 口径）由兜底路径单独补报，
+// 见 runExpertExperience。
+func buildExpertUseEvents(ex upstream.MarketExpert, conv, req string) []upstream.DesktopEvent {
+	msgID := "msg-" + req
+	if len(req) > 8 {
+		msgID = "msg-" + req[len(req)-8:]
+	}
+	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
 	for _, ev := range events {
 		if ev["eventCode"] == "agent_task_created" {
 			ev["has_expert"] = true
-			ev["expert_id"] = lh.ExpertID
-			ev["expert_name"] = lh.DisplayNameZH
+			ev["expert_id"] = ex.ExpertID
+			ev["expert_name"] = ex.DisplayNameZH
 			ev["expert_industry_id"] = ""
 		}
 	}
-	events = append(events, upstream.DesktopExpertActualUseLocal(lh, conv, req))
-	// 对齐真实样本细节：轻量云专家 actual_use 的 type 为空、cost=0。
-	events[len(events)-1]["type"] = ""
-	events[len(events)-1]["cost"] = 0
-	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
-		return "", fmt.Errorf("使用事件: %w", err)
+	use := upstream.DesktopExpertActualUseLocal(ex, conv, req)
+	// 对齐真实样本细节：LOCAL 形态 type 为空、cost=0。
+	use["type"] = ""
+	use["cost"] = 0
+	return append(events, use)
+}
+
+// expertTaskAdvanced 有界回读：任务是否已归账。
+// 注意未 accept 时上游下发 target=0，故不能用 current>=target 判定，
+// 改用「已领 / 可领 / 进度≥1 / 状态 completed」四种信号。
+func (p *Panel) expertTaskAdvanced(a *auth.Auth, code string) bool {
+	for i := 0; i < 2; i++ {
+		if i > 0 {
+			time.Sleep(claimPollGap)
+		}
+		t, err := p.taskByCode(a, code)
+		if err != nil || t == nil {
+			continue
+		}
+		if t.Claimed || t.Claimable || t.Current >= 1 || t.AcceptStatus == "completed" {
+			return true
+		}
 	}
-	return "已上报轻量云专家召唤+使用链（真实对话 requestId）", nil
+	return false
+}
+
+// runExpertLighthouse 完成 Expert_lighthouse（体验「腾讯轻量云」专家）。
+// 判据（真实样本 Sunny row 868）：chat 链的 agent_task_created 需带
+// has_expert:true + expert_id，expert_actual_use 的 mode 为 LOCAL。
+// 紫川/人杰2 实测点亮——口径已验证，故不开变体兜底。
+func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
+	return p.runExpertExperience(a, expertSpec{
+		TaskCode: "Expert_lighthouse", ExpertID: "ex_2cvvUZQhDyeJ",
+		Name: "腾讯轻量云专家", Version: "1.0.2",
+	})
+}
+
+// runValorantExpert 完成 WorkBuddy_Valorant（体验「无畏契约拼豆专家」，issue #228）。
+// 该任务 jump_url 只有裸 workbuddy://expert、不带 expertId，故静态登记专家 id。
+// 判据与 Expert_lighthouse 同构但尚未实测点亮 → 开 LOCAL→craft 两形态兜底。
+func runValorantExpert(p *Panel, a *auth.Auth) (string, error) {
+	return p.runExpertExperience(a, expertSpec{
+		TaskCode: "WorkBuddy_Valorant", ExpertID: "ex_xQHHD1u5Jkua",
+		Name: "无畏契约拼豆专家", Version: "1.2.1", Fallback: true,
+	})
 }
 
 // runAppearance 完成 Hp_Appearance（换主题）。
@@ -1109,6 +1302,33 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 // 全量自动完成
 // ---------------------------------------------------------------------------
 
+// autoActionsWithDynamic 静态动作表 + 本账号任务列表里「jump_url 带 expertId」的
+// 动态动作（体验专家类）。动态项排在静态项之后——两者之间无依赖，且动态项
+// 每项都含真实对话，放在末尾便于前面的事件类任务先落账。
+// 列表拉取失败时只返回静态表（不因动态能力不可用而拖垮整体一键完成）。
+func (p *Panel) autoActionsWithDynamic(a *auth.Auth) []autoAction {
+	acts := append([]autoAction(nil), autoActions...)
+	tasks, err := p.cfg.Upstream.ListTasks(a)
+	if err != nil {
+		return acts
+	}
+	seen := make(map[string]bool, len(acts))
+	for i := range acts {
+		seen[acts[i].TaskCode] = true
+	}
+	for i := range tasks {
+		t := tasks[i]
+		if seen[t.TaskCode] {
+			continue
+		}
+		if act := autoActionForTask(&t); act != nil {
+			acts = append(acts, *act)
+			seen[t.TaskCode] = true
+		}
+	}
+	return acts
+}
+
 // runAutoAll 对单账号依次执行所有可自动化任务，返回逐项结果。
 // 供「一键完成全部可自动任务」使用；单项失败不影响后续项。
 //
@@ -1165,7 +1385,7 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		}
 	}
 
-	for _, act := range autoActions {
+	for _, act := range p.autoActionsWithDynamic(a) {
 		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
 		before, err := p.taskByCode(a, act.TaskCode)
 		if err != nil {
