@@ -19,6 +19,13 @@ var indexHTML []byte
 //go:embed app.js
 var appJS []byte
 
+//go:embed echarts.min.js
+//
+// echarts 5.5.1（Apache-2.0）随二进制分发：仪表盘图表要动效与交互 tooltip，
+// 而 CSP 是 script-src 'self'、面板又无构建步骤，所以只能同源嵌入（约 1MB）。
+// 前端用 window.echarts 是否存在做能力探测，缺失时回落到手绘 SVG，功能不缺失。
+var echartsJS []byte
+
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
 //   - script-src 'self'         只跑同源脚本（app.js）；页面无内联事件处理器/内联脚本
@@ -58,4 +65,15 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)
+}
+
+// echartsScript 输出图表库（同源脚本，供 CSP script-src 'self' 加载）。
+//
+// 单独给一条长缓存：这文件 1MB 且版本固定（随二进制），面板刷新不该反复重下。
+func (p *Panel) echartsScript(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(echartsJS)
 }

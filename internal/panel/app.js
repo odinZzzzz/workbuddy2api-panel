@@ -3051,6 +3051,18 @@ function renderDashboard(ov, mt, us) {
   const pts = [...buckets.values()];
   const maxC = Math.max(0.0001, ...pts.map(p => p.credits));
   const maxR = Math.max(1, ...pts.map(p => p.reqs));
+
+  // 优先用 ECharts（动效 + 交互 tooltip）；库没加载成功时回落到手绘 SVG。
+  // 两条路都产出"每分钟积分 + 请求数"，所以面板在任何环境下都不会白屏。
+  if (renderDashChart(pts, maxC, maxR)) {
+    if ($('dashChartNote')) {
+      $('dashChartNote').textContent = '峰值 ' + maxC.toFixed(2) + ' 分/分钟 · 窗口内 ' + recent.length + ' 条请求记录' +
+        (outside ? '（' + outside + ' 条早于 15 分钟）' : '');
+    }
+    renderInFlightRows(ov, inFlight);
+    return;
+  }
+
   const W = 1000, H = 200, padL = 44, padB = 22, padT = 10;
   const bw = (W - padL - 8) / pts.length;
   let bars = '';
@@ -3083,6 +3095,103 @@ function renderDashboard(ov, mt, us) {
       (outside ? '（' + outside + ' 条早于 15 分钟）' : '');
   }
 
+  renderInFlightRows(ov, inFlight);
+}
+
+/* 仪表盘图表：ECharts 版（动效 + 双轴 + 交互 tooltip）。
+   返回 true 表示已渲染；库缺失（离线调试器 / CSP 未放行 / 加载失败）时返回 false，
+   调用方回落到手绘 SVG——两条路产出同样的信息，面板不会因为库没加载而空白。 */
+let dashChartInst = null;
+function renderDashChart(pts, maxC, maxR) {
+  const el = $('dashChart');
+  if (!el || typeof window === 'undefined' || !window.echarts) return false;
+  try {
+    const css = (name, fallback) => {
+      try {
+        const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+        return (v || '').trim() || fallback;
+      } catch (e) { return fallback; }
+    };
+    const accent = css('--accent', '#5b7cfa');
+    const ok = css('--ok', '#3ddc97');
+    const ink3 = css('--ink-3', '#6b7488');
+    const line = css('--line', '#262c3a');
+
+    // 复用实例：每次刷新重建 canvas 会打断动画连续性，也会泄漏
+    if (!dashChartInst || dashChartInst.isDisposed && dashChartInst.isDisposed()) {
+      el.innerHTML = '';
+      dashChartInst = window.echarts.init(el, null, { renderer: 'canvas' });
+      addEventListener('resize', () => { try { dashChartInst && dashChartInst.resize(); } catch (e) {} });
+    }
+
+    dashChartInst.setOption({
+      animationDuration: 650,
+      animationEasing: 'cubicOut',
+      grid: { left: 46, right: 46, top: 18, bottom: 26 },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        formatter: (ps) => {
+          const t = ps && ps[0] ? ps[0].axisValue : '';
+          const c = ps.find((x) => x.seriesName === '积分');
+          const r = ps.find((x) => x.seriesName === '请求数');
+          return t + '<br/>积分 ' + (c ? Number(c.value).toFixed(3) : '0') +
+                 ' · 请求 ' + (r ? r.value : '0') + ' 次';
+        },
+      },
+      legend: { show: false },
+      xAxis: {
+        type: 'category',
+        data: pts.map((p) => p.label),
+        axisLine: { lineStyle: { color: line } },
+        axisTick: { show: false },
+        axisLabel: { color: ink3, fontSize: 10, interval: 2 },
+      },
+      yAxis: [
+        {
+          type: 'value', name: '', nameTextStyle: { color: ink3, fontSize: 10 },
+          axisLabel: { color: ink3, fontSize: 10, formatter: (v) => (v >= 1 ? v.toFixed(1) : v.toFixed(2)) },
+          splitLine: { lineStyle: { color: line, type: 'dashed', opacity: 0.5 } },
+        },
+        {
+          type: 'value', axisLabel: { color: ink3, fontSize: 10 },
+          splitLine: { show: false },
+        },
+      ],
+      series: [
+        {
+          name: '积分', type: 'bar', yAxisIndex: 0,
+          data: pts.map((p) => Number(p.credits.toFixed(4))),
+          barMaxWidth: 18,
+          itemStyle: {
+            borderRadius: [3, 3, 0, 0],
+            color: new window.echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: accent },
+              { offset: 1, color: accent + '33' },
+            ]),
+          },
+          emphasis: { itemStyle: { color: accent } },
+        },
+        {
+          name: '请求数', type: 'line', yAxisIndex: 1, smooth: true, symbol: 'circle', symbolSize: 4,
+          data: pts.map((p) => p.reqs),
+          lineStyle: { width: 1.6, color: ok },
+          itemStyle: { color: ok },
+        },
+      ],
+    }, { notMerge: false });
+    // 视图隐藏时 init 得到的是 0 尺寸容器，切回来必须 resize 一次才可见；
+    // 放到 rAF 里等布局完成（直接调会用旧的 0 尺寸）。
+    try { requestAnimationFrame(() => { try { dashChartInst && dashChartInst.resize(); } catch (e) {} }); } catch (e) {}
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// renderInFlightRows 渲染「在途流量分布」条（ECharts 与 SVG 两条路径共用）。
+function renderInFlightRows(ov, inFlightTotal) {
+  const inFlight = Number(inFlightTotal) || 0;
   // ── 在途流量分布 ──
   const accs = (ov.accounts || []).slice().sort((a, b) => (b.in_flight || 0) - (a.in_flight || 0));
   const maxIf = Math.max(1, ...accs.map(a => a.in_flight || 0));

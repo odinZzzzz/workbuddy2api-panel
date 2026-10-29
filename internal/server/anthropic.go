@@ -467,6 +467,13 @@ type anthropicWriter struct {
 	status      int
 	parseBuf    strings.Builder
 	passthrough bool
+	// errStatus / errBuf 非 200 时暂存上游/网关的错误响应，finish() 里改写成
+	// Anthropic 错误信封再发出。为什么不能原样透传：chat 侧错误是 OpenAI 形状
+	// （{"error":{"code","message"}}），而 Claude 系客户端只认
+	// {"type":"error","error":{"type","message"}}——原样透传会让它显示成
+	// "unknown error"，把真正的原因（配额/白名单/鉴权）藏掉。
+	errStatus int
+	errBuf    strings.Builder
 
 	started   bool
 	msgID     string
@@ -508,13 +515,14 @@ func (w *anthropicWriter) WriteHeader(code int) {
 	w.status = code
 	if code != http.StatusOK {
 		w.passthrough = true
-		w.dst.WriteHeader(code)
+		w.errStatus = code // 先不写头：等 finish() 改写成 Anthropic 信封
 	}
 }
 
 func (w *anthropicWriter) Write(p []byte) (int, error) {
 	if w.passthrough {
-		return w.dst.Write(p)
+		w.errBuf.Write(p)
+		return len(p), nil
 	}
 	w.parseBuf.Write(p)
 	for {
@@ -715,6 +723,7 @@ func (w *anthropicWriter) outputTokens() float64 {
 
 func (w *anthropicWriter) finish() {
 	if w.passthrough {
+		w.flushError()
 		return
 	}
 	if !w.wantStream {
@@ -824,4 +833,88 @@ func (h *Handler) resolveAnthropicModel(name string) string {
 		return d
 	}
 	return name
+}
+
+// flushError 把暂存的 OpenAI 形状错误改写成 Anthropic 信封后发出。
+//
+// 映射规则与官方 SDK 对齐：401→authentication_error、403→permission_error、
+// 429→rate_limit_error、400→invalid_request_error、5xx→api_error。
+// 原始 message 与 code 一并保留（Anthropic 允许额外字段，排障时能看到网关侧 code）。
+func (w *anthropicWriter) flushError() {
+	status := w.errStatus
+	if status == 0 {
+		status = http.StatusBadGateway
+	}
+	msg := strings.TrimSpace(w.errBuf.String())
+	var code string
+	// 尝试从 OpenAI 信封里取 message/code
+	var openai struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if msg != "" && json.Unmarshal([]byte(msg), &openai) == nil && openai.Error.Message != "" {
+		code = openai.Error.Code
+		msg = openai.Error.Message
+	}
+	if msg == "" {
+		msg = http.StatusText(status)
+	}
+	// 非 JSON 错误体（HTML 错误页 / 纯文本）保留原文但截断：原文比状态码文案更有
+	// 排障价值，而整页 HTML 塞给客户端既难读又可能撑爆日志。
+	if len(msg) > 400 {
+		msg = msg[:400] + "…"
+	}
+	typ := "api_error"
+	switch {
+	case status == http.StatusUnauthorized:
+		typ = "authentication_error"
+	case status == http.StatusForbidden:
+		typ = "permission_error"
+	case status == http.StatusTooManyRequests:
+		typ = "rate_limit_error"
+	case status >= 400 && status < 500:
+		typ = "invalid_request_error"
+	}
+	body := map[string]any{
+		"type":  "error",
+		"error": map[string]any{"type": typ, "message": msg},
+	}
+	if code != "" {
+		body["error"].(map[string]any)["code"] = code
+	}
+	b, _ := json.Marshal(body)
+	w.dst.Header().Set("Content-Type", "application/json")
+	w.dst.WriteHeader(status)
+	_, _ = w.dst.Write(b)
+}
+
+// writeAnthropicErrorCoded 按 Anthropic 规范返回错误：error.type 是**类别**
+// （authentication_error / permission_error / rate_limit_error / api_error），
+// 网关自己的细分原因放进 error.code。
+//
+// 为什么不能把 code 直接当 type：Claude 系客户端按 type 分类处理（401 触发重新登录、
+// 429 触发退避重试），拿到 type=token_quota_exceeded 会当成未知错误直接抛给用户。
+func writeAnthropicErrorCoded(w http.ResponseWriter, status int, code, msg string) {
+	typ := "api_error"
+	switch {
+	case status == http.StatusUnauthorized:
+		typ = "authentication_error"
+	case status == http.StatusForbidden:
+		typ = "permission_error"
+	case status == http.StatusTooManyRequests:
+		typ = "rate_limit_error"
+	case status >= 400 && status < 500:
+		typ = "invalid_request_error"
+	}
+	payload := map[string]any{"type": typ, "message": msg}
+	if code != "" {
+		payload["code"] = code
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	b, _ := json.Marshal(map[string]any{"type": "error", "error": payload})
+	_, _ = w.Write(b)
 }

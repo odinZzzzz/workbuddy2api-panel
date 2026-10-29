@@ -334,3 +334,89 @@ func TestResolveAnthropicModel(t *testing.T) {
 		t.Errorf("未配置时应原样透传，得到 %q", got)
 	}
 }
+
+// 网关侧错误（403 白名单 / 429 配额 / 401 鉴权）必须改写成 Anthropic 信封，
+// 否则 Claude 系客户端只能显示 "unknown error"，真实原因被吞掉。
+func TestAnthropicWriterErrorEnvelope(t *testing.T) {
+	cases := []struct {
+		status    int
+		body      string
+		wantType  string
+		wantInMsg string
+	}{
+		{http.StatusForbidden, `{"error":{"code":"model_not_allowed","message":"model x is not allowed for this API key"}}`, "permission_error", "not allowed"},
+		{http.StatusTooManyRequests, `{"error":{"code":"token_quota_exceeded","message":"this API key has reached its credit quota"}}`, "rate_limit_error", "credit quota"},
+		{http.StatusUnauthorized, `{"error":{"code":"token_expired","message":"this API key has expired"}}`, "authentication_error", "expired"},
+		{http.StatusBadGateway, `not json at all`, "api_error", "not json at all"},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		w := newAnthropicWriter(rec, "claude-sonnet-5", true)
+		w.WriteHeader(c.status)
+		if _, err := w.Write([]byte(c.body)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		w.finish()
+
+		if rec.Code != c.status {
+			t.Errorf("status=%d want %d", rec.Code, c.status)
+		}
+		var got struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("非 JSON: %v (%s)", err, rec.Body.String())
+		}
+		if got.Type != "error" {
+			t.Errorf("外层 type=%q want error", got.Type)
+		}
+		if got.Error.Type != c.wantType {
+			t.Errorf("%d: error.type=%q want %q", c.status, got.Error.Type, c.wantType)
+		}
+		if !strings.Contains(got.Error.Message, c.wantInMsg) {
+			t.Errorf("%d: message=%q 应包含 %q", c.status, got.Error.Message, c.wantInMsg)
+		}
+	}
+}
+
+// 鉴权/配额拒绝的信封：error.type 必须是类别，网关 code 放 error.code。
+func TestWriteAnthropicErrorCoded(t *testing.T) {
+	cases := []struct {
+		status   int
+		code     string
+		wantType string
+	}{
+		{http.StatusUnauthorized, "token_expired", "authentication_error"},
+		{http.StatusForbidden, "model_not_allowed", "permission_error"},
+		{http.StatusTooManyRequests, "token_quota_exceeded", "rate_limit_error"},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		writeAnthropicErrorCoded(rec, c.status, c.code, "msg")
+		var got struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("非 JSON: %v", err)
+		}
+		if rec.Code != c.status || got.Type != "error" {
+			t.Errorf("status=%d outerType=%q", rec.Code, got.Type)
+		}
+		if got.Error.Type != c.wantType {
+			t.Errorf("%d: error.type=%q want %q", c.status, got.Error.Type, c.wantType)
+		}
+		if got.Error.Code != c.code {
+			t.Errorf("%d: error.code=%q want %q", c.status, got.Error.Code, c.code)
+		}
+	}
+}

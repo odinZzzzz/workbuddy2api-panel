@@ -259,7 +259,8 @@ func (h *Handler) withAuthAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok, status, code, msg := h.authorize(r)
 		if status != 0 {
-			writeAnthropicError(w, status, code, msg)
+			// 用「类别 + code」的信封：客户端按 error.type 决定重登/退避。
+			writeAnthropicErrorCoded(w, status, code, msg)
 			return
 		}
 		if tok != nil {
