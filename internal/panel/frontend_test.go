@@ -1006,3 +1006,27 @@ process.stdout.write(JSON.stringify({
 			strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestPanelRenderAssertions 把 scripts/debug-panel.js 的渲染断言接进 go test。
+//
+// 为什么在 Go 测试里跑 Node 脚本：面板是 go:embed 的单文件前端，Go 侧只做语法/顶层
+// 求值冒烟，覆盖不到「渲染结果对不对」。脚本按 空/单条/异常 三态跑各视图 render，
+// 断言不抛错、不渲染 undefined/NaN、且确实产出内容——把"改完只能肉眼看"变成闸门。
+// 无 node 的环境跳过（与 TestAppJSTopLevelSmoke 同判）。
+func TestPanelRenderAssertions(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render assertions skipped")
+	}
+	script := filepath.Join("..", "..", "scripts", "debug-panel.js")
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("debug-panel.js 不存在：%v", err)
+	}
+	out, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("渲染断言失败（%v）：\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "FAIL=0") {
+		t.Fatalf("渲染断言未报全通过：\n%s", out)
+	}
+}

@@ -388,6 +388,9 @@ addEventListener('hashchange', () => {
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 function renderAccounts(list) {
+  // 脏数据防御：一条 null/非对象就足以让整个账号池视图白屏（实测）。
+  // 面板是运维入口，"渲染不出来"比"少一行"严重得多，所以这里直接过滤。
+  list = (Array.isArray(list) ? list : []).filter((x) => x && typeof x === 'object');
   const tb = $('accBody');
   if (!list.length) {
     tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
@@ -476,6 +479,7 @@ function renderAccounts(list) {
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
 // 后端 model_locks 已按「整池不可用 → 没号可用 → 部分限流」排好序，这里只做展示。
 function renderModelLocks(rows) {
+  rows = (Array.isArray(rows) ? rows : []).filter((x) => x && typeof x === 'object');
   const tb = $('mlBody');
   if (!tb) return;
   const note = $('mlNote');
@@ -1744,7 +1748,9 @@ function qrowHTML(it) {
   const isSchool = it.kind === 'school';
   const title = isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
   const dotCls = it.status === 'scan' ? 'wait' : it.status === 'running' ? 'run' : it.status === 'error' ? 'err' : it.status === 'skipped' ? 'skip' : it.status === 'done' ? 'done' : 'wait';
-  const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
+  // status 缺失时回 '—' 而不是字面 undefined：脏数据不该以 "undefined" 出现在
+  // 运维界面上（实测缺字段时这里会渲染成 undefined）。
+  const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status || '—');
   return '<div class="qrow" title="' + esc(it.message || '') + '">' +
     '<span class="code">' + esc(it.code) + '</span>' +
     '<span class="name"><span class="t">' + esc(title) + '</span>' + (isSchool ? '<span class="tag mute">开学季</span>' : '') + '</span>' +
@@ -1754,6 +1760,11 @@ function qrowHTML(it) {
     '</div>';
 }
 function renderQueue(groups, progress, emptyTitle, emptyDesc) {
+  // 兜底：groups 可能是 null，group.items 可能缺（后端换了字段/部分失败）。
+  // 缺 items 时按空组渲染，不要让整个任务中心白屏。
+  groups = (Array.isArray(groups) ? groups : []).filter((g) => g && typeof g === 'object')
+    .map((g) => Object.assign({}, g, { rows: Array.isArray(g.rows) ? g.rows : [] }));
+  progress = progress || {};
   const empty = $('tcEmpty'), list = $('qcList');
   if (!groups.length) {
     empty.style.display = '';
