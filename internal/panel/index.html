@@ -610,6 +610,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13V7m4 6V3m4 10V9m4 4V5"/></svg>
         <span>仪表盘</span>
       </a></li>
+      <li><a href="#tokens" data-view="tokens">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5.5" cy="10.5" r="2.5"/><path d="M7.4 8.6 13 3m-2.5 0H13v2.5"/></svg>
+        <span>令牌</span>
+      </a></li>
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
@@ -831,6 +835,44 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     </section>
 
     <!-- 用量 -->
+    <!-- 令牌：多 API Key 管理（形态参考 one-api / new-api 中转站） -->
+    <section class="view" id="view-tokens" hidden>
+      <div class="box">
+        <header>
+          <h3>新建令牌</h3>
+          <span class="grow"></span>
+          <span class="note">全局 api_key 始终有效，令牌是叠加通道</span>
+        </header>
+        <div class="pad">
+          <div class="fbar" style="flex-wrap:wrap;gap:8px">
+            <input id="tokName" placeholder="名称（如 客户端A）" />
+            <input id="tokQuota" type="number" min="0" step="0.01" placeholder="配额积分（0=不限）" style="max-width:170px" />
+            <input id="tokExpires" type="date" title="过期日期（可空=永不过期）" style="max-width:150px" />
+            <input id="tokModels" placeholder="模型白名单（逗号分隔，空=全部）" style="min-width:240px" />
+            <button class="primary" id="btnTokCreate">创建</button>
+          </div>
+          <div id="tokNewKey" hidden style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>令牌列表</h3>
+          <span class="grow"></span>
+          <span class="note" id="tokCount">—</span>
+          <button class="xs" id="btnTokReload">刷新</button>
+        </header>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th>名称</th><th>密钥</th><th>状态</th><th>已用 / 配额</th><th>请求数</th><th>过期</th><th>操作</th>
+            </tr></thead>
+            <tbody id="tokBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <!-- 仪表盘：在途流量 + 积分消耗（数据源 overview / request_metrics / usage，纯前端聚合） -->
     <section class="view" id="view-dashboard" hidden>
       <div class="box">

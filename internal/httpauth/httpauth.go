@@ -61,3 +61,14 @@ func VerifyAPIKey(r *http.Request, key string) bool {
 	okXAPIKey := subtle.ConstantTimeCompare(digest(r.Header.Get("x-api-key")), digest(key)) == 1
 	return okBearer || okXAPIKey
 }
+
+// PresentedKey 取出请求里携带的原始密钥（Bearer 优先，其次 x-api-key）。
+//
+// 多令牌管理需要"用户到底出示了哪把 key"才能查表，而 VerifyBearer/VerifyAPIKey
+// 只回答"对不对"。两者分工：先校验，再用本函数取原值做令牌查找。
+func PresentedKey(r *http.Request) string {
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, bearerPrefix) {
+		return authz[len(bearerPrefix):]
+	}
+	return r.Header.Get("x-api-key")
+}

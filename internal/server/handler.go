@@ -24,6 +24,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/tokenstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -58,6 +59,10 @@ type Config struct {
 	// PromptDegradeTTL 提示词降级窗口时长（config prompt.degrade_ttl，默认 30m）。
 	// 0 = 到次日 00:00 CST 的旧语义；>0 = 自愈窗口（到期回 passthrough 试探）。
 	PromptDegradeTTL time.Duration
+
+	// Tokens 多令牌库（可选；nil = 只有全局 api_key 生效，行为与旧版一致）。
+	// 令牌命中的请求会把积分/请求数记到该令牌上，并按 allowed_models 做模型白名单。
+	Tokens *tokenstore.Store
 
 	// AnthropicDefaultModel / AnthropicAliases 供 /v1/messages 做模型名映射：
 	// Anthropic 系客户端（Claude Code 等）发的是 claude-* 原生命名，上游没有这些
@@ -189,12 +194,57 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		tok, status, code, msg := h.authorize(r)
+		if status != 0 {
+			writeOpenAIError(w, status, code, msg)
 			return
+		}
+		if tok != nil {
+			r = r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok))
 		}
 		next(w, r)
 	}
+}
+
+// tokenCtxKey 请求级令牌上下文键：命中的令牌挂在 request context 上，供模型白名单
+// 与用量记账使用（nil = 本次请求走的是全局 api_key 或未启用鉴权）。
+type tokenCtxKey struct{}
+
+// tokenFrom 取本次请求命中的令牌（可能为 nil）。
+func tokenFrom(r *http.Request) *tokenstore.Token {
+	if v, ok := r.Context().Value(tokenCtxKey{}).(*tokenstore.Token); ok {
+		return v
+	}
+	return nil
+}
+
+// authorize 统一鉴权入口：先认全局 api_key（向后兼容），再查令牌库。
+//
+// 返回 (令牌, 0, "", "") 表示放行；status != 0 表示拒绝，调用方按 code/msg 回错。
+// 令牌被拒的原因要区分开（禁用 / 过期 / 配额用尽），否则用户只看到一句
+// invalid_api_key，根本不知道是"key 错了"还是"额度用完了"。
+func (h *Handler) authorize(r *http.Request) (*tokenstore.Token, int, string, string) {
+	globalKey := h.loadLive().APIKey
+	if globalKey == "" && h.cfg.Tokens == nil {
+		return nil, 0, "", "" // 未启用鉴权（旧语义：空 api_key 直接放行）
+	}
+	if globalKey != "" && httpauth.VerifyAPIKey(r, globalKey) {
+		return nil, 0, "", "" // 全局密钥：放行且不记账
+	}
+	if h.cfg.Tokens != nil {
+		tok, err := h.cfg.Tokens.Authenticate(httpauth.PresentedKey(r))
+		switch {
+		case err == nil:
+			return tok, 0, "", ""
+		case errors.Is(err, tokenstore.ErrDisabled):
+			return nil, http.StatusUnauthorized, "token_disabled", "this API key has been disabled"
+		case errors.Is(err, tokenstore.ErrExpired):
+			return nil, http.StatusUnauthorized, "token_expired", "this API key has expired"
+		case errors.Is(err, tokenstore.ErrQuotaExceeded):
+			return nil, http.StatusTooManyRequests, "token_quota_exceeded", "this API key has reached its credit quota"
+		}
+	}
+	return nil, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key"
 }
 
 // withAuthAPIKey 用于 Anthropic 协议端点：同时接受 Authorization: Bearer 与
@@ -202,9 +252,13 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // 否则 Claude Code 只会看到一句无法解析的 JSON。
 func (h *Handler) withAuthAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyAPIKey(r, h.loadLive().APIKey) {
-			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing or invalid API key")
+		tok, status, code, msg := h.authorize(r)
+		if status != 0 {
+			writeAnthropicError(w, status, code, msg)
 			return
+		}
+		if tok != nil {
+			r = r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok))
 		}
 		next(w, r)
 	}
@@ -585,6 +639,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+	// 令牌模型白名单：命中令牌且名单非空时，只放行名单内模型。
+	// 放在选号之前——不白跑一次上游请求才被拒（那会白扣账号配额）。
+	if tok := tokenFrom(r); tok != nil && !tok.AllowsModel(peek.Model) {
+		// 此时 st（请求统计）还没创建，直接回错即可：外层 responseObserver 会
+		// 按实际状态码记进请求归档，不需要在这里动 st。
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+			"model "+peek.Model+" is not allowed for this API key")
+		return
+	}
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
@@ -1084,6 +1147,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 				st.outcome = reqlog.OutcomeSuccess
 				h.cfg.Pool.NoteSuccess(acct.UID)
+				// 令牌记账：本次请求的积分记到命中的令牌上（未命中令牌=全局 key，不记）。
+				if tok := tokenFrom(r); tok != nil && h.cfg.Tokens != nil {
+					if cr, okCr := stats.Credit(); okCr {
+						h.cfg.Tokens.AddUsage(tok.ID, cr)
+					} else {
+						h.cfg.Tokens.AddUsage(tok.ID, 0)
+					}
+				}
 				// 降级试探成功：此刻才锁定降级窗口（P0：重试失败不再污染复位前的全部请求）。
 				if degradedApplied {
 					h.degrade.Trigger()
@@ -1174,6 +1245,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		// 令牌记账（非流式）：credit 来自聚合响应的 usage。
+		if tok := tokenFrom(r); tok != nil && h.cfg.Tokens != nil {
+			if hasCredit {
+				h.cfg.Tokens.AddUsage(tok.ID, credit)
+			} else {
+				h.cfg.Tokens.AddUsage(tok.ID, 0)
+			}
+		}
 		// 降级试探成功：此刻才锁定降级窗口（与流式分支同语义）。
 		if degradedApplied {
 			h.degrade.Trigger()

@@ -26,6 +26,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/tokenstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -82,6 +83,12 @@ func main() {
 	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
 
 	p := pool.New(cfg.StateFile)
+	// 多令牌库：与 state.json 同目录（data/tokens.json）。加载失败直接 fatal——
+	// 带着一个坏掉的鉴权库启动，比拒绝启动危险得多。
+	tokens, err := tokenstore.Open(stateSibling(cfg.StateFile, "tokens.json"))
+	if err != nil {
+		log.Fatalf("tokens: %v", err)
+	}
 	// 停机序：先 pool.Close()（最后一次 Flush → SaveState 已提交到 store），
 	// 再 store.Close() 排空在途异步写（最后一笔 Redis 镜像必须写完才关连接）。
 	defer func() {
@@ -266,6 +273,7 @@ func main() {
 	// 用迟绑闭包，请求期才解引用（服务尚未启动时 h 必已赋值；nil 兜底只为构造期安全）。
 	var h *server.Handler
 	pn := panel.New(panel.Config{
+		Tokens:      tokens,
 		Pool:        p,
 		Usage:       rec,
 		RequestLog:  requestLog,
@@ -309,6 +317,7 @@ func main() {
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
 		Panel:        pn,
+		Tokens:       tokens,
 		Live:         live,
 		Usage:        rec,
 		RequestLog:   requestLog,

@@ -19,6 +19,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/tokenstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -1974,5 +1975,60 @@ func TestStatusReportsDegradeWindow(t *testing.T) {
 	}
 	if s, _ := after["degrade_until"].(string); s == "" {
 		t.Errorf("degrade_until 应是非空时间串: %v", after["degrade_until"])
+	}
+}
+
+// 多令牌鉴权：令牌可放行；禁用/过期/配额用尽各自给出可读错误；全局 api_key 始终有效。
+func TestTokenAuthAllowsGlobalAndToken(t *testing.T) {
+	store, err := tokenstore.Open("")
+	if err != nil {
+		t.Fatalf("tokenstore: %v", err)
+	}
+	tok, err := store.Create("客户端A", 0, time.Time{}, nil, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt"})
+	h := NewHandler(Config{Pool: p, APIKey: "global-key", Tokens: store})
+
+	do := func(authz string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/status", nil)
+		req.Header.Set("Authorization", authz)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := do("Bearer " + tok.Key); rec.Code != 200 {
+		t.Fatalf("令牌应放行，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := do("Bearer global-key"); rec.Code != 200 {
+		t.Fatalf("全局 api_key 应放行，得到 %d", rec.Code)
+	}
+	if rec := do("Bearer sk-wrong"); rec.Code != 401 {
+		t.Fatalf("错误 key 应 401，得到 %d", rec.Code)
+	}
+
+	// 禁用 → 401 token_disabled
+	store.SetEnabled(tok.ID, false)
+	rec := do("Bearer " + tok.Key)
+	if rec.Code != 401 || !strings.Contains(rec.Body.String(), "token_disabled") {
+		t.Fatalf("禁用令牌应 401 token_disabled，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	store.SetEnabled(tok.ID, true)
+
+	// 配额用尽 → 429 token_quota_exceeded
+	quotaTok, _ := store.Create("配额", 1, time.Time{}, nil, "")
+	store.AddUsage(quotaTok.ID, 2)
+	rec = do("Bearer " + quotaTok.Key)
+	if rec.Code != 429 || !strings.Contains(rec.Body.String(), "token_quota_exceeded") {
+		t.Fatalf("配额用尽应 429，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 过期 → 401 token_expired
+	expTok, _ := store.Create("过期", 0, time.Now().Add(-time.Minute), nil, "")
+	rec = do("Bearer " + expTok.Key)
+	if rec.Code != 401 || !strings.Contains(rec.Body.String(), "token_expired") {
+		t.Fatalf("过期令牌应 401 token_expired，得到 %d: %s", rec.Code, rec.Body.String())
 	}
 }

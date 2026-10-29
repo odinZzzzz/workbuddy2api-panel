@@ -346,7 +346,7 @@ function expSnapshotSig(d) {
   return list.map(a => [a.uid, a.credits, a.credits_expiring, a.credits_earliest_expiry, a.credits_earliest_remaining].join(':')).join('|');
 }
 
-const TITLES = { accounts: '账号池', dashboard: '仪表盘', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', dashboard: '仪表盘', tokens: '令牌', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -357,6 +357,7 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'dashboard') loadDashboard();
+  if (v === 'tokens') loadTokens();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
@@ -3096,3 +3097,108 @@ function renderDashboard(ov, mt, us) {
 $('btnDash').onclick = () => loadDashboard();
 // 仪表盘打开时每 5 秒自动刷新（切走就停，避免后台空转）
 setInterval(() => { if (typeof view === 'string' && view === 'dashboard' && !document.hidden) loadDashboard(); }, 5000);
+
+
+/* ── 令牌（多 API Key）─────────────────────────────────────────────
+   形态参考 one-api / new-api：每把 key 独立启停、过期、积分配额与用量统计。
+   安全约定：列表只显示打码值；完整 key 只在「创建成功」的响应里出现一次，
+   前端必须当场提示复制（关掉就再也拿不到）。 */
+async function loadTokens() {
+  const note = $('tokCount');
+  try {
+    const d = await api('tokens');
+    renderTokens(d.tokens || [], d.disabled === true);
+    if (note) note.textContent = (d.tokens || []).length + ' 把令牌';
+  } catch (e) {
+    if (note) note.textContent = '读取失败：' + e.message;
+  }
+}
+
+function tokStatus(t) {
+  if (!t.enabled) return '<span class="tag bad">已禁用</span>';
+  if (t.expired) return '<span class="tag bad">已过期</span>';
+  if (t.quota_exceeded) return '<span class="tag bad">配额用尽</span>';
+  return '<span class="tag ok">可用</span>';
+}
+
+function tokQuotaCell(t) {
+  const used = Number(t.used_credits || 0);
+  if (!t.quota_credits) return used.toFixed(2) + ' / 不限';
+  const pct = Math.min(100, Math.round((used / t.quota_credits) * 100));
+  return used.toFixed(2) + ' / ' + t.quota_credits + '（' + pct + '%）' +
+    '<div class="ifbar" style="margin-top:4px"><i style="width:' + pct + '%;background:' + (pct >= 90 ? 'var(--warn)' : 'var(--accent)') + '"></i></div>';
+}
+
+function renderTokens(list, disabled) {
+  const tb = $('tokBody');
+  if (!tb) return;
+  if (disabled) {
+    tb.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="big">未启用令牌管理</div>后端没有加载令牌库（data/tokens.json）</div></td></tr>';
+    return;
+  }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="big">还没有令牌</div>用上面的表单创建一把，客户端就能用独立的 key 接入</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(t =>
+    '<tr>' +
+    '<td>' + esc(t.name || '—') + (t.note ? '<div class="note" style="margin-top:2px">' + esc(t.note) + '</div>' : '') +
+      (t.allowed_models && t.allowed_models.length ? '<div class="note" style="margin-top:2px">仅 ' + esc(t.allowed_models.join(', ')) + '</div>' : '') + '</td>' +
+    '<td><code>' + esc(t.key) + '</code></td>' +
+    '<td>' + tokStatus(t) + '</td>' +
+    '<td>' + tokQuotaCell(t) + '</td>' +
+    '<td>' + (t.used_requests || 0) + '</td>' +
+    '<td>' + (t.expires_at ? esc(t.expires_at.slice(0, 10)) : '—') + '</td>' +
+    '<td>' +
+      '<button class="xs" data-tok="toggle" data-id="' + esc(t.id) + '">' + (t.enabled ? '禁用' : '启用') + '</button> ' +
+      '<button class="xs" data-tok="reset" data-id="' + esc(t.id) + '">重置用量</button> ' +
+      '<button class="xs" data-tok="del" data-id="' + esc(t.id) + '">删除</button>' +
+    '</td></tr>').join('');
+}
+
+if ($('btnTokCreate')) $('btnTokCreate').onclick = async () => {
+  const models = ($('tokModels').value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const body = {
+    name: ($('tokName').value || '').trim(),
+    quota_credits: Number($('tokQuota').value || 0),
+    expires_at: ($('tokExpires').value || '').trim(),
+    allowed_models: models,
+  };
+  const b = $('btnTokCreate'); b.disabled = true;
+  try {
+    const d = await api('tokens', { method: 'POST', body: JSON.stringify(body) });
+    const k = d.token && d.token.key;
+    const box = $('tokNewKey');
+    if (box) {
+      box.hidden = false;
+      box.innerHTML = '<div class="note">完整密钥只显示这一次，请立刻复制：</div>' +
+        '<div class="inline" style="margin-top:6px"><input id="tokNewKeyVal" readonly value="' + esc(k) + '" style="flex:1" />' +
+        '<button class="xs" id="btnTokCopy">复制</button></div>';
+      const cp = $('btnTokCopy');
+      if (cp) cp.onclick = async () => {
+        try { await navigator.clipboard.writeText(k); toast('已复制', 'ok'); }
+        catch { $('tokNewKeyVal').select(); toast('请手动复制（Ctrl+C）', 'warn'); }
+      };
+    }
+    $('tokName').value = ''; $('tokQuota').value = ''; $('tokExpires').value = ''; $('tokModels').value = '';
+    toast('令牌已创建', 'ok');
+    loadTokens();
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; }
+};
+
+if ($('btnTokReload')) $('btnTokReload').onclick = () => loadTokens();
+
+if ($('tokBody')) $('tokBody').addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-tok]');
+  if (!b) return;
+  const id = b.dataset.id, act = b.dataset.tok;
+  if (act === 'del' && !confirm('删除令牌后使用该 key 的客户端会立即失效，确认？')) return;
+  b.disabled = true;
+  try {
+    if (act === 'toggle') await api('tokens/' + encodeURIComponent(id) + '/toggle', { method: 'POST' });
+    else if (act === 'reset') await api('tokens/' + encodeURIComponent(id) + '/reset', { method: 'POST' });
+    else if (act === 'del') await api('tokens/' + encodeURIComponent(id), { method: 'DELETE' });
+    loadTokens();
+  } catch (e) { toast(e.message, 'err'); b.disabled = false; }
+});

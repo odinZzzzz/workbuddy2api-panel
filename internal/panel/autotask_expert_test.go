@@ -180,6 +180,7 @@ func TestCraftFallbackEvent(t *testing.T) {
 		t.Errorf("锚点不对: %v", ev)
 	}
 }
+
 // TestNeedExpertAccept accept 前置的判定口径：只有「未接受」才需要，
 // 已接受/已完成/已领取都必须跳过（幂等，不重复写上游）。
 func TestNeedExpertAccept(t *testing.T) {

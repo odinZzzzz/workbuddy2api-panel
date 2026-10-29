@@ -27,6 +27,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/tokenstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -39,7 +40,9 @@ type Config struct {
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	// Tokens 多令牌库（nil = 未启用令牌管理，面板隐藏该视图的写操作）。
+	Tokens  *tokenstore.Store
+	Version string // 面板版本号（展示用）
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -162,6 +165,12 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
+	// 多令牌（API Key）管理：列表/新建/启停/重置用量/删除。
+	p.mux.HandleFunc("GET /panel/api/tokens", p.withAuth(p.tokensList))
+	p.mux.HandleFunc("POST /panel/api/tokens", p.withAuth(p.tokensCreate))
+	p.mux.HandleFunc("POST /panel/api/tokens/{id}/toggle", p.withAuth(p.tokensToggle))
+	p.mux.HandleFunc("POST /panel/api/tokens/{id}/reset", p.withAuth(p.tokensReset))
+	p.mux.HandleFunc("DELETE /panel/api/tokens/{id}", p.withAuth(p.tokensDelete))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
