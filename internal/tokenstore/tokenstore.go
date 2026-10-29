@@ -47,6 +47,10 @@ type Token struct {
 	UsedRequests  int64     `json:"used_requests"`
 	AllowedModels []string  `json:"allowed_models,omitempty"` // 空 = 全部模型
 	Note          string    `json:"note,omitempty"`
+	// RPM 每分钟请求数上限（0 = 不限）。滑动窗口 60s。
+	RPM int `json:"rpm,omitempty"`
+	// MaxConcurrency 同时在途请求上限（0 = 不限）。
+	MaxConcurrency int `json:"max_concurrency,omitempty"`
 }
 
 // Expired 报告令牌是否已过期（零值 ExpiresAt 表示永不过期）。
@@ -91,6 +95,9 @@ type Store struct {
 	byID  map[string]*Token
 	byKey map[string]*Token
 	dirty bool
+	// limiters 每令牌的限流状态（进程内，不持久化——重启清零是合理语义：
+	// 限流窗口是秒级观测，重启后重新计数即可）。
+	limiters map[string]*limiter
 }
 
 type fileFormat struct {
@@ -100,7 +107,7 @@ type fileFormat struct {
 
 // Open 加载（或初始化）令牌库。path 为空表示纯内存（测试用）。
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, byID: map[string]*Token{}, byKey: map[string]*Token{}}
+	s := &Store{path: path, byID: map[string]*Token{}, byKey: map[string]*Token{}, limiters: map[string]*limiter{}}
 	if path == "" {
 		return s, nil
 	}
@@ -180,7 +187,7 @@ func (s *Store) List() []Token {
 }
 
 // Create 新建令牌。返回含完整 key 的副本（面板只在此时展示完整值）。
-func (s *Store) Create(name string, quotaCredits float64, expiresAt time.Time, allowedModels []string, note string) (Token, error) {
+func (s *Store) Create(name string, quotaCredits float64, expiresAt time.Time, allowedModels []string, note string, rpm, maxConcurrency int) (Token, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "未命名令牌"
@@ -193,15 +200,17 @@ func (s *Store) Create(name string, quotaCredits float64, expiresAt time.Time, a
 		return Token{}, err
 	}
 	t := &Token{
-		ID:            newID(),
-		Name:          name,
-		Key:           key,
-		Enabled:       true,
-		CreatedAt:     time.Now(),
-		ExpiresAt:     expiresAt,
-		QuotaCredits:  quotaCredits,
-		AllowedModels: normalizeModels(allowedModels),
-		Note:          strings.TrimSpace(note),
+		ID:             newID(),
+		Name:           name,
+		Key:            key,
+		Enabled:        true,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      expiresAt,
+		QuotaCredits:   quotaCredits,
+		AllowedModels:  normalizeModels(allowedModels),
+		Note:           strings.TrimSpace(note),
+		RPM:            maxInt(rpm, 0),
+		MaxConcurrency: maxInt(maxConcurrency, 0),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -224,6 +233,7 @@ func (s *Store) Delete(id string) bool {
 	}
 	delete(s.byID, id)
 	delete(s.byKey, t.Key)
+	delete(s.limiters, id)
 	s.dirty = true
 	_ = s.saveLocked()
 	return true
@@ -360,4 +370,12 @@ func newID() string {
 		return fmt.Sprintf("t%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
+}
+
+// maxInt 返回两者较大值（钳负值到 0）。
+func maxInt(v, floor int) int {
+	if v < floor {
+		return floor
+	}
+	return v
 }

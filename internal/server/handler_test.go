@@ -1984,7 +1984,7 @@ func TestTokenAuthAllowsGlobalAndToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tokenstore: %v", err)
 	}
-	tok, err := store.Create("客户端A", 0, time.Time{}, nil, "")
+	tok, err := store.Create("客户端A", 0, time.Time{}, nil, "", 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -2018,7 +2018,7 @@ func TestTokenAuthAllowsGlobalAndToken(t *testing.T) {
 	store.SetEnabled(tok.ID, true)
 
 	// 配额用尽 → 429 token_quota_exceeded
-	quotaTok, _ := store.Create("配额", 1, time.Time{}, nil, "")
+	quotaTok, _ := store.Create("配额", 1, time.Time{}, nil, "", 0, 0)
 	store.AddUsage(quotaTok.ID, 2)
 	rec = do("Bearer " + quotaTok.Key)
 	if rec.Code != 429 || !strings.Contains(rec.Body.String(), "token_quota_exceeded") {
@@ -2026,7 +2026,7 @@ func TestTokenAuthAllowsGlobalAndToken(t *testing.T) {
 	}
 
 	// 过期 → 401 token_expired
-	expTok, _ := store.Create("过期", 0, time.Now().Add(-time.Minute), nil, "")
+	expTok, _ := store.Create("过期", 0, time.Now().Add(-time.Minute), nil, "", 0, 0)
 	rec = do("Bearer " + expTok.Key)
 	if rec.Code != 401 || !strings.Contains(rec.Body.String(), "token_expired") {
 		t.Fatalf("过期令牌应 401 token_expired，得到 %d: %s", rec.Code, rec.Body.String())
@@ -2056,5 +2056,44 @@ func TestUnknownV1EndpointReturns501(t *testing.T) {
 	h.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusUnauthorized {
 		t.Fatalf("未鉴权应 401，得到 %d", rec2.Code)
+	}
+}
+
+
+// 令牌 rpm 限流：超过上限回 429 token_rate_limited + Retry-After；其他令牌不受影响。
+func TestTokenRateLimitRejects(t *testing.T) {
+	store, _ := tokenstore.Open("")
+	limited, _ := store.Create("限流", 0, time.Time{}, nil, "", 2, 0)
+	other, _ := store.Create("正常", 0, time.Time{}, nil, "", 0, 0)
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt"})
+	h := NewHandler(Config{Pool: p, APIKey: "k", Tokens: store})
+
+	do := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/status", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := do(limited.Key); rec.Code != 200 {
+		t.Fatalf("第 1 次应放行，得到 %d", rec.Code)
+	}
+	if rec := do(limited.Key); rec.Code != 200 {
+		t.Fatalf("第 2 次应放行，得到 %d", rec.Code)
+	}
+	rec := do(limited.Key)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("第 3 次应 429，得到 %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "token_rate_limited") {
+		t.Fatalf("应带 token_rate_limited，得到 %s", rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 应带 Retry-After")
+	}
+	// 另一把未限流的令牌不受影响
+	if rec := do(other.Key); rec.Code != 200 {
+		t.Fatalf("未限流令牌应放行，得到 %d", rec.Code)
 	}
 }

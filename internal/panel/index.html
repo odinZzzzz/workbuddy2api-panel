@@ -855,7 +855,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <input id="tokName" placeholder="名称（如 客户端A）" />
             <input id="tokQuota" type="number" min="0" step="0.01" placeholder="配额积分（0=不限）" style="max-width:170px" />
             <input id="tokExpires" type="date" title="过期日期（可空=永不过期）" style="max-width:150px" />
-            <input id="tokModels" placeholder="模型白名单（逗号分隔，空=全部）" style="min-width:240px" />
+            <input id="tokModels" placeholder="模型白名单（逗号分隔，空=全部）" style="min-width:200px" />
+            <input id="tokRpm" type="number" min="0" placeholder="RPM（0=不限）" style="max-width:130px" title="每分钟请求数上限" />
+            <input id="tokConc" type="number" min="0" placeholder="并发（0=不限）" style="max-width:130px" title="同时在途请求上限" />
             <button class="primary" id="btnTokCreate">创建</button>
           </div>
           <div id="tokNewKey" hidden style="margin-top:12px"></div>
@@ -872,7 +874,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="tbl-wrap">
           <table>
             <thead><tr>
-              <th>名称</th><th>密钥</th><th>状态</th><th>已用 / 配额</th><th>请求数</th><th>过期</th><th>操作</th>
+              <th>名称</th><th>密钥</th><th>状态</th><th>已用 / 配额</th><th>请求数</th><th>限流</th><th>过期</th><th>操作</th>
             </tr></thead>
             <tbody id="tokBody"></tbody>
           </table>

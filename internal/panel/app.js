@@ -665,14 +665,14 @@ function rateCell(m) {
 
 async function loadModels() {
   const tb = $('mdBody');
-  tb.innerHTML = '<tr><td colspan="7"><div class="empty">正在向上游查询…</div></td></tr>';
+  tb.innerHTML = '<tr><td colspan="8"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
     // 探测数据是可选增强：拉取失败不影响模型列表本身
     const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
     mdAll = d.models || [];
     mdProbes = pr.probes || {};
     if (!mdAll.length) {
-      tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>';
+      tb.innerHTML = '<tr><td colspan="8"><div class="empty">上游未返回模型</div></td></tr>';
       $('mdCount').textContent = '';
       $('mdNote').textContent = '上游未返回模型';
       return;
@@ -685,7 +685,7 @@ async function loadModels() {
     renderModels();
   } catch (e) {
     mdAll = [];
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">' + esc(e.message) + '</div></td></tr>';
     $('mdCount').textContent = '';
   }
 }
@@ -773,7 +773,7 @@ function renderModels() {
   const tb = $('mdBody');
   const list = mdSortList(mdAll.filter(m => mdMatch(m)));
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">没有符合当前筛选条件的模型</div></td></tr>';
   } else {
     tb.innerHTML = list.map(m => mdRowHtml(m, mdProbeOf(m.id))).join('');
   }
@@ -2041,7 +2041,7 @@ function renderCreditDim() {
         '<td class="num">' + fmtCreditRatio(row.credits_per_1m_tokens, row.credit_samples, row.credit_tokens) + '</td>' +
         '<td class="num">' + cacheRateCell(row.cache_hit_tokens, row.cache_miss_tokens) + '</td>' +
         '</tr>';
-    }).join('') || '<tr><td colspan="7" class="empty">' + empty + '</td></tr>';
+    }).join('') || '<tr><td colspan="8" class="empty">' + empty + '</td></tr>';
   }
   $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, {
     account: (d.credit_by_account || []).length,
@@ -2354,7 +2354,7 @@ async function loadUsage() {
     $('usDimTabs').innerHTML = usTabsHtml(US_DIM_TABS, usDim, null);
     $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, null);
     $('usDimBody').innerHTML = '<tr><td colspan="10" class="empty">读取用量失败</td></tr>';
-    $('usCreditBody').innerHTML = '<tr><td colspan="7" class="empty">读取用量失败</td></tr>';
+    $('usCreditBody').innerHTML = '<tr><td colspan="8" class="empty">读取用量失败</td></tr>';
   }
 }
 
@@ -2695,7 +2695,7 @@ function renderPackages(d, detailLimit) {
       '</tr>';
     };
     const groupSummary = (group, label, count, size, remain) =>
-      '<tr class="pk-group-summary"><td colspan="7"><button type="button" class="pk-group-toggle"' +
+      '<tr class="pk-group-summary"><td colspan="8"><button type="button" class="pk-group-toggle"' +
       ' data-pk-group="' + group + '" data-count="' + count + '" data-size="' + size +
       '" data-remain="' + remain + '" aria-expanded="false">' + label + '，展开</button></td></tr>';
     const rows = groups.visible.map(p => rowOf(p, '')).join('');
@@ -3334,6 +3334,13 @@ function tokStatus(t) {
   return '<span class="tag ok">可用</span>';
 }
 
+function tokLimitCell(t) {
+  const rpm = t.rpm ? t.rpm + ' 次/分' : '不限';
+  const conc = t.max_concurrency ? t.max_concurrency + ' 并发' : '不限并发';
+  const inflight = t.in_flight ? '（在途 ' + t.in_flight + '）' : '';
+  return '<span class="note">' + esc(rpm + ' · ' + conc) + '</span>' + esc(inflight);
+}
+
 function tokQuotaCell(t) {
   const used = Number(t.used_credits || 0);
   if (!t.quota_credits) return used.toFixed(2) + ' / 不限';
@@ -3346,11 +3353,11 @@ function renderTokens(list, disabled) {
   const tb = $('tokBody');
   if (!tb) return;
   if (disabled) {
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="big">未启用令牌管理</div>后端没有加载令牌库（data/tokens.json）</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">未启用令牌管理</div>后端没有加载令牌库（data/tokens.json）</div></td></tr>';
     return;
   }
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="7"><div class="empty"><div class="big">还没有令牌</div>用上面的表单创建一把，客户端就能用独立的 key 接入</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">还没有令牌</div>用上面的表单创建一把，客户端就能用独立的 key 接入</div></td></tr>';
     return;
   }
   tb.innerHTML = list.map(t =>
@@ -3361,10 +3368,12 @@ function renderTokens(list, disabled) {
     '<td>' + tokStatus(t) + '</td>' +
     '<td>' + tokQuotaCell(t) + '</td>' +
     '<td>' + (t.used_requests || 0) + '</td>' +
+    '<td>' + tokLimitCell(t) + '</td>' +
     '<td>' + (t.expires_at ? esc(t.expires_at.slice(0, 10)) : '—') + '</td>' +
     '<td>' +
       '<button class="xs" data-tok="toggle" data-id="' + esc(t.id) + '">' + (t.enabled ? '禁用' : '启用') + '</button> ' +
       '<button class="xs" data-tok="reset" data-id="' + esc(t.id) + '">重置用量</button> ' +
+      '<button class="xs" data-tok="limits" data-id="' + esc(t.id) + '" data-cur="' + (t.rpm || 0) + '/' + (t.max_concurrency || 0) + '">限流</button> ' +
       '<button class="xs" data-tok="del" data-id="' + esc(t.id) + '">删除</button>' +
     '</td></tr>').join('');
 }
@@ -3376,6 +3385,8 @@ if ($('btnTokCreate')) $('btnTokCreate').onclick = async () => {
     quota_credits: Number($('tokQuota').value || 0),
     expires_at: ($('tokExpires').value || '').trim(),
     allowed_models: models,
+    rpm: Number($('tokRpm').value || 0),
+    max_concurrency: Number($('tokConc').value || 0),
   };
   const b = $('btnTokCreate'); b.disabled = true;
   try {
@@ -3393,7 +3404,7 @@ if ($('btnTokCreate')) $('btnTokCreate').onclick = async () => {
         catch { $('tokNewKeyVal').select(); toast('请手动复制（Ctrl+C）', 'warn'); }
       };
     }
-    $('tokName').value = ''; $('tokQuota').value = ''; $('tokExpires').value = ''; $('tokModels').value = '';
+    $('tokName').value = ''; $('tokQuota').value = ''; $('tokExpires').value = ''; $('tokModels').value = ''; $('tokRpm').value = ''; $('tokConc').value = '';
     toast('令牌已创建', 'ok');
     loadTokens();
   } catch (e) { toast(e.message, 'err'); }
@@ -3410,6 +3421,24 @@ if ($('tokBody')) $('tokBody').addEventListener('click', async ev => {
   b.disabled = true;
   try {
     if (act === 'toggle') await api('tokens/' + encodeURIComponent(id) + '/toggle', { method: 'POST' });
+    else if (act === 'limits') {
+      // 单次输入「rpm/并发」而不是连弹两个 prompt：一次交互、可粘贴、易校验。
+      const cur = b.dataset.cur || '0/0';
+      const raw = prompt('限流设置（格式：每分钟请求数/并发数，0 = 不限）', cur);
+      if (raw === null) return;
+      const parts = String(raw).split('/').map((x) => Number(String(x).trim() || 0));
+      if (parts.some((n) => !Number.isFinite(n) || n < 0)) {
+        toast('格式不对：示例 120/8（0 表示不限）', 'err');
+        return;
+      }
+      const rpm = parts[0] || 0;
+      const conc = parts.length > 1 ? parts[1] : 0;
+      await api('tokens/' + encodeURIComponent(id) + '/limits', {
+        method: 'POST',
+        body: JSON.stringify({ rpm, max_concurrency: conc }),
+      });
+      toast('限流已更新：' + (rpm || '不限') + ' 次/分 · ' + (conc || '不限') + ' 并发', 'ok');
+    }
     else if (act === 'reset') await api('tokens/' + encodeURIComponent(id) + '/reset', { method: 'POST' });
     else if (act === 'del') await api('tokens/' + encodeURIComponent(id), { method: 'DELETE' });
     loadTokens();

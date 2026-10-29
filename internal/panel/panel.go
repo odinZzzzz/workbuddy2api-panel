@@ -175,6 +175,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/tokens", p.withAuth(p.tokensCreate))
 	p.mux.HandleFunc("POST /panel/api/tokens/{id}/toggle", p.withAuth(p.tokensToggle))
 	p.mux.HandleFunc("POST /panel/api/tokens/{id}/reset", p.withAuth(p.tokensReset))
+	p.mux.HandleFunc("POST /panel/api/tokens/{id}/limits", p.withAuth(p.tokensLimits))
 	p.mux.HandleFunc("DELETE /panel/api/tokens/{id}", p.withAuth(p.tokensDelete))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))

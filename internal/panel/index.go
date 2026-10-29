@@ -19,11 +19,11 @@ var indexHTML []byte
 //go:embed app.js
 var appJS []byte
 
-//go:embed echarts.min.js
-//
 // echarts 5.5.1（Apache-2.0）随二进制分发：仪表盘图表要动效与交互 tooltip，
 // 而 CSP 是 script-src 'self'、面板又无构建步骤，所以只能同源嵌入（约 1MB）。
 // 前端用 window.echarts 是否存在做能力探测，缺失时回落到手绘 SVG，功能不缺失。
+//
+//go:embed echarts.min.js
 var echartsJS []byte
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：

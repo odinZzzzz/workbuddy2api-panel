@@ -205,6 +205,18 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if tok != nil {
+			// 令牌级限流：rpm / 并发上限（0 = 不限）。被拒回 429 + Retry-After，
+			// 让客户端退避而不是重试风暴（重试风暴会进一步挤占共享账号池）。
+			if h.cfg.Tokens != nil {
+				release, lerr := h.cfg.Tokens.Acquire(tok.ID)
+				if lerr != nil {
+					w.Header().Set("Retry-After", "60")
+					code, msg := rateLimitReason(lerr)
+					writeOpenAIError(w, http.StatusTooManyRequests, code, msg)
+					return
+				}
+				defer release()
+			}
 			r = r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok))
 		}
 		next(w, r)
@@ -264,6 +276,16 @@ func (h *Handler) withAuthAPIKey(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if tok != nil {
+			if h.cfg.Tokens != nil {
+				release, lerr := h.cfg.Tokens.Acquire(tok.ID)
+				if lerr != nil {
+					w.Header().Set("Retry-After", "60")
+					lcode, lmsg := rateLimitReason(lerr)
+					writeAnthropicErrorCoded(w, http.StatusTooManyRequests, lcode, lmsg)
+					return
+				}
+				defer release()
+			}
 			r = r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, tok))
 		}
 		next(w, r)
@@ -1729,4 +1751,13 @@ func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage
 		msg = uerr.Msg
 	}
 	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+}
+
+// rateLimitReason 把限流错误翻译成 (code, message)，两类原因分开报——
+// 客户端据此决定是"降速重试"还是"减少并发"。
+func rateLimitReason(err error) (string, string) {
+	if errors.Is(err, tokenstore.ErrConcurrencyExceeded) {
+		return "token_concurrency_limited", "this API key has reached its concurrency limit"
+	}
+	return "token_rate_limited", "this API key has exceeded its requests-per-minute limit"
 }

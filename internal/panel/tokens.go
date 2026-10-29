@@ -16,38 +16,46 @@ import (
 
 // tokenView 对外视图：key 一律打码，只有创建响应里带完整值（仅此一次）。
 type tokenView struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Key           string   `json:"key"` // 打码值
-	Enabled       bool     `json:"enabled"`
-	CreatedAt     string   `json:"created_at"`
-	ExpiresAt     string   `json:"expires_at,omitempty"`
-	QuotaCredits  float64  `json:"quota_credits"`
-	UsedCredits   float64  `json:"used_credits"`
-	UsedRequests  int64    `json:"used_requests"`
-	AllowedModels []string `json:"allowed_models,omitempty"`
-	Note          string   `json:"note,omitempty"`
-	Expired       bool     `json:"expired"`
-	QuotaExceeded bool     `json:"quota_exceeded"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Key            string   `json:"key"` // 打码值
+	Enabled        bool     `json:"enabled"`
+	CreatedAt      string   `json:"created_at"`
+	ExpiresAt      string   `json:"expires_at,omitempty"`
+	QuotaCredits   float64  `json:"quota_credits"`
+	UsedCredits    float64  `json:"used_credits"`
+	UsedRequests   int64    `json:"used_requests"`
+	AllowedModels  []string `json:"allowed_models,omitempty"`
+	Note           string   `json:"note,omitempty"`
+	Expired        bool     `json:"expired"`
+	QuotaExceeded  bool     `json:"quota_exceeded"`
+	RPM            int      `json:"rpm"`
+	MaxConcurrency int      `json:"max_concurrency"`
+	InFlight       int      `json:"in_flight"`
 }
 
-func toTokenView(t tokenstore.Token, now time.Time) tokenView {
+func (p *Panel) toTokenView(t tokenstore.Token, now time.Time) tokenView {
 	v := tokenView{
-		ID:            t.ID,
-		Name:          t.Name,
-		Key:           tokenstore.MaskedKey(t.Key),
-		Enabled:       t.Enabled,
-		CreatedAt:     t.CreatedAt.Format(time.RFC3339),
-		QuotaCredits:  t.QuotaCredits,
-		UsedCredits:   t.UsedCredits,
-		UsedRequests:  t.UsedRequests,
-		AllowedModels: t.AllowedModels,
-		Note:          t.Note,
-		Expired:       t.Expired(now),
-		QuotaExceeded: t.QuotaExceeded(),
+		ID:             t.ID,
+		Name:           t.Name,
+		Key:            tokenstore.MaskedKey(t.Key),
+		Enabled:        t.Enabled,
+		CreatedAt:      t.CreatedAt.Format(time.RFC3339),
+		QuotaCredits:   t.QuotaCredits,
+		UsedCredits:    t.UsedCredits,
+		UsedRequests:   t.UsedRequests,
+		AllowedModels:  t.AllowedModels,
+		Note:           t.Note,
+		Expired:        t.Expired(now),
+		QuotaExceeded:  t.QuotaExceeded(),
+		RPM:            t.RPM,
+		MaxConcurrency: t.MaxConcurrency,
 	}
 	if !t.ExpiresAt.IsZero() {
 		v.ExpiresAt = t.ExpiresAt.Format(time.RFC3339)
+	}
+	if p.cfg.Tokens != nil {
+		v.InFlight = p.cfg.Tokens.InFlight(t.ID)
 	}
 	return v
 }
@@ -62,7 +70,7 @@ func (p *Panel) tokensList(w http.ResponseWriter, r *http.Request) {
 	list := p.cfg.Tokens.List()
 	out := make([]tokenView, 0, len(list))
 	for _, t := range list {
-		out = append(out, toTokenView(t, now))
+		out = append(out, p.toTokenView(t, now))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tokens": out})
 }
@@ -77,11 +85,13 @@ func (p *Panel) tokensCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name          string   `json:"name"`
-		QuotaCredits  float64  `json:"quota_credits"`
-		ExpiresAt     string   `json:"expires_at"`
-		AllowedModels []string `json:"allowed_models"`
-		Note          string   `json:"note"`
+		Name           string   `json:"name"`
+		QuotaCredits   float64  `json:"quota_credits"`
+		ExpiresAt      string   `json:"expires_at"`
+		AllowedModels  []string `json:"allowed_models"`
+		Note           string   `json:"note"`
+		RPM            int      `json:"rpm"`
+		MaxConcurrency int      `json:"max_concurrency"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -101,12 +111,12 @@ func (p *Panel) tokensCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		expires = t
 	}
-	tok, err := p.cfg.Tokens.Create(req.Name, req.QuotaCredits, expires, req.AllowedModels, req.Note)
+	tok, err := p.cfg.Tokens.Create(req.Name, req.QuotaCredits, expires, req.AllowedModels, req.Note, req.RPM, req.MaxConcurrency)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	v := toTokenView(tok, time.Now())
+	v := p.toTokenView(tok, time.Now())
 	v.Key = tok.Key // 完整值，仅此一次
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": v})
 }
@@ -136,7 +146,7 @@ func (p *Panel) tokensToggle(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "token not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": toTokenView(tok, time.Now())})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": p.toTokenView(tok, time.Now())})
 }
 
 // tokensReset POST /panel/api/tokens/{id}/reset
@@ -150,7 +160,7 @@ func (p *Panel) tokensReset(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "token not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": toTokenView(tok, time.Now())})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": p.toTokenView(tok, time.Now())})
 }
 
 // tokensDelete DELETE /panel/api/tokens/{id}
@@ -178,4 +188,29 @@ func (p *Panel) findToken(id string) *tokenstore.Token {
 		}
 	}
 	return nil
+}
+
+// tokensLimits POST /panel/api/tokens/{id}/limits
+//
+// body: {rpm, max_concurrency}（0 = 不限）。运行期即时生效：限流状态在进程内，
+// 改配置只影响下一次 Acquire，不需要重启。
+func (p *Panel) tokensLimits(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Tokens == nil {
+		writeErr(w, http.StatusNotImplemented, "token management is not enabled")
+		return
+	}
+	var req struct {
+		RPM            int `json:"rpm"`
+		MaxConcurrency int `json:"max_concurrency"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	tok, ok := p.cfg.Tokens.SetLimits(r.PathValue("id"), req.RPM, req.MaxConcurrency)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "token not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": p.toTokenView(tok, time.Now())})
 }
