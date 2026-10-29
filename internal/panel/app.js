@@ -2989,8 +2989,10 @@ async function loadDashboard() {
   const note = $('dashNote');
   if (note) note.textContent = '读取中…';
   try {
-    const [ov, mt, us] = await Promise.all([api('overview'), api('request_metrics'), api('usage?hours=24')]);
-    renderDashboard(ov || {}, mt || {}, us || {});
+    const [ov, mt, us, bal] = await Promise.all([
+      api('overview'), api('request_metrics'), api('usage?hours=24'), api('balance_history?hours=24'),
+    ]);
+    renderDashboard(ov || {}, mt || {}, us || {}, bal || {});
     if (note) note.textContent = '更新于 ' + new Date().toLocaleTimeString() + ' · 每 5 秒自动刷新';
   } catch (e) {
     if (note) note.textContent = '读取失败：' + e.message;
@@ -3004,7 +3006,7 @@ function dashMinuteKey(iso) {
     ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
-function renderDashboard(ov, mt, us) {
+function renderDashboard(ov, mt, us, bal) {
   const recent = Array.isArray(mt.recent) ? mt.recent : [];
   const now = Date.now();
   const win5 = recent.filter(r => { const t = Date.parse(r.time); return Number.isFinite(t) && now - t <= 5 * 60 * 1000; });
@@ -3052,6 +3054,10 @@ function renderDashboard(ov, mt, us) {
   const maxC = Math.max(0.0001, ...pts.map(p => p.credits));
   const maxR = Math.max(1, ...pts.map(p => p.reqs));
 
+  // 余额趋势与主图走两条独立通道：主图可能命中 ECharts 分支后 return，
+  // 所以余额图必须在分支之前渲染（这里踩过：放在兜底路径里 → 浏览器里整块空白）。
+  renderBalanceChart(bal);
+
   // 优先用 ECharts（动效 + 交互 tooltip）；库没加载成功时回落到手绘 SVG。
   // 两条路都产出"每分钟积分 + 请求数"，所以面板在任何环境下都不会白屏。
   if (renderDashChart(pts, maxC, maxR)) {
@@ -3096,6 +3102,94 @@ function renderDashboard(ov, mt, us) {
   }
 
   renderInFlightRows(ov, inFlight);
+}
+
+/* 余额趋势：各账号剩余积分堆叠面积图（数据来自 /panel/api/balance_history）。
+   为什么堆叠：单看总量会掩盖"某个号在掉、另一个在涨"；堆叠后每层厚度就是该号余额，
+   掉层的形状一眼能看出是谁在被消耗。 */
+function renderBalanceChart(bal) {
+  const el = $('dashBalance');
+  const note = $('dashBalNote');
+  const hint = $('dashBalHint');
+  if (!el) return;
+
+  if (!bal || bal.enabled === false) {
+    el.innerHTML = '<div class="us-empty">余额趋势未启用（后端未加载采样器）</div>';
+    if (note) note.textContent = '未启用';
+    return;
+  }
+  const pts = bal.points || [];
+  if (!pts.length) {
+    el.innerHTML = '<div class="us-empty">还没有采样点：每次余额刷新（默认 5 分钟）会记一条</div>';
+    if (note) note.textContent = '等待首次采样';
+    if (hint) hint.textContent = '—';
+    return;
+  }
+
+  const metas = bal.accounts || [];
+  const nameOf = (uid) => {
+    const m = metas.find((x) => x.uid === uid);
+    return (m && m.nickname) || uid.slice(0, 8);
+  };
+  const labels = pts.map((p) => {
+    const d = new Date(p.t);
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  });
+  const palette = ['#5b7cfa', '#3ddc97', '#f5b544', '#e06c9f', '#8b7cf6', '#4fc3f7', '#ff8a65', '#a5d6a7', '#c5a3ff', '#ffd54f'];
+  const uids = metas.map((m) => m.uid).filter((uid) => pts.some((p) => p.a && p.a[uid] != null));
+
+  const last = pts[pts.length - 1];
+  if (note) note.textContent = '共 ' + pts.length + ' 个采样点 · 当前合计 ' + (last.total != null ? last.total : '—') + ' 分';
+  if (hint) {
+    hint.textContent = fmtLocalDateTime(new Date(pts[0].t).getTime()) + ' → ' + fmtLocalDateTime(new Date(last.t).getTime());
+  }
+
+  if (typeof window === 'undefined' || !window.echarts) {
+    el.innerHTML = '<div class="us-empty">图表库未加载，无法绘制余额趋势（接口数据已就绪）</div>';
+    return;
+  }
+  try {
+    if (!el.__inst || (el.__inst.isDisposed && el.__inst.isDisposed())) {
+      el.innerHTML = '';
+      el.__inst = window.echarts.init(el, null, { renderer: 'canvas' });
+      addEventListener('resize', () => { try { el.__inst && el.__inst.resize(); } catch (e) {} });
+    }
+    el.__inst.setOption({
+      animationDuration: 600,
+      grid: { left: 52, right: 16, top: 34, bottom: 26 },
+      legend: { top: 0, textStyle: { fontSize: 10 }, itemWidth: 10, itemHeight: 8, type: 'scroll' },
+      tooltip: {
+        trigger: 'axis',
+        formatter: (ps) => {
+          if (!ps || !ps.length) return '';
+          let sum = 0;
+          for (const p of ps) sum += Number(p.value) || 0;
+          return ps[0].axisValue + '<br/>合计 ' + sum.toFixed(0) + ' 分';
+        },
+      },
+      xAxis: {
+        type: 'category', data: labels, boundaryGap: false,
+        axisLabel: { fontSize: 10, interval: Math.max(0, Math.floor(labels.length / 8)) },
+        axisLine: { lineStyle: { color: 'var(--line)' } },
+      },
+      yAxis: {
+        type: 'value',
+        axisLabel: { fontSize: 10 },
+        splitLine: { lineStyle: { color: 'var(--line)', type: 'dashed', opacity: 0.5 } },
+      },
+      series: uids.map((uid, i) => ({
+        name: nameOf(uid),
+        type: 'line', stack: 'bal', smooth: true, symbol: 'none',
+        areaStyle: { opacity: 0.55 },
+        lineStyle: { width: 1 },
+        itemStyle: { color: palette[i % palette.length] },
+        data: pts.map((p) => (p.a && p.a[uid] != null ? p.a[uid] : 0)),
+      })),
+    }, { notMerge: true });
+    try { requestAnimationFrame(() => { try { el.__inst && el.__inst.resize(); } catch (e) {} }); } catch (e) {}
+  } catch (e) {
+    el.innerHTML = '<div class="us-empty">余额趋势渲染失败：' + esc(String((e && e.message) || e)) + '</div>';
+  }
 }
 
 /* 仪表盘图表：ECharts 版（动效 + 双轴 + 交互 tooltip）。

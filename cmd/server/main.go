@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/balancehist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -88,6 +89,13 @@ func main() {
 	tokens, err := tokenstore.Open(stateSibling(cfg.StateFile, "tokens.json"))
 	if err != nil {
 		log.Fatalf("tokens: %v", err)
+	}
+	// 余额时序采样器：与 state.json 同目录（data/balance-history.jsonl），保留 7 天。
+	// 打开失败不致命——趋势图是观测增强，不该阻止网关启动。
+	balanceHist, err := balancehist.Open(stateSibling(cfg.StateFile, "balance-history.jsonl"), 7*24*time.Hour)
+	if err != nil {
+		log.Printf("WARN: balance history disabled: %v", err)
+		balanceHist = nil
 	}
 	// 停机序：先 pool.Close()（最后一次 Flush → SaveState 已提交到 store），
 	// 再 store.Close() 排空在途异步写（最后一笔 Redis 镜像必须写完才关连接）。
@@ -179,6 +187,7 @@ func main() {
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
+		BalanceHistory: balanceHist,
 		Upstream:       up,
 		CheckinHours:   cfg.Schedule.CheckinHours,
 		TravelHours:    cfg.Schedule.TravelHours,
@@ -273,18 +282,19 @@ func main() {
 	// 用迟绑闭包，请求期才解引用（服务尚未启动时 h 必已赋值；nil 兜底只为构造期安全）。
 	var h *server.Handler
 	pn := panel.New(panel.Config{
-		Tokens:      tokens,
-		Pool:        p,
-		Usage:       rec,
-		RequestLog:  requestLog,
-		Upstream:    up,
-		Scheduler:   sch,
-		AuthDir:     cfg.AuthDir,
-		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
-		Live:        live,
+		Tokens:         tokens,
+		BalanceHistory: balanceHist,
+		Pool:           p,
+		Usage:          rec,
+		RequestLog:     requestLog,
+		Upstream:       up,
+		Scheduler:      sch,
+		AuthDir:        cfg.AuthDir,
+		APIKey:         cfg.APIKey,
+		RedisMode:      redisMode,
+		StickyCount:    sessCount,
+		Version:        appVersion,
+		Live:           live,
 		DegradeStatus: func() (bool, time.Time) {
 			if h == nil {
 				return false, time.Time{}

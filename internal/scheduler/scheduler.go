@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/balancehist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -31,6 +32,10 @@ type Config struct {
 	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
 	GrowthHours    []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
 	// 01:00 自动扫描+执行；避开零点整防解锁竞态）
+
+	// BalanceHistory 余额时序采样器（可选；nil = 不采样）。挂在余额刷新之后，
+	// 复用同一个 5 分钟节奏，不额外打上游。供面板画趋势。
+	BalanceHistory *balancehist.Recorder
 
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
 	// <= now+window 的套餐余额标记为"快过期"（pool 据此做最早到期优先，见
@@ -636,6 +641,17 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		}(a, st.UID)
 	}
 	wg.Wait()
+	// 采样：把本轮刷新后的余额记一条时序点（供面板画趋势）。
+	// 放在 wg.Wait 之后，保证拿到的是刷新完成后的值，而不是刷新中途的快照。
+	if s.cfg.BalanceHistory != nil {
+		snap := make(map[string]int64)
+		for _, st := range s.cfg.Pool.List() {
+			snap[st.UID] = st.Credits
+		}
+		if err := s.cfg.BalanceHistory.Append(snap); err != nil {
+			log.Printf("WARN: balance history append: %v", err)
+		}
+	}
 }
 
 // StartBalanceRefresh 后台周期性余额刷新（独立 ticker goroutine，ctx 取消即停）。

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/balancehist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -40,6 +41,8 @@ type Config struct {
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
+	// BalanceHistory 余额时序采样器（nil = 面板不提供趋势图）。
+	BalanceHistory *balancehist.Recorder
 	// Tokens 多令牌库（nil = 未启用令牌管理，面板隐藏该视图的写操作）。
 	Tokens  *tokenstore.Store
 	Version string // 面板版本号（展示用）
@@ -168,6 +171,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
 	// 多令牌（API Key）管理：列表/新建/启停/重置用量/删除。
 	p.mux.HandleFunc("GET /panel/api/tokens", p.withAuth(p.tokensList))
+	p.mux.HandleFunc("GET /panel/api/balance_history", p.withAuth(p.balanceHistory))
 	p.mux.HandleFunc("POST /panel/api/tokens", p.withAuth(p.tokensCreate))
 	p.mux.HandleFunc("POST /panel/api/tokens/{id}/toggle", p.withAuth(p.tokensToggle))
 	p.mux.HandleFunc("POST /panel/api/tokens/{id}/reset", p.withAuth(p.tokensReset))

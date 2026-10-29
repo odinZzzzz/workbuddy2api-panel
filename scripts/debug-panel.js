@@ -174,6 +174,23 @@ if (only === 'all' || only === 'dashboard') {
   const rows = $('dashInFlight').innerHTML
   check('在途分布两行', (rows.match(/ifrow/g) || []).length === 2)
   check('在途数正确', rows.includes('2 在途'))
+
+  // 余额趋势：有采样点 → 统计行；无采样点/未启用 → 对应空态
+  const bal = {
+    enabled: true,
+    points: [
+      { t: '2026-10-30T01:00:00+08:00', a: { u1: 4000, u2: 400 }, total: 4400 },
+      { t: '2026-10-30T01:05:00+08:00', a: { u1: 3950, u2: 380 }, total: 4330 },
+    ],
+    accounts: [{ uid: 'u1', nickname: '芥末' }, { uid: 'u2', nickname: 'k***@gmail.com' }],
+  }
+  call('renderDashboard', ov, mt, us, bal)
+  check('余额趋势统计行', ($('dashBalNote').textContent || '').includes('2 个采样点'), $('dashBalNote').textContent)
+  check('余额趋势当前合计', ($('dashBalNote').textContent || '').includes('4330'), $('dashBalNote').textContent)
+  call('renderDashboard', ov, mt, us, { enabled: true, points: [], accounts: [] })
+  check('无采样点空态', $('dashBalance').innerHTML.includes('还没有采样点'))
+  call('renderDashboard', ov, mt, us, { enabled: false })
+  check('未启用空态', $('dashBalance').innerHTML.includes('未启用'))
 }
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
