@@ -206,6 +206,31 @@ try {
     Check 'E2b 负值钳到 0（=不限）' ($r2.status -eq 200 -and $r2.json.token.rpm -eq 0) "body=$($r2.body.Substring(0,[Math]::Min(160,$r2.body.Length)))"
   } else { Check 'E2 建令牌失败' $false }
 
+  "== F. 归档下载 =="
+
+  # F1 可用日期列表
+  $r = Req -Method GET -Path '/panel/api/request_logs/days' -AuthKey $Key
+  Check 'F1 归档日期列表 200' ($r.status -eq 200 -and $r.body -match '"days"') "status=$($r.status)"
+
+  # F2 非法 day → 400（防路径穿越）
+  $r = Req -Method GET -Path '/panel/api/request_logs/download?day=../../etc/passwd' -AuthKey $Key
+  Check 'F2 非法 day → 400' ($r.status -eq 400) "status=$($r.status) body=$($r.body.Substring(0,[Math]::Min(120,$r.body.Length)))"
+
+  # F3 合法但无归档的日期 → 404 且提示可用日期
+  $r = Req -Method GET -Path '/panel/api/request_logs/download?day=1999-01-01' -AuthKey $Key
+  Check 'F3 无归档日期 → 404' ($r.status -eq 404) "status=$($r.status)"
+
+  # F4 当天归档可下载（若归档开关开着）
+  $today = (Get-Date).ToString('yyyy-MM-dd')
+  $resp = Invoke-WebRequest "$Base/panel/api/request_logs/download?day=$today" -Headers @{ Authorization = "Bearer $Key" } -UseBasicParsing -NoProxy -TimeoutSec 60 -SkipHttpErrorCheck
+  if ([int]$resp.StatusCode -eq 200) {
+    $disp = $resp.Headers['Content-Disposition']
+    Check 'F4 当天归档可下载（带 attachment 文件名）' ($disp -and $disp -match "requests-$today\.jsonl") "disp=$disp bytes=$($resp.RawContentLength)"
+  }
+  else {
+    Check 'F4 当天归档可下载（跳过：归档未开启或当天无请求）' $true "status=$([int]$resp.StatusCode)"
+  }
+
   # C4 x-api-key 头也认（Anthropic 客户端形态）
   $headers = @{ 'x-api-key' = $Key }
   $r = Invoke-WebRequest "$Base/v1/models" -Headers $headers -UseBasicParsing -NoProxy -TimeoutSec 60 -SkipHttpErrorCheck

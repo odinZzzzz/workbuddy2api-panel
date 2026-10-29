@@ -164,6 +164,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
+	p.mux.HandleFunc("GET /panel/api/request_logs/days", p.withAuth(p.requestLogsDays))
+	p.mux.HandleFunc("GET /panel/api/request_logs/download", p.withAuth(p.requestLogsDownload))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))

@@ -261,3 +261,15 @@ func TestArchivePruneHonorsSize(t *testing.T) {
 		t.Fatalf("remaining = %+v, want newest file only", entries)
 	}
 }
+
+// 归档未启用时 ArchiveDir 必须为空——面板据此回 501，而不是去猜一个目录。
+func TestArchiveDirDisabled(t *testing.T) {
+	r := New(Config{Enabled: false, Dir: t.TempDir()})
+	if got := r.ArchiveDir(); got != "" {
+		t.Fatalf("未启用归档时 ArchiveDir=%q want 空", got)
+	}
+	var nilRec *Recorder
+	if got := nilRec.ArchiveDir(); got != "" {
+		t.Fatalf("nil Recorder 应返回空，得到 %q", got)
+	}
+}

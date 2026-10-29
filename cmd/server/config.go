@@ -485,44 +485,44 @@ func (c *Config) normalize() error {
 	if c.Server.ReadTimeout == "" {
 		c.Server.ReadTimeout = "300s"
 	}
-	if c.ServerReadTimeoutDur, err = time.ParseDuration(c.Server.ReadTimeout); err != nil {
-		return fmt.Errorf("server.read_timeout: %w", err)
+	if c.ServerReadTimeoutDur, err = parseDur("server.read_timeout", c.Server.ReadTimeout); err != nil {
+		return err
 	}
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
 	}
-	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
-		return fmt.Errorf("cooldown.soft_rate: %w", err)
+	if c.SoftRateDur, err = parseDur("cooldown.soft_rate", c.Cooldown.SoftRate); err != nil {
+		return err
 	}
 	// 空值回落默认 2h（Default() 已置值；此兜底覆盖显式 "" 与 Default() 被绕过的场景）。
 	if c.Cooldown.SoftRateMax == "" {
 		c.Cooldown.SoftRateMax = "2h"
 	}
-	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
-		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	if c.SoftRateMaxDur, err = parseDur("cooldown.soft_rate_max", c.Cooldown.SoftRateMax); err != nil {
+		return err
 	}
-	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
-		return fmt.Errorf("pool.breaker_cooldown: %w", err)
+	if c.BreakerCooldownDur, err = parseDur("pool.breaker_cooldown", c.Pool.BreakerCooldown); err != nil {
+		return err
 	}
-	if c.BreakerCooldownMaxD, err = time.ParseDuration(c.Pool.BreakerCooldownMax); err != nil {
-		return fmt.Errorf("pool.breaker_cooldown_max: %w", err)
+	if c.BreakerCooldownMaxD, err = parseDur("pool.breaker_cooldown_max", c.Pool.BreakerCooldownMax); err != nil {
+		return err
 	}
-	if c.DegradeCooldownDur, err = time.ParseDuration(c.Pool.DegradeCooldown); err != nil {
-		return fmt.Errorf("pool.degrade_cooldown: %w", err)
+	if c.DegradeCooldownDur, err = parseDur("pool.degrade_cooldown", c.Pool.DegradeCooldown); err != nil {
+		return err
 	}
-	if c.DegradeCooldownMaxD, err = time.ParseDuration(c.Pool.DegradeCooldownMax); err != nil {
-		return fmt.Errorf("pool.degrade_cooldown_max: %w", err)
+	if c.DegradeCooldownMaxD, err = parseDur("pool.degrade_cooldown_max", c.Pool.DegradeCooldownMax); err != nil {
+		return err
 	}
-	if c.SessionTTL, err = time.ParseDuration(c.SessionSticky.TTL); err != nil {
-		return fmt.Errorf("session_sticky.ttl: %w", err)
+	if c.SessionTTL, err = parseDur("session_sticky.ttl", c.SessionSticky.TTL); err != nil {
+		return err
 	}
-	if c.SessionGCInterval, err = time.ParseDuration(c.SessionSticky.GCInterval); err != nil {
-		return fmt.Errorf("session_sticky.gc_interval: %w", err)
+	if c.SessionGCInterval, err = parseDur("session_sticky.gc_interval", c.SessionSticky.GCInterval); err != nil {
+		return err
 	}
 	// 快过期窗口：空 = 禁用（ExpiringSoonDur 0）；非空必须可解析（拼写错误 fail fast）。
 	if c.Pool.ExpiringSoon != "" {
-		if c.ExpiringSoonDur, err = time.ParseDuration(c.Pool.ExpiringSoon); err != nil {
-			return fmt.Errorf("pool.expiring_soon: %w", err)
+		if c.ExpiringSoonDur, err = parseDur("pool.expiring_soon", c.Pool.ExpiringSoon); err != nil {
+			return err
 		}
 	}
 	if c.ExpiringSoonDur < 0 {
@@ -535,8 +535,8 @@ func (c *Config) normalize() error {
 	if c.Pool.CostExploreInterval == "" {
 		c.Pool.CostExploreInterval = "30m"
 	}
-	if c.CostExploreIntervalDur, err = time.ParseDuration(c.Pool.CostExploreInterval); err != nil {
-		return fmt.Errorf("pool.cost_explore_interval: %w", err)
+	if c.CostExploreIntervalDur, err = parseDur("pool.cost_explore_interval", c.Pool.CostExploreInterval); err != nil {
+		return err
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
@@ -695,4 +695,17 @@ func checkHourRange(field, switchKey string, hours []int) error {
 		}
 	}
 	return nil
+}
+
+// parseDur 解析时长字段，错误信息带**字段名 + 当前值 + 合法示例**。
+//
+// 为什么不用裸 %w：`cooldown.soft_rate: time: invalid duration "6o0s"` 只说"不合法"，
+// 用户还得自己翻文档确认格式（尤其容易漏掉单位：`600` 不是 `600s`）。带上示例后
+// 一眼能改，也省掉一轮"改完再启动再失败"。
+func parseDur(field, raw string) (time.Duration, error) {
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %q 不是合法时长（示例：600s / 2h / 30m；纯数字必须带单位）", field, raw)
+	}
+	return v, nil
 }

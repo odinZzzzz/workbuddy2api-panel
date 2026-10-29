@@ -80,10 +80,10 @@ type Event struct {
 	HasCredit        bool      `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
-	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
-	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
-	ClientIP         string    `json:"client_ip,omitempty"`
-	UserAgent        string    `json:"user_agent,omitempty"`
+	CacheHitTokens  int64  `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
@@ -647,4 +647,15 @@ func (w *archiveWriter) errString() string {
 	w.lastErrMu.Lock()
 	defer w.lastErrMu.Unlock()
 	return w.lastErr
+}
+
+// ArchiveDir 返回归档目录（未启用归档时返回空串）。
+//
+// 给面板「下载当日归档」用：面板只持有 Recorder，不该自己猜目录结构
+// （文件命名 requests-YYYY-MM-DD.jsonl 属于 reqlog 的实现细节）。
+func (r *Recorder) ArchiveDir() string {
+	if r == nil || r.archive == nil || !r.archive.enabled() {
+		return ""
+	}
+	return r.archive.cfg.Dir
 }

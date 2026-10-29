@@ -859,3 +859,20 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+// 时长解析失败时，报错必须带字段名、当前值与合法示例（PR-2：报错可操作）。
+func TestParseDurMessage(t *testing.T) {
+	if _, err := parseDur("cooldown.soft_rate", "6o0s"); err == nil {
+		t.Fatal("非法时长应报错")
+	} else {
+		msg := err.Error()
+		for _, want := range []string{"cooldown.soft_rate", "6o0s", "600s", "2h"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("报错缺少 %q: %s", want, msg)
+			}
+		}
+	}
+	if d, err := parseDur("x", "30m"); err != nil || d.Minutes() != 30 {
+		t.Fatalf("合法时长应解析成功: %v %v", d, err)
+	}
+}
