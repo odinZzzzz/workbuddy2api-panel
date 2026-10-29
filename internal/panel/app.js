@@ -335,8 +335,16 @@ $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKe
    是因为 go() 的初始调用就会触发首页卡片的渲染，必须先于它就位。 */
 let lastPackages = null;
 let lastPackagesAt = 0;
+let lastOverviewSig = '';             // 上次 overview 的到期快照指纹：变了就作废逐包明细缓存
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
+
+// expSnapshotSig 生成「到期快照指纹」：余额/快过期积分/最早到期批次任一变化都会
+// 改变指纹，用于判断逐包明细缓存是否已经与池状态脱节（见 renderOverview）。
+function expSnapshotSig(d) {
+  const list = (d && d.accounts) || [];
+  return list.map(a => [a.uid, a.credits, a.credits_expiring, a.credits_earliest_expiry, a.credits_earliest_remaining].join(':')).join('|');
+}
 
 const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
@@ -523,10 +531,20 @@ async function loadOverview(quiet) {
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
-    renderModelLocks(d.model_locks);
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的到期快照，不额外发请求）。
-    // 已有逐包明细缓存时不再覆盖——明细信息量更大，别把它降级成快照。
-    if ($('expBox') && !lastPackages) renderExpirySnapshot(d);
+    // 逐包明细缓存只在「快照没变且未过期」时保留——否则签到/刷新后余额或到期
+    // 数字已经变了，卡片却还停在旧的「检查」结果上，这正是「到期提醒刷新不一致」
+    // 的根因（此前是 !lastPackages 才渲染，点过一次检查就再也不更新了）。
+    if ($('expBox')) {
+      const sig = expSnapshotSig(d);
+      const changed = lastOverviewSig && sig !== lastOverviewSig;
+      lastOverviewSig = sig;
+      if (lastPackages && (changed || Date.now() - lastPackagesAt > EXP_FRESH_MS)) {
+        lastPackages = null;
+        lastPackagesAt = 0;
+      }
+      if (!lastPackages) renderExpirySnapshot(d);
+    }
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 

@@ -156,6 +156,34 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
 		}
 	}
+	// 到期优先（prefer_expiring）：在同一成本层（"同类型账号"）的候选里，只保留
+	// 最早到期的那一组。分组粒度是自然日——同一天到期的账号共享流量（组内仍按
+	// 权重加权随机），避免"只有到期最早的那一个号承接全部流量"。
+	// 这是确定性排序，取代此前 ×3 的软偏好：号一多 ×3 会被其他权重摊薄，
+	// 结果常常选不到真正快过期的号，积分就白作废了。
+	// 没有任何账号存在到期压力时保持原样（不改变纯负载均衡行为）。
+	if p.preferExpiring {
+		var bestDay time.Time
+		any := false
+		for _, x := range ws {
+			if day, ok := expiryDayOf(x.e, now); ok {
+				if !any || day.Before(bestDay) {
+					bestDay, any = day, true
+				}
+			}
+		}
+		if any {
+			kept := make([]weighted, 0, len(ws))
+			for _, x := range ws {
+				if day, ok := expiryDayOf(x.e, now); ok && day.Equal(bestDay) {
+					kept = append(kept, x)
+				}
+			}
+			if len(kept) > 0 {
+				ws = kept
+			}
+		}
+	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
 	// 洗牌（且**不消耗 p.randInt64N 注入源**，避免改变 pickWeighted 的确定性语义，
 	// 见 TestPickDeterministicViaSetRandomSource）。权重全等或存在并列时，按字典序
@@ -425,10 +453,29 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 
 // expiringNow 报告账号是否存在当前仍有效的快过期积分批次。
 func expiringNow(e *entry, now time.Time) bool {
-	return e.creditsExpiring > 0 &&
-		e.creditsEarliestRemaining > 0 &&
-		!e.creditsEarliestExpiry.IsZero() &&
-		e.creditsEarliestExpiry.After(now)
+	// 判据只有 creditsExpiring > 0，与面板「积分到期提醒」完全同口径。
+	// 此前还要求 creditsEarliestRemaining > 0 且 creditsEarliestExpiry 在未来，
+	// 于是出现「提醒说有快过期积分、选号却不优先」的不一致：最早那批被消耗完或
+	// 已过期时 SetCreditsDetailed 会把这两个字段清零，但窗口内可能仍有其他批次。
+	// 到期时间只用于「谁先到期」的排序（见 expiryDayOf），不再决定是否算快过期。
+	_ = now
+	return e.creditsExpiring > 0
+}
+
+// expiryDayOf 返回账号最早到期批次的「自然日」（本地时区，按天粒度），
+// 第二个返回值表示该账号是否参与到期优先排序（只有存在快过期压力的账号参与）。
+//
+// 压力存在但最早到期时间未知（快照被清零）时返回零值 + true——视为最紧急：
+// 宁可先把它用掉，也不要因为缺元数据而漏掉即将作废的积分。
+func expiryDayOf(e *entry, now time.Time) (time.Time, bool) {
+	if !expiringNow(e, now) {
+		return time.Time{}, false
+	}
+	if e.creditsEarliestExpiry.IsZero() {
+		return time.Time{}, true
+	}
+	y, m, d := e.creditsEarliestExpiry.In(time.Local).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.Local), true
 }
 
 // routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false

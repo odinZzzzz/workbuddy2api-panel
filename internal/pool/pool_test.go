@@ -1740,6 +1740,11 @@ func TestTokenUsagePersistsAcrossReload(t *testing.T) {
 	}
 }
 
+// 到期优先是「同层里最早到期组独占」，不再是 ×3 软偏好。
+//
+// 语义变更（本提交）：×3 虚拟实例在号多时会被其他权重摊薄，常选不到真正快过期的
+// 号，积分白作废。改为确定性分层：同一成本层内只保留「最早到期那一天」的账号组，
+// 组内仍按权重加权随机（负载仍会分散，只是不再分给更晚到期的号）。
 func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
@@ -1752,21 +1757,19 @@ func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(2*time.Hour), 100)
 	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
 
-	// 3:1 虚拟实例是软偏好而非硬优先。用确定性随机源统计长期分布：两个快过期
-	// 账号的合计份额应显著高于普通账号，同时普通账号仍保留少量流量。
 	rng := rand.New(rand.NewPCG(1, 2))
 	p.SetRandomSource(func(n int64) int64 { return rng.Int64N(n) })
 	counts := map[string]int{}
-	for i := 0; i < 2000; i++ {
+	for i := 0; i < 500; i++ {
 		got := p.Pick()
 		if got == nil {
 			t.Fatal("pick returned nil")
 		}
 		counts[got.UID]++
 	}
-	expiring := counts["soon"] + counts["later"]
-	if expiring < 1500 || counts["none"] == 0 {
-		t.Fatalf("virtual weight distribution=%v, want expiring majority and regular non-zero", counts)
+	// 到期日最早的那一组独占流量；到期更晚的与无压力的账号为 0。
+	if counts["soon"] != 500 || counts["later"] != 0 || counts["none"] != 0 {
+		t.Fatalf("到期优先分布=%v, want soon=500 later=0 none=0", counts)
 	}
 }
 
@@ -1979,5 +1982,101 @@ func TestResumeIdempotent(t *testing.T) {
 	}
 	if st, _ := p.Status("u1"); st.Paused {
 		t.Errorf("Paused 应仍为 false: %+v", st)
+	}
+}
+
+// ---------- 到期优先（同类型账号里最早到期的先承接流量）----------
+
+// 快过期判据必须与面板「到期提醒」同口径：只看 creditsExpiring > 0。
+// 回归点：此前还要求 earliestRemaining > 0 且 earliestExpiry 在未来，导致
+// 最早批次被消耗完/已过期后快照被清零、提醒仍显示有快过期积分但选号不优先。
+func TestExpiringNowMatchesReminderSemantics(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	now := time.Now()
+	// 窗口内有积分，但最早批次元数据被清零（SetCreditsDetailed 的清理分支）
+	p.SetCreditsDetailed("u1", 100, 100, 60, time.Time{}, 0)
+	p.mu.Lock()
+	e := p.byUID["u1"]
+	got := expiringNow(e, now)
+	_, rankable := expiryDayOf(e, now)
+	p.mu.Unlock()
+	if !got {
+		t.Fatal("窗口内有快过期积分时必须判定为 expiring（与面板提醒同口径）")
+	}
+	if !rankable {
+		t.Fatal("到期时间未知也应参与到期优先排序（视为最紧急）")
+	}
+}
+
+// 同一成本层里，只有「最早到期那一天」的账号组承接流量。
+func TestPickPrefersEarliestExpiryDay(t *testing.T) {
+	p := New("")
+	p.SetPreferExpiring(true)
+	p.Add(&auth.Auth{UID: "soon"})
+	p.Add(&auth.Auth{UID: "later"})
+	p.Add(&auth.Auth{UID: "none"})
+	now := time.Now()
+	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(24*time.Hour), 100)
+	p.SetCreditsDetailed("later", 100, 100, 100, now.Add(72*time.Hour), 100)
+	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
+
+	got := p.Pick()
+	if got == nil || got.UID != "soon" {
+		t.Fatalf("pick=%v, want soon（到期日最早）", got)
+	}
+}
+
+// 到期日相同的一组共享流量：同组内不会因为排序把另一个号饿死。
+func TestPickExpirySameDaySharesLoad(t *testing.T) {
+	p := New("")
+	p.SetPreferExpiring(true)
+	p.Add(&auth.Auth{UID: "a1"})
+	p.Add(&auth.Auth{UID: "a2"})
+	now := time.Now()
+	at := now.Add(48 * time.Hour)
+	p.SetCreditsDetailed("a1", 100, 100, 100, at, 100)
+	p.SetCreditsDetailed("a2", 100, 100, 100, at, 100)
+
+	seen := map[string]bool{}
+	for i := 0; i < 30; i++ {
+		// 清掉 lastUsed 的 100ms 防惊群窗口，让每次 pick 都真实参与抽签
+		p.mu.Lock()
+		for _, e := range p.byUID {
+			e.lastUsed = time.Time{}
+		}
+		p.mu.Unlock()
+		if got := p.Pick(); got != nil {
+			seen[got.UID] = true
+		}
+	}
+	if !seen["a1"] || !seen["a2"] {
+		t.Fatalf("同到期日账号应共享流量，实际命中=%v", seen)
+	}
+}
+
+// 关闭 prefer_expiring 后回到纯负载均衡：不再按到期日收窄候选。
+func TestPickPreferExpiringOffKeepsAllCandidates(t *testing.T) {
+	p := New("")
+	p.SetPreferExpiring(false)
+	p.Add(&auth.Auth{UID: "soon"})
+	p.Add(&auth.Auth{UID: "none"})
+	now := time.Now()
+	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(time.Hour), 100)
+	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
+
+	seen := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		p.mu.Lock()
+		for _, e := range p.byUID {
+			e.lastUsed = time.Time{}
+		}
+		p.mu.Unlock()
+		if got := p.Pick(); got != nil {
+			seen[got.UID] = true
+		}
+	}
+	if !seen["soon"] || !seen["none"] {
+		t.Fatalf("关闭偏好后两个号都应参与，实际命中=%v", seen)
 	}
 }
