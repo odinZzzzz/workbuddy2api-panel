@@ -376,6 +376,16 @@ setTimeout(() => {
   go(hash in TITLES ? hash : 'accounts');
 }, 0);
 
+/* 监听 hashchange：此前只在启动时读一次 hash，于是浏览器前进/后退、外部脚本
+   改 location.hash 都不会切视图（实测：ego/Playwright 里 goto('#dashboard')
+   停在原视图不动）。这里补上监听，并忽略未知 hash（回落账号池）。 */
+addEventListener('hashchange', () => {
+  const h = (location.hash || '#accounts').slice(1);
+  if (!(h in TITLES)) return;
+  if (typeof view === 'string' && view === h) return;
+  go(h);
+});
+
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 function renderAccounts(list) {
   const tb = $('accBody');
