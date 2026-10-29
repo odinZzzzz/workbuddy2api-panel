@@ -346,7 +346,7 @@ function expSnapshotSig(d) {
   return list.map(a => [a.uid, a.credits, a.credits_expiring, a.credits_earliest_expiry, a.credits_earliest_remaining].join(':')).join('|');
 }
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', dashboard: '仪表盘', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -356,6 +356,7 @@ function go(v) {
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
+  if (v === 'dashboard') loadDashboard();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
@@ -2964,3 +2965,134 @@ if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 
 // 「刷新」始终实时查（显式 force，不依赖事件对象真值）
 if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
+
+
+/* ── 仪表盘：在途流量与积分消耗 ─────────────────────────────────────
+   数据全部来自既有接口，纯前端聚合（不新增后端端点）：
+     overview          → 账号在途/积分/健康计数
+     request_metrics   → 全局在途、成功率、平均耗时、recent[]（逐请求元数据）
+     usage?hours=24    → 今日累计积分与请求量
+   recent[] 里带 credit 与 time，按分钟分桶就能画出「每分钟消耗多少积分」，
+   这是唯一能反映"此刻正在烧多少积分"的数据源（usage 只按小时聚合）。 */
+async function loadDashboard() {
+  const note = $('dashNote');
+  if (note) note.textContent = '读取中…';
+  try {
+    const [ov, mt, us] = await Promise.all([api('overview'), api('request_metrics'), api('usage?hours=24')]);
+    renderDashboard(ov || {}, mt || {}, us || {});
+    if (note) note.textContent = '更新于 ' + new Date().toLocaleTimeString() + ' · 每 5 秒自动刷新';
+  } catch (e) {
+    if (note) note.textContent = '读取失败：' + e.message;
+  }
+}
+
+function dashMinuteKey(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') +
+    ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function renderDashboard(ov, mt, us) {
+  const recent = Array.isArray(mt.recent) ? mt.recent : [];
+  const now = Date.now();
+  const win5 = recent.filter(r => { const t = Date.parse(r.time); return Number.isFinite(t) && now - t <= 5 * 60 * 1000; });
+  const credits5 = win5.reduce((s, r) => s + (Number(r.credit) || 0), 0);
+  const tok5 = win5.reduce((s, r) => s + (Number(r.total_tokens) || 0), 0);
+  const todayCredits = (us.totals && Number(us.totals.credits)) || 0;
+  const todayReq = (us.totals && Number(us.totals.requests)) || 0;
+  const sr = mt.success_rate;
+  const inFlight = Number(mt.in_flight) || 0;
+  const full = Number(ov.in_flight_full) || 0;
+
+  if ($('dashKpis')) {
+    $('dashKpis').innerHTML =
+      usKpi(String(inFlight), '在途请求', inFlight ? 'c-accent' : 'c-mute',
+        full ? full + ' 个账号在途占满' : '无账号占满') +
+      usKpi(credits5.toFixed(2), '近 5 分钟积分', credits5 > 0 ? 'c-warn' : 'c-mute',
+        win5.length ? win5.length + ' 次请求 · ' + fmtTok(tok5) + ' tok' : '窗口内无请求') +
+      usKpi(sr == null ? '—' : Number(sr).toFixed(1) + '%', '成功率', sr == null ? 'c-mute' : (sr >= 99 ? 'c-ok' : 'c-warn'),
+        '完成 ' + (mt.completed || 0) + ' · 失败 ' + (mt.failed || 0)) +
+      usKpi(fmtMs(mt.avg_duration_ms), '平均耗时', 'c-soft', 'http 成功率 ' + (mt.http_success_rate == null ? '—' : mt.http_success_rate + '%')) +
+      usKpi(todayCredits.toFixed(2), '今日消耗积分', 'c-accent', todayReq + ' 次请求 · ' +
+        (todayCredits > 0 && todayReq > 0 ? (todayCredits / todayReq).toFixed(3) + ' 分/次' : '—')) +
+      usKpi(String(ov.healthy == null ? '—' : ov.healthy) + '/' + (ov.total == null ? '—' : ov.total), '可用账号', 'c-ok',
+        '冷却 ' + (ov.cooling || 0) + ' · 禁用 ' + (ov.disabled || 0));
+  }
+
+  // ── 每分钟积分柱状图（近 15 分钟）──
+  const buckets = new Map();
+  for (let i = 14; i >= 0; i--) {
+    const d = new Date(now - i * 60000);
+    const k = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') +
+      ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    buckets.set(k, { label: k.slice(11), credits: 0, reqs: 0 });
+  }
+  let outside = 0;
+  for (const r of recent) {
+    const k = dashMinuteKey(r.time);
+    if (!k) continue;
+    if (!buckets.has(k)) { outside++; continue; }
+    const b = buckets.get(k);
+    b.credits += Number(r.credit) || 0;
+    b.reqs += 1;
+  }
+  const pts = [...buckets.values()];
+  const maxC = Math.max(0.0001, ...pts.map(p => p.credits));
+  const maxR = Math.max(1, ...pts.map(p => p.reqs));
+  const W = 1000, H = 200, padL = 44, padB = 22, padT = 10;
+  const bw = (W - padL - 8) / pts.length;
+  let bars = '';
+  pts.forEach((p, i) => {
+    const hC = Math.round((H - padT - padB) * (p.credits / maxC));
+    const x = padL + i * bw + bw * 0.15;
+    const w = bw * 0.7;
+    if (p.credits > 0) {
+      bars += '<rect x="' + x.toFixed(1) + '" y="' + (H - padB - hC) + '" width="' + w.toFixed(1) + '" height="' + hC +
+        '" rx="2" fill="var(--accent)" opacity="0.85"><title>' + p.label + ' · ' + p.credits.toFixed(3) + ' 积分 · ' + p.reqs + ' 次</title></rect>';
+    }
+    // 请求数用一条细柱叠在积分柱右侧，便于同屏对比"流量"与"花费"
+    const hR = Math.round((H - padT - padB) * (p.reqs / maxR) * 0.5);
+    if (p.reqs > 0) {
+      bars += '<rect x="' + (x + w - 2).toFixed(1) + '" y="' + (H - padB - hR) + '" width="2.5" height="' + hR +
+        '" fill="var(--ok)" opacity="0.9"><title>' + p.label + ' · ' + p.reqs + ' 次请求</title></rect>';
+    }
+    if (i % 3 === 0) {
+      bars += '<text x="' + (x + w / 2).toFixed(1) + '" y="' + (H - 6) + '" font-size="10" fill="var(--ink-3)" text-anchor="middle">' + p.label + '</text>';
+    }
+  });
+  if ($('dashChart')) {
+    $('dashChart').innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" height="200" preserveAspectRatio="none">' +
+      '<line x1="' + padL + '" y1="' + (H - padB) + '" x2="' + (W - 4) + '" y2="' + (H - padB) + '" stroke="var(--line)" stroke-width="1"/>' +
+      '<text x="4" y="' + (padT + 8) + '" font-size="10" fill="var(--ink-3)">' + maxC.toFixed(2) + ' 分</text>' +
+      bars + '</svg>';
+  }
+  if ($('dashChartNote')) {
+    $('dashChartNote').textContent = '峰值 ' + maxC.toFixed(2) + ' 分/分钟 · 窗口内 ' + recent.length + ' 条请求记录' +
+      (outside ? '（' + outside + ' 条早于 15 分钟）' : '');
+  }
+
+  // ── 在途流量分布 ──
+  const accs = (ov.accounts || []).slice().sort((a, b) => (b.in_flight || 0) - (a.in_flight || 0));
+  const maxIf = Math.max(1, ...accs.map(a => a.in_flight || 0));
+  const rows = accs.map(a => {
+    const f = a.in_flight || 0;
+    const pct = Math.round((f / maxIf) * 100);
+    const label = esc(a.nickname || a.uid.slice(0, 8));
+    const color = f > 0 ? 'var(--accent)' : 'var(--line)';
+    return '<div class="ifrow"><span class="ifname">' + label + '</span>' +
+      '<span class="ifbar"><i style="width:' + Math.max(pct, f > 0 ? 6 : 0) + '%;background:' + color + '"></i></span>' +
+      '<span class="ifval">' + f + ' 在途 · ' + (a.credits == null ? '—' : a.credits) + ' 分</span></div>';
+  }).join('');
+  if ($('dashInFlight')) {
+    $('dashInFlight').innerHTML = rows || '<div class="empty"><div class="big">没有账号</div>先在「账号池」添加账号</div>';
+  }
+  if ($('dashIfNote')) {
+    const busy = accs.filter(a => (a.in_flight || 0) > 0).length;
+    $('dashIfNote').textContent = busy + ' 个账号正在承接流量 · 共 ' + inFlight + ' 个在途请求';
+  }
+}
+
+$('btnDash').onclick = () => loadDashboard();
+// 仪表盘打开时每 5 秒自动刷新（切走就停，避免后台空转）
+setInterval(() => { if (typeof view === 'string' && view === 'dashboard' && !document.hidden) loadDashboard(); }, 5000);

@@ -586,6 +586,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
   .exp-main.err { color: var(--bad); }
 
+
+/* 仪表盘：在途流量分布条 */
+.ifrow { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 12.5px; }
+.ifname { width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.ifbar { flex: 1; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.ifbar > i { display: block; height: 100%; border-radius: 4px; transition: width .3s ease; }
+.ifval { width: 170px; text-align: right; color: var(--ink-3); font-variant-numeric: tabular-nums; font-family: var(--mono); }
 </style>
 </head>
 <body>
@@ -599,6 +606,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
+      <li><a href="#dashboard" data-view="dashboard">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13V7m4 6V3m4 10V9m4 4V5"/></svg>
+        <span>仪表盘</span>
+      </a></li>
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
@@ -820,6 +831,41 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     </section>
 
     <!-- 用量 -->
+    <!-- 仪表盘：在途流量 + 积分消耗（数据源 overview / request_metrics / usage，纯前端聚合） -->
+    <section class="view" id="view-dashboard" hidden>
+      <div class="box">
+        <header>
+          <h3>在途流量与积分消耗</h3>
+          <span class="grow"></span>
+          <span class="note" id="dashNote">—</span>
+          <button class="xs" id="btnDash">刷新</button>
+        </header>
+        <div class="kpis" id="dashKpis"></div>
+        <div class="pad">
+          <div class="uschart">
+            <div class="uschart-hd">
+              <span class="lb">积分消耗 · 按分钟</span>
+              <span class="note" id="dashChartNote">—</span>
+              <span class="grow"></span>
+              <span class="legend">
+                <i class="sw sw-p"></i>积分<i class="sw sw-c"></i>请求数
+              </span>
+            </div>
+            <div id="dashChart" class="uschart-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>在途流量分布</h3>
+          <span class="grow"></span>
+          <span class="note" id="dashIfNote">—</span>
+        </header>
+        <div class="pad" id="dashInFlight"></div>
+      </div>
+    </section>
+
     <section class="view" id="view-usage" hidden>
       <div class="box">
         <header>
