@@ -310,6 +310,25 @@ go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 
 exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
 
+### 构建与部署脚本（推荐）
+
+本机内存紧张时 `go build ./...` 会并行 fork 大量 `compile.exe` 撞
+`The paging file is too small`（实测两次）。仓库自带脚本把「低并发 + 可复现 flags +
+部署自检」固化，避免每次手敲：
+
+```powershell
+pwsh scripts/build.ps1                 # 只编本机（热编 ~3s）
+pwsh scripts/build.ps1 -Target linux   # 交叉编译 linux/amd64（~47s，产物 9.4MB）
+pwsh scripts/build.ps1 -Target all -Parallel 2   # 内存宽裕时可提并发
+
+# 部署：上传 → 覆盖 → systemctl restart → 验 /healthz → 打印日志尾部
+$env:WB_HOST='your-host'; $env:WB_USER='root'; $env:WB_PASS='***'; $env:WB_API_KEY='sk-***'
+pwsh scripts/deploy.ps1
+```
+
+凭据只从环境变量读，脚本里不落任何密钥；失败即非零退出（不会把"没起来"当成功）。
+迭代台账与后续 PR 规划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+
 ### 方式三：源码运行（开发调试）
 
 ```bash
@@ -715,6 +734,9 @@ http://127.0.0.1:7863/panel/
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
+
+> 未实现的 `/v1/*` 端点回 **501 + `supported` 端点清单**（不是 404）：404 容易被
+> 误读成「网关挂了/地址填错」，而实际是「这个协议本网关不提供」（如 `/v1/embeddings`）。
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
 

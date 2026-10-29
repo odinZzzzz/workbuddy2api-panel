@@ -2032,3 +2032,29 @@ func TestTokenAuthAllowsGlobalAndToken(t *testing.T) {
 		t.Fatalf("过期令牌应 401 token_expired，得到 %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// 未实现的 /v1/* 端点回 501 并带端点清单（而不是 404）。
+func TestUnknownV1EndpointReturns501(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt"})
+	h := NewHandler(Config{Pool: p, APIKey: "k"})
+
+	req := httptest.NewRequest("POST", "/v1/embeddings", nil)
+	req.Header.Set("Authorization", "Bearer k")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d want 501: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "not_implemented") || !strings.Contains(body, "/v1/responses") {
+		t.Fatalf("响应应带 code 与端点清单，得到 %s", body)
+	}
+	// 未鉴权时不该泄露清单
+	req2 := httptest.NewRequest("POST", "/v1/embeddings", nil)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("未鉴权应 401，得到 %d", rec2.Code)
+	}
+}

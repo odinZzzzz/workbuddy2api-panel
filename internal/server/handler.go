@@ -162,6 +162,11 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuthAPIKey(h.anthropicCountTokens))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	// /v1/ 兜底：未实现的端点回 501 并列出本网关支持的端点。
+	// 为什么不用默认 404：很多客户端把 404 当成"网关挂了"或"地址填错"，
+	// 而实际是"这个协议本网关不提供"（如 /v1/embeddings）。501 + 清单让
+	// 调用方一眼看出该换哪个端点，而不是反复重试。
+	h.mux.HandleFunc("/v1/", h.withAuth(h.notImplemented))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
@@ -262,6 +267,28 @@ func (h *Handler) withAuthAPIKey(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// supportedEndpoints 本网关实现的端点清单（501 兜底时回给客户端）。
+var supportedEndpoints = []string{
+	"POST /v1/chat/completions",
+	"POST /v1/responses",
+	"POST /v1/messages",
+	"POST /v1/messages/count_tokens",
+	"GET /v1/models",
+	"GET /status",
+	"GET /healthz",
+}
+
+// notImplemented 处理 /v1/ 下未实现的端点。
+func (h *Handler) notImplemented(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusNotImplemented, map[string]any{
+		"error": map[string]any{
+			"code":      "not_implemented",
+			"message":   r.Method + " " + r.URL.Path + " 本网关未实现（支持的端点见 supported）",
+			"supported": supportedEndpoints,
+		},
+	})
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
