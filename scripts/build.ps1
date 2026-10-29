@@ -42,7 +42,7 @@ try {
     $hostOut = if ($Out) { $Out } else { 'wb2api.exe' }
     Build-One 'windows' 'amd64' $hostOut
   }
-  if ($Target -in @('host', 'linux', 'all')) {
+  if ($Target -in @('linux', 'all')) {
     Build-One 'linux' 'amd64' 'wb2api-linux-amd64'
   }
   ""
