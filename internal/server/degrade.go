@@ -5,17 +5,23 @@ import (
 	"time"
 )
 
-// degradeGate 降级状态机：passthrough 模式下请求被上游内容策略拦截时，
-// 切换到 Degraded 中性提示词直到次日 00:00 CST 重置。
+// degradeGate 降级状态机：passthrough/append 模式下请求被上游内容策略拦截时，
+// 切换到 Degraded 中性提示词，并在窗口内让后续请求直达中性提示词。
 //
 // 定位：误报处理（与 internal/upstream/sanitize.go 同哲学）——内容拦截多为
 // system 来源的指纹误报，换最小中性提示词即可绕开；不是对抗框架。
 //
-// 状态机：进程内存、重启清零（可接受：重启极少触发，且 custom 模式根本
-// 不进降级路径）。降级期内的请求直达 Degraded，不再先撞 400。
+// 窗口长度由 ttl 决定：
+//   - ttl > 0（默认 30m，见 prompt.degrade_ttl）：自愈窗口。到期自动回到
+//     passthrough 探一次，再被拦才重新降级。一次误报不该让全天都跑中性提示词
+//     ——客户端那边只会表现为「模型今天变笨了」，且没有任何错误可循。
+//   - ttl = 0：旧语义，到次日 00:00 CST 复位。
+//
+// 状态机：进程内存、重启清零（可接受：重启极少触发，且 custom 模式根本不进降级路径）。
 type degradeGate struct {
 	mu    sync.Mutex
 	until time.Time
+	ttl   time.Duration
 }
 
 // Active 当前是否处于降级期（now < until）。
@@ -25,15 +31,31 @@ func (g *degradeGate) Active() bool {
 	return time.Now().Before(g.until)
 }
 
-// Trigger 触发降级，直到次日 00:00 CST（Asia/Shanghai）。
-// 已在降级期内则不续期（保持最早触发点的 00:00 重置语义）。
+// Trigger 触发降级。窗口长度由 ttl 决定：ttl>0 → now+ttl（自愈）；ttl=0 → 次日 00:00 CST。
+// 已在降级期内则不续期（保持最早触发点的复位时刻，避免每次命中都把窗口往后推）。
 func (g *degradeGate) Trigger() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !time.Now().Before(g.until) {
-		// 已过期/未触发 → 设新的 until；未过期则保持原 until（不续期）。
-		g.until = nextMidnightCST(time.Now())
+	now := time.Now()
+	if now.Before(g.until) {
+		return
 	}
+	if g.ttl > 0 {
+		g.until = now.Add(g.ttl)
+		return
+	}
+	g.until = nextMidnightCST(now)
+}
+
+// SetTTL 设置降级窗口时长（0 = 到次日 00:00 CST）。只影响下一次触发：
+// 进行中的窗口不变，避免运行期改配置把当前窗口无限延长。
+func (g *degradeGate) SetTTL(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.ttl = d
 }
 
 // Snapshot 一次取回「是否降级 + 结束时刻」，供 /status 与面板展示。

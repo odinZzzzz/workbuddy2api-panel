@@ -58,7 +58,8 @@
   },
   "prompt": {
     "mode": "passthrough",
-    "file": ""
+    "file": "",
+    "degrade_ttl": "30m"
   },
   "anthropic": {
     "default_model": "cn:deepseek-v4.1-flash",

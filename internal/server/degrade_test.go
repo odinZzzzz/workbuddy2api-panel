@@ -99,3 +99,41 @@ func TestDegradeGateSnapshot(t *testing.T) {
 		t.Errorf("Snapshot until=%v want %v", until, want)
 	}
 }
+
+// ttl>0 时窗口按 now+ttl 计算并自动到期（自愈），且窗口内不续期。
+func TestDegradeGateTTLSelfHeal(t *testing.T) {
+	var g degradeGate
+	g.SetTTL(40 * time.Millisecond)
+	g.Trigger()
+	active, until := g.Snapshot()
+	if !active {
+		t.Fatal("Trigger 后应处于降级期")
+	}
+	if d := time.Until(until); d > time.Second {
+		t.Fatalf("ttl=40ms 时窗口不应超过 1s，实际 %v", d)
+	}
+	// 窗口内再次 Trigger 不续期
+	first := until
+	g.Trigger()
+	if _, again := g.Snapshot(); !again.Equal(first) {
+		t.Fatalf("降级期内不应续期：%v -> %v", first, again)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if a, _ := g.Snapshot(); a {
+		t.Fatal("ttl 到期后应自动回到未降级（自愈）")
+	}
+}
+
+// ttl=0 保留旧语义：窗口落在次日 00:00 CST。
+func TestDegradeGateZeroTTLKeepsMidnight(t *testing.T) {
+	var g degradeGate
+	g.SetTTL(0)
+	g.Trigger()
+	active, until := g.Snapshot()
+	if !active {
+		t.Fatal("Trigger 后应处于降级期")
+	}
+	if !until.Equal(nextMidnightCST(time.Now())) {
+		t.Fatalf("ttl=0 应复位到次日 00:00 CST，得到 %v", until)
+	}
+}

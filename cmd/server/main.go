@@ -314,6 +314,8 @@ func main() {
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
+		// 提示词降级窗口（默认 30m 自愈；0 = 到次日 00:00 CST）。
+		PromptDegradeTTL: cfg.PromptDegradeTTL,
 		// Anthropic 兼容层的模型名映射（claude-* → 网关真实模型 id）。
 		AnthropicDefaultModel: cfg.Anthropic.DefaultModel,
 		AnthropicAliases:      cfg.Anthropic.Aliases,

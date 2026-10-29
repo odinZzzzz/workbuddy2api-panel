@@ -55,6 +55,9 @@ type Config struct {
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
 	PromptText string
+	// PromptDegradeTTL 提示词降级窗口时长（config prompt.degrade_ttl，默认 30m）。
+	// 0 = 到次日 00:00 CST 的旧语义；>0 = 自愈窗口（到期回 passthrough 试探）。
+	PromptDegradeTTL time.Duration
 
 	// AnthropicDefaultModel / AnthropicAliases 供 /v1/messages 做模型名映射：
 	// Anthropic 系客户端（Claude Code 等）发的是 claude-* 原生命名，上游没有这些
@@ -142,6 +145,8 @@ func NewHandler(cfg Config) *Handler {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	// 降级窗口：0 保留旧语义（到次日 00:00 CST），>0 为自愈窗口（见 degrade.go）。
+	h.degrade.SetTTL(cfg.PromptDegradeTTL)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// Responses API 兼容层（Codex 0.165+ 只发这个端点）：内部翻译成 chat 请求体，
 	// 复用同一条治理链路（选号/轮转/熔断/粘性/脱敏/工具标记还原），见 responses.go。
@@ -912,7 +917,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
 			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
-				h.degrade.Trigger()
+				// 只做「试探性降级」：换中性提示词重试一次，**不在此锁定降级窗口**。
+				// 只有这次重试真的成功才锁（见流式/非流式成功分支的 Trigger）——否则一个
+				// 用户内容本身违规的请求会把整个进程打进降级直到复位，之后所有客户端都吃
+				// 中性提示词（表现为"模型变笨"且无任何错误可见）。
 				body = prompt.Rewrite(body, prompt.Degraded)
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
@@ -1076,6 +1084,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 				st.outcome = reqlog.OutcomeSuccess
 				h.cfg.Pool.NoteSuccess(acct.UID)
+				// 降级试探成功：此刻才锁定降级窗口（P0：重试失败不再污染复位前的全部请求）。
+				if degradedApplied {
+					h.degrade.Trigger()
+				}
 				// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 				// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
@@ -1162,6 +1174,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		// 降级试探成功：此刻才锁定降级窗口（与流式分支同语义）。
+		if degradedApplied {
+			h.degrade.Trigger()
+		}
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		if sessKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(sessKey, acct.UID)

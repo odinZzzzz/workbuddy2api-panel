@@ -162,6 +162,10 @@ type Config struct {
 		// File 提示词文件路径；空 = 内置默认 defaultprompt.md；
 		// 路径非空但不可读 → 启动报错（fail fast，避免静默回落到内置默认）。
 		File string `json:"file"`
+		// DegradeTTL 提示词降级窗口（passthrough/append 命中内容拦截误报后的中性
+		// 提示词期）。空 = 默认 30m；"0" = 到次日 00:00 CST（旧语义）。
+		// 自愈语义：窗口到期自动回到 passthrough 试探，再被拦才重新降级。
+		DegradeTTL string `json:"degrade_ttl"`
 	} `json:"prompt"`
 
 	// Anthropic Anthropic Messages 兼容层（POST /v1/messages）的模型名映射。
@@ -178,6 +182,8 @@ type Config struct {
 
 	// PromptText 解析后的系统提示词文本（custom/append 模式使用）。
 	PromptText string `json:"-"`
+	// PromptDegradeTTL 解析后的降级窗口时长（prompt.degrade_ttl，默认 30m）。
+	PromptDegradeTTL time.Duration `json:"-"`
 
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
@@ -633,8 +639,30 @@ func (c *Config) normalizePrompt() error {
 		}
 		c.PromptText = text
 	}
+	// 降级窗口：空 → 默认 30m（自愈）；"0" → 0（到次日 00:00 CST 的旧语义）。
+	// 非法值直接报错，避免"写错了却静默按默认跑"。
+	ttl := strings.TrimSpace(c.Prompt.DegradeTTL)
+	if ttl == "" {
+		ttl = defaultPromptDegradeTTL
+	}
+	d, err := time.ParseDuration(ttl)
+	if err != nil {
+		return fmt.Errorf("prompt.degrade_ttl: %q 不是合法时长（如 30m / 2h / 0）", c.Prompt.DegradeTTL)
+	}
+	if d < 0 {
+		return fmt.Errorf("prompt.degrade_ttl: 不能为负（%q）", c.Prompt.DegradeTTL)
+	}
+	c.PromptDegradeTTL = d
 	return nil
 }
+
+// defaultPromptDegradeTTL 降级窗口默认值：30 分钟自愈。
+//
+// 为什么不是"到次日 00:00"：一次内容误报就把全天所有请求打成中性提示词，
+// 客户端侧只表现为"模型变笨了"，既无错误也无从排查。30 分钟窗口到期后自动
+// 回到 passthrough 试探一次：仍然被拦就重新降级（代价只是每半小时一次 400），
+// 不再被拦就恢复正常提示词。
+const defaultPromptDegradeTTL = "30m"
 
 // validateScheduleHours 校验排程小时落在 0-23。
 //
