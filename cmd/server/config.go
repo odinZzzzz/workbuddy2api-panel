@@ -51,6 +51,13 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// ShutdownTimeout SIGTERM 后等待在途请求收尾的时长，缺省 "15s"。
+		// 为什么可配：SSE 流式生成合法时长可达数分钟，固定 5s 会把长流硬切；
+		// 但也不能无限等（systemd 的 TimeoutStopSec 会强杀）。单元里的
+		// TimeoutStopSec 应当大于它。
+		ShutdownTimeout string `json:"shutdown_timeout"`
+		// ShutdownTimeoutDur 解析后的收尾窗口。
+		ShutdownTimeoutDur time.Duration `json:"-"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -487,6 +494,15 @@ func (c *Config) normalize() error {
 	}
 	if c.ServerReadTimeoutDur, err = parseDur("server.read_timeout", c.Server.ReadTimeout); err != nil {
 		return err
+	}
+	// 关闭收尾窗口：空 → 15s；非法 → parseDur 报错（带示例）。
+	if st := c.Server.ShutdownTimeout; st != "" {
+		if c.Server.ShutdownTimeoutDur, err = parseDur("server.shutdown_timeout", st); err != nil {
+			return err
+		}
+	}
+	if c.Server.ShutdownTimeoutDur <= 0 {
+		c.Server.ShutdownTimeoutDur = 15 * time.Second
 	}
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)

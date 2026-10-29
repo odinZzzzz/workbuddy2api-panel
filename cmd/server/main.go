@@ -373,17 +373,41 @@ func main() {
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
 		IdleTimeout: 120 * time.Second,
 	}
+	// shutdownDone 让主协程等收尾协程真正跑完再退出。
+	//
+	// 踩过的坑：ListenAndServe 在 Shutdown 开始时立刻返回 ErrServerClosed，主协程
+	// 若直接 return，进程会在收尾协程打印"在途请求已全部结束"之前就退出——日志里
+	// 只剩"停止接收新请求"一行，看起来像收尾没生效（线上实测）。
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 收尾窗口可配（server.shutdown_timeout，默认 15s）：SSE 长流的合法时长可达
+		// 数分钟，固定 5s 会把在途流硬切；同时不能无限等（systemd TimeoutStopSec 会强杀）。
+		timeout := cfg.Server.ShutdownTimeoutDur
+		if timeout <= 0 {
+			timeout = 15 * time.Second
+		}
+		log.Printf("shutdown: 停止接收新请求，等待在途请求收尾（最多 %s）", timeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("shutdown: 收尾超时（%v），强制退出", err)
+		} else {
+			log.Printf("shutdown: 在途请求已全部结束")
+		}
 	}()
 
 	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
+	}
+	// 等收尾协程完成（它负责 drain 在途请求），再退出进程。
+	select {
+	case <-shutdownDone:
+	case <-time.After(30 * time.Second):
+		log.Printf("shutdown: 等待收尾协程超时，强制退出")
 	}
 	log.Printf("bye")
 }

@@ -876,3 +876,28 @@ func TestParseDurMessage(t *testing.T) {
 		t.Fatalf("合法时长应解析成功: %v %v", d, err)
 	}
 }
+
+// 关闭收尾窗口：缺省 15s；显式值生效；非法值报错（带字段名与示例）。
+func TestShutdownTimeout(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"listen":"127.0.0.1:0","api_key":""}`))
+	if err != nil {
+		t.Fatalf("load default: %v", err)
+	}
+	if c.Server.ShutdownTimeoutDur != 15*time.Second {
+		t.Errorf("默认收尾窗口=%v want 15s", c.Server.ShutdownTimeoutDur)
+	}
+
+	c2, err := ParseConfig([]byte(`{"listen":"127.0.0.1:0","api_key":"","server":{"shutdown_timeout":"45s"}}`))
+	if err != nil {
+		t.Fatalf("load custom: %v", err)
+	}
+	if c2.Server.ShutdownTimeoutDur != 45*time.Second {
+		t.Errorf("自定义收尾窗口=%v want 45s", c2.Server.ShutdownTimeoutDur)
+	}
+
+	if _, err := ParseConfig([]byte(`{"listen":"127.0.0.1:0","api_key":"","server":{"shutdown_timeout":"45"}}`)); err == nil {
+		t.Fatal("非法收尾窗口应报错")
+	} else if !strings.Contains(err.Error(), "server.shutdown_timeout") || !strings.Contains(err.Error(), "示例") {
+		t.Errorf("报错应带字段名与示例: %v", err)
+	}
+}
