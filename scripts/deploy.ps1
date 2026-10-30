@@ -32,9 +32,11 @@ $remoteTmp = "$RemoteDir/wb2api.new"
 
 if ($UseSsh) {
   # 免密 SSH 路线（已配 key 时最省事）
-  & scp -q $bin "${User}@${HostName}:$remoteTmp"
+  # 说明：部署时顺手收紧敏感文件权限——config.json 含 api_key、data/ 含 tokens.json、
+# auths/ 含账号凭据，默认 644/755 在共享机器上等于"本机任何用户可读"。
+& scp -q $bin "${User}@${HostName}:$remoteTmp"
   if ($LASTEXITCODE -ne 0) { throw "scp 失败" }
-  & ssh "${User}@${HostName}" "set -e; systemctl stop $Service; cp -a $RemoteDir/wb2api $RemoteDir/wb2api.bak-`$(date +%Y%m%d-%H%M%S); mv -f $remoteTmp $RemoteDir/wb2api; chmod 755 $RemoteDir/wb2api; systemctl start $Service; sleep 5; systemctl is-active $Service; curl -s -o /dev/null -w 'healthz=%{http_code}\n' http://127.0.0.1:$Port/healthz"
+  & ssh "${User}@${HostName}" "set -e; systemctl stop $Service; cp -a $RemoteDir/wb2api $RemoteDir/wb2api.bak-`$(date +%Y%m%d-%H%M%S); mv -f $remoteTmp $RemoteDir/wb2api; chmod 755 $RemoteDir/wb2api; chmod 600 $RemoteDir/config.json 2>/dev/null || true; chmod 700 $RemoteDir/data $RemoteDir/auths 2>/dev/null || true; systemctl start $Service; sleep 5; systemctl is-active $Service; curl -s -o /dev/null -w 'healthz=%{http_code}\n' http://127.0.0.1:$Port/healthz"
   if ($LASTEXITCODE -ne 0) { throw "远程重启失败" }
 }
 else {
@@ -66,7 +68,9 @@ sftp = c.open_sftp(); sftp.put(local, remote_tmp); sftp.close()
 print("上传完成:", remote_tmp)
 
 run(f"systemctl stop {service}; cp -a {remote_dir}/wb2api {remote_dir}/wb2api.bak-$(date +%Y%m%d-%H%M%S); "
-    f"mv -f {remote_tmp} {remote_dir}/wb2api; chmod 755 {remote_dir}/wb2api; systemctl start {service}")
+    f"mv -f {remote_tmp} {remote_dir}/wb2api; chmod 755 {remote_dir}/wb2api; "
+    f"chmod 600 {remote_dir}/config.json 2>/dev/null || true; chmod 700 {remote_dir}/data {remote_dir}/auths 2>/dev/null || true; "
+    f"systemctl start {service}")
 time.sleep(5)
 active = run(f"systemctl is-active {service}")
 print("service:", active)

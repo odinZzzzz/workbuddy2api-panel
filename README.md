@@ -750,6 +750,25 @@ http://127.0.0.1:7863/panel/
 
 **宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
 
+### 密钥卫生（仓库里不放任何真实凭据）
+
+这个仓库会连同脚本、文档一起入库，所以**任何真实 `api_key` / token / 私钥都不进版本库**：
+
+| 规则 | 说明 |
+|---|---|
+| 配置不入库 | `config.json`、`data/`、`auths/`、`.env*`、`*.key`、`*.pem`、`backups/` 已在 `.gitignore` |
+| 脚本不硬编码 | `scripts/*.ps1` 一律从环境变量读（`WB_API_KEY`）；本地调试脚本从 `~/.dsh/.credentials.yaml` 读 |
+| 提交前闸门 | `scripts/check-secrets.ps1` 扫描 `sk-<32+ hex>`、JWT、`BEGIN PRIVATE KEY`、长随机串赋值；`scripts/install-hooks.ps1` 装成 pre-commit 钩子后**发现即拒绝提交** |
+| 部署侧权限 | `scripts/deploy.ps1` 部署后自动 `chmod 600 config.json`、`chmod 700 data auths`（这些文件含 api_key / 令牌 / 账号凭据） |
+
+```bash
+pwsh scripts/install-hooks.ps1      # 克隆后执行一次，装好 pre-commit 闸门
+pwsh scripts/check-secrets.ps1      # 手动全量自查（-All 扫工作树但跳过 gitignored）
+```
+
+> 误报可临时 `git commit --no-verify`；若真实密钥已进历史，必须 rewrite history **并轮换该密钥**——
+> 只删文件是不够的（历史里仍然可读）。
+
 ### 多令牌（API Key）管理
 
 形态对齐 one-api / new-api 那类中转站：一个网关签发多把 key，每把独立启停、过期时间、
