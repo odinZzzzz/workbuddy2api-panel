@@ -304,6 +304,8 @@ func main() {
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
+		CORSOrigins: cfg.Panel.CORSOrigins,
+		WebDir:      cfg.Panel.WebDir,
 		ConfigPath: *cfgPath,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)

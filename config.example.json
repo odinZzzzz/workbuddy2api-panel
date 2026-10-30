@@ -8,7 +8,9 @@
     "shutdown_timeout": "15s"
   },
   "panel": {
-    "package_detail_limit": 5
+    "package_detail_limit": 5,
+    "cors_origins": [],
+    "web_dir": ""
   },
   "logging": {
     "request_archive_enabled": true,

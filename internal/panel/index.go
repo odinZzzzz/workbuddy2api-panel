@@ -11,6 +11,9 @@ package panel
 import (
 	_ "embed"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 )
 
 //go:embed index.html
@@ -56,7 +59,7 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(indexHTML)
+	_, _ = w.Write(p.asset(indexHTML, "index.html"))
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
@@ -64,7 +67,7 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(appJS)
+	_, _ = w.Write(p.asset(appJS, "app.js"))
 }
 
 // echartsScript 输出图表库（同源脚本，供 CSP script-src 'self' 加载）。
@@ -75,5 +78,21 @@ func (p *Panel) echartsScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(echartsJS)
+	_, _ = w.Write(p.asset(echartsJS, "echarts.min.js"))
+}
+
+// asset 返回前端资源内容。前后端分离开发时若设置了 WebDir，则每次请求
+// 从磁盘读取（改完刷新即生效，无需重新编译）；否则回退到 go:embed 的内置副本。
+// 磁盘读取失败或文件不存在时静默回退到内置副本，保证生产部署不会因
+// 目录缺失而白屏。
+func (p *Panel) asset(embedded []byte, name string) []byte {
+	dir := strings.TrimSpace(p.cfg.WebDir)
+	if dir == "" || strings.Contains(name, "..") || strings.ContainsAny(name, `/\\`) {
+		return embedded
+	}
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil || len(b) == 0 {
+		return embedded
+	}
+	return b
 }

@@ -41,12 +41,18 @@ $('btnTheme').onclick = () => {
 applyTheme();
 
 /* ── 请求 ─────────────────────────────────────────────────────────── */
+/* 前后端分离支持：默认同源 /panel/api；独立部署时可注入
+   window.WB2A_API_BASE（例如 https://api.example.com/panel/api）。 */
+const API_BASE = (function () {
+  const v = (typeof window !== 'undefined' && window.WB2A_API_BASE) || '/panel/api';
+  return String(v).replace(/\/+$/, '');
+})();
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
-  const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
+  const r = await fetch(API_BASE + '/' + path, Object.assign({}, opts, { headers: h }));
   if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));

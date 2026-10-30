@@ -25,6 +25,12 @@ type Config struct {
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
+		// CORSOrigins 前后端分离时的跨域来源白名单（逗号分隔或数组）。
+		// 空 = 不启用 CORS（同源部署）。支持 "https://*.example.com" 通配子域。
+		CORSOrigins []string `json:"cors_origins"`
+		// WebDir 前后端分离时的前端资源目录（index.html / app.js / echarts.min.js）。
+		// 空 = 使用编译进二进制的内置副本。
+		WebDir string `json:"web_dir"`
 	} `json:"panel"`
 
 	Logging struct {
@@ -401,6 +407,20 @@ func WriteDefault(path string) (string, error) {
 func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_LISTEN"); v != "" {
 		c.Listen = v
+	}
+	if v := os.Getenv("WB2A_CORS_ORIGINS"); v != "" {
+		// 逗号分隔的来源白名单，例如 "https://panel.example.com,https://*.example.org"
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, s := range parts {
+			if t := strings.TrimSpace(s); t != "" {
+				out = append(out, t)
+			}
+		}
+		c.Panel.CORSOrigins = out
+	}
+	if v := os.Getenv("WB2A_WEB_DIR"); v != "" {
+		c.Panel.WebDir = v
 	}
 	if v := os.Getenv("WB2A_API_KEY"); v != "" {
 		c.APIKey = v

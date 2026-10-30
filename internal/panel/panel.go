@@ -75,6 +75,16 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// CORSOrigins 前后端分离部署时允许跨域访问面板 API 的来源白名单。
+	// 空 = 不启用 CORS（同源部署，默认行为不变）。支持精确匹配与通配子域
+	// （如 https://*.example.com）；填 "*" 表示允许任意来源但会关闭凭据模式。
+	CORSOrigins []string
+
+	// WebDir 前后端分离时的前端资源目录（含 index.html / app.js / echarts.min.js）。
+	// 非空且文件存在时优先从磁盘按请求实时读取（改完刷新即生效）；
+	// 空或读取失败时回退到 go:embed 的内置副本。生产可直接用内置副本。
+	WebDir string
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -213,7 +223,65 @@ func (p *Panel) routes() {
 // 与 401 错误响应全都带上（API 也可能在浏览器里被直接打开）。
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	if p.applyCORS(w, r) {
+		return // 预检请求已在此应答
+	}
 	p.mux.ServeHTTP(w, r)
+}
+
+// applyCORS 处理前后端分离部署的跨域访问。
+// 返回 true 表示已完整应答（OPTIONS 预检），调用方不应继续分发。
+// 未配置 CORSOrigins 时完全不改动响应头，同源部署行为与之前一致。
+func (p *Panel) applyCORS(w http.ResponseWriter, r *http.Request) bool {
+	if len(p.cfg.CORSOrigins) == 0 {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	if !corsOriginAllowed(p.cfg.CORSOrigins, origin) {
+		return false
+	}
+	h := w.Header()
+	h.Set("Access-Control-Allow-Origin", origin)
+	h.Add("Vary", "Origin")
+	h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	h.Set("Access-Control-Max-Age", "600")
+	// 用 Authorization 头而非 Cookie 鉴权，不需要凭据模式；显式关闭以避免
+	// 与 Allow-Origin: * 组合时的浏览器拒绝。
+	h.Set("Access-Control-Allow-Credentials", "false")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+	return false
+}
+
+// corsOriginAllowed 判断来源是否命中白名单：支持 "*"（任意）、精确串，
+// 以及 "https://*.example.com" 形式的单层或多层子域通配。
+func corsOriginAllowed(allow []string, origin string) bool {
+	for _, a := range allow {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if a == "*" || a == origin {
+			return true
+		}
+		if strings.HasPrefix(a, "https://*.") || strings.HasPrefix(a, "http://*.") {
+			scheme := a[:strings.Index(a, "://")+3]
+			suffix := a[strings.Index(a, "*")+1:] // ".example.com"
+			if strings.HasPrefix(origin, scheme) && strings.HasSuffix(origin, suffix) {
+				host := strings.TrimPrefix(strings.TrimSuffix(origin, suffix), scheme)
+				if host != "" && !strings.Contains(host, "/") {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
