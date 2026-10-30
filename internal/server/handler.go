@@ -1056,10 +1056,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				releaseHeld()
 				// 降级是**静默换掉出站提示词**，必须留下能定位的现场：哪个域、哪个模型、
 				// 哪个号、第几次尝试、换到什么时候。没有这行时只能从「模型变笨了」倒推。
-				_, degradeUntil := h.degrade.Snapshot()
-				log.Printf("WARN: [degrade] content-blocked (likely system-prompt fingerprint false positive) -> serving degraded prompt until %s (realm=%q model=%q acct=%s attempt=%d)",
-					degradeUntil.Format(time.RFC3339), realm, bareModel,
-					logfmt.Label(acct.UID, acct.Nickname), i+1)
+				// 注意别在这里打印"降级到 X 时刻"：窗口只有**重试成功后才锁定**
+				// （见上方注释），此时 Snapshot 的 until 通常还是零值，打出来是
+				// 0001-01-01T00:00:00Z，运维会以为降级卡死了。这里只报"正在试探"，
+				// 真正的锁定时刻由成功分支的日志给出。
+				if active, until := h.degrade.Snapshot(); active {
+					log.Printf("WARN: [degrade] content-blocked (likely system-prompt fingerprint false positive) -> retrying with neutral prompt (window already active until %s) (realm=%q model=%q acct=%s attempt=%d)",
+						until.Format(time.RFC3339), realm, bareModel,
+						logfmt.Label(acct.UID, acct.Nickname), i+1)
+				} else {
+					log.Printf("WARN: [degrade] content-blocked (likely system-prompt fingerprint false positive) -> retrying with neutral prompt (window will lock only if this retry succeeds) (realm=%q model=%q acct=%s attempt=%d)",
+						realm, bareModel, logfmt.Label(acct.UID, acct.Nickname), i+1)
+				}
 				continue
 			}
 			if kind == upstream.ErrContentBlocked {
