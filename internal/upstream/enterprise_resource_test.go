@@ -28,10 +28,12 @@ func TestEnterpriseResourceMapsAllocatedQuota(t *testing.T) {
 	a := &auth.Auth{UID: "u1", AccessToken: "at", EnterpriseID: "ent-1"}
 
 	// soon=0：不分桶，但最早到期批次仍要记录。
-	remain, total, expiring, earliestAt, earliestRemaining, err := c.UserResourceDetailedWithExpiry(a, 0)
+	snap, err := c.UserResourceDetailedWithExpiry(a, 0)
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
+	remain, total, expiring := snap.Remain, snap.Total, snap.Expiring
+	earliestAt, earliestRemaining := snap.EarliestAt, snap.EarliestRemaining
 	if !strings.HasSuffix(gotPath, "/v2/billing/meter/get-enterprise-user-usage") {
 		t.Errorf("path=%s want .../get-enterprise-user-usage", gotPath)
 	}
@@ -50,11 +52,11 @@ func TestEnterpriseResourceMapsAllocatedQuota(t *testing.T) {
 	}
 
 	// soon 覆盖周期末 → 整份剩余额度计入 expiring（prefer_expiring 据此优先消耗）。
-	_, _, expiring2, _, _, err := c.UserResourceDetailedWithExpiry(a, 30*24*time.Hour)
+	snap2, err := c.UserResourceDetailedWithExpiry(a, 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if expiring2 != 1188 {
+	if expiring2 := snap2.Expiring; expiring2 != 1188 {
 		t.Errorf("周期内 expiring=%d want 1188", expiring2)
 	}
 }
@@ -70,10 +72,12 @@ func TestEnterpriseResourceUnlimited(t *testing.T) {
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
 	a := &auth.Auth{UID: "u1", AccessToken: "at", EnterpriseID: "ent-1"}
 
-	remain, total, expiring, earliestAt, earliestRemaining, err := c.UserResourceDetailedWithExpiry(a, 30*24*time.Hour)
+	snap, err := c.UserResourceDetailedWithExpiry(a, 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
+	remain, total, expiring := snap.Remain, snap.Total, snap.Expiring
+	earliestAt, earliestRemaining := snap.EarliestAt, snap.EarliestRemaining
 	if remain != enterpriseUnlimitedRemain || total != enterpriseUnlimitedTotal {
 		t.Errorf("remain=%d total=%d want %d/-1", remain, total, enterpriseUnlimitedRemain)
 	}
@@ -93,10 +97,11 @@ func TestEnterpriseResourceSnakeCase(t *testing.T) {
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
 	a := &auth.Auth{UID: "u1", AccessToken: "at", EnterpriseID: "ent-1"}
 
-	remain, total, _, _, _, err := c.UserResourceDetailedWithExpiry(a, 0)
+	snap, err := c.UserResourceDetailedWithExpiry(a, 0)
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
+	remain, total := snap.Remain, snap.Total
 	if remain != 1000 || total != 1500 {
 		t.Errorf("remain=%d total=%d want 1000/1500", remain, total)
 	}
@@ -119,10 +124,11 @@ func TestPersonalResourceStaysOnPackageEndpoint(t *testing.T) {
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
 	a := &auth.Auth{UID: "u1", AccessToken: "at"}
 
-	remain, total, _, _, _, err := c.UserResourceDetailedWithExpiry(a, 0)
+	snap, err := c.UserResourceDetailedWithExpiry(a, 0)
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
+	remain, total := snap.Remain, snap.Total
 	if remain != 900 || total != 1000 {
 		t.Errorf("remain=%d total=%d want 900/1000", remain, total)
 	}

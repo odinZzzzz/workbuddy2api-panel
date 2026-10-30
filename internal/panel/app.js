@@ -2783,142 +2783,192 @@ async function loadPackages(force) {
    有多少、到期前每天要至少消耗多少」顶到首页，数据源与「积分构成」共用
    （lastPackages 缓存，EXP_FRESH_MS 内复用，不重复打上游）。 */
 
-// expBatches 把某账号的包聚合成「到期日 → 该日作废积分」升序列表。
+/* 到期提醒的**唯一**展示口径。两条通路（快照 / 逐包明细）都只调这里的函数，
+   阈值、取整、时区因此不可能漂移——上一版就是两份独立渲染各算各的，结果同一批
+   积分在快照里是绿的、在明细里是红的。 */
+
+const EXP_WEEK_MS = 7 * 86400000;
+// 颜色阈值按**真实小时**算（含边界）：≤72h 红（不抓紧就真没了）、≤168h 琥珀、
+// 更远绿。等价于 days=ceil(剩余小时/24) 后判 ≤3 / ≤7。
+const EXP_RED_DAYS = 3;
+const EXP_AMBER_DAYS = 7;
+const EXP_EMPTY_TEXT = '无未来到期批次';
+
+// expModel 给「到期时刻 + 该批剩余」产出颜色/文案/绝对时刻。
+// text 复用 pkExpiryText（<1h 分钟、<24h 小时、≥24h「剩余 N 天」），它内部的
+// 「N 天」同样是 ceil(剩余/1天)，与本函数的 days 同源——不会出现「剩余 4 天却标红」。
+function expModel(atMs, remain, now) {
+  const left = Math.max(0, atMs - now);
+  const days = Math.ceil(left / 86400000);
+  const color = days <= EXP_RED_DAYS ? 'var(--bad)'
+    : days <= EXP_AMBER_DAYS ? 'var(--warn)' : 'var(--ok)';
+  return {
+    atMs, remain, days, color,
+    text: pkExpiryText(atMs),
+    at: pkExpiryDateTime(atMs).slice(0, 16),   // 2026/11/02 23:59（本地时区）
+  };
+}
+
+// expAtShort 行内「随后」用的短时刻（11/02 23:59）。
+function expAtShort(atMs) {
+  return pkExpiryDateTime(atMs).slice(5, 16);
+}
+
+// expBatches 把某账号的包聚合成「到期时刻 → 该时刻作废积分」升序列表。
+// 按**时刻**而不是日期聚合：与后端 earliestRemaining 的「同一时刻求和」语义一致，
+// 也是「按真实小时算天数」的前提（按日聚合会引入最多 24h 误差）。
 // 只统计 remain>0 且有到期时间的包——没余额/长期包到期没有任何影响。
 function expBatches(packs) {
-  const byDay = new Map();
+  const byAt = new Map();
   for (const p of packs || []) {
     const r = Number(p.remain || 0);
-    const t = (p.end_time || '').slice(0, 10);
-    if (r <= 0 || !t) continue;
-    byDay.set(t, (byDay.get(t) || 0) + r);
+    const at = pkExpiryMs(p);
+    if (r <= 0 || at == null || at <= 0) continue;
+    byAt.set(at, (byAt.get(at) || 0) + r);
   }
-  return [...byDay.entries()]
-    .map(([date, remain]) => ({ date, remain }))
-    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  return [...byAt.entries()]
+    .map(([at, remain]) => ({ at, remain }))
+    .sort((a, b) => a.at - b.at);
 }
 
-function expDaysLeft(dateStr, today) {
-  return Math.round((new Date(dateStr + 'T00:00:00') - today) / 86400000);
-}
-
-function renderExpiry(d) {
-  const list = (d.accounts || []);
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  // 按「最近到期」升序排（issue #125）。
-  //
-  // 后端 /panel/api/packages 是按**余额降序**返回的，恰好把 CN 账号都排在前面、
-  // global 排在末尾，看起来像"按域分组"，其实只是余额顺序。这里再排一次，让
-  // "最快过期的排最前"这个唯一重要的顺序成立，且不分域。
-  //
-  // 排序键用最早到期批次的日期（expBatches 已按日期升序，故 [0] 即最早）。
-  // 查询失败的账号、以及 7 天内无到期的账号没有可比较的到期时间，统一排在最后，
-  // 保持它们原本的相对顺序（稳定排序）。
-  const keyed = list.map(a => {
-    let key = null;
-    if (!a.error) {
-      const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
-      if (bs.length) key = bs[0].date;
+// expSnapshotBatches 从 /overview 的账号行取展示口径批次（credits_batches）。
+// 后端未升级（无该字段）时回落到旧的 credits_earliest_expiry/_remaining，只取最早
+// 一批并打 legacy 标记——此时 badge 会写明「仅最早一批」，不假装信息是全的。
+function expSnapshotBatches(a) {
+  const raw = a && a.credits_batches;
+  if (Array.isArray(raw) && raw.length) {
+    const out = [];
+    for (const b of raw) {
+      const at = Date.parse((b && b.at) || '');
+      const remain = Number((b && b.remain) || 0);
+      if (!Number.isFinite(at) || !(remain > 0)) continue;
+      out.push({ at, remain });
     }
-    return { a, key };
+    return out.sort((x, y) => x.at - y.at);
+  }
+  const at = Date.parse((a && a.credits_earliest_expiry) || '');
+  const remain = Number((a && a.credits_earliest_remaining) || 0);
+  if (Number.isFinite(at) && at > 0 && remain > 0) return [{ at, remain, legacy: true }];
+  return [];
+}
+
+// expAgo 人类可读的数据年龄（badge 用）。
+function expAgo(ms) {
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (!(m > 0)) return '刚刚';
+  if (m < 60) return m + ' 分钟前';
+  const h = Math.floor(m / 60);
+  return h < 24 ? h + ' 小时前' : Math.floor(h / 24) + ' 天前';
+}
+
+// setExpBadge 标注数据来源与新鲜度：快照（本地状态，分钟级）vs 实时（上游逐包）。
+// 存在的意义：颜色按真实小时算，边界附近刷新一次就可能变色，用户需要知道
+// 「这是 3 分钟前的估算」而不是「颜色随机跳」。
+function setExpBadge(mode, at) {
+  const el = $('expBadge');
+  if (!el) return;
+  let text, title;
+  if (mode === 'live') {
+    text = '实时 · ' + (at ? pkExpiryDateTime(at).slice(11, 16) : '—');
+    title = '逐账号实时查询上游积分包（点「检查」触发）';
+  } else if (mode === 'legacy') {
+    text = '快照 · 仅最早一批';
+    title = '后端未升级：只有最早一批的日期与剩余量，点「检查」看全部批次';
+  } else {
+    // t<=0 包含 null 与 time.Time 零值（0001-01-01），都按「未知年龄」处理。
+    const t = at ? parseAPITime(at) : 0;
+    text = t > 0 ? '快照 · ' + expAgo(t) : '快照 · 本地状态';
+    title = '来自本地状态（余额后台刷新，默认 5 分钟一次），零上游请求';
+  }
+  el.textContent = text;
+  el.title = title;
+}
+
+// expRowHtml 单账号一行的唯一渲染实现（两条通路共用）：颜色/文案/日期全部来自
+// expModel，任何阈值调整只改一处。
+function expRowHtml(a, bs, now, errText) {
+  const nm = '<span class="exp-nm">' + esc(a.nickname || String(a.uid || '').slice(0, 8)) + '</span>';
+  if (errText) {
+    return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
+      nm + '<span class="exp-main err">查询失败：' + esc(errText) + '</span></div>';
+  }
+  if (!bs.length) {
+    return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
+      nm + '<span class="exp-main">' + EXP_EMPTY_TEXT + '</span></div>';
+  }
+  const first = bs[0];
+  const m = expModel(first.at, first.remain, now);
+  // 到期前日均需耗：哪怕单靠这个账号的自然流量，也要对齐的消耗速度。
+  // 上游扣包是 FEFO（按失效时刻升序）：这些快到期批次正是被消耗得最快的。
+  const daily = Math.ceil(first.remain / Math.max(1, m.days));
+  const week = bs.filter(b => b.at - now <= EXP_WEEK_MS).reduce((s, b) => s + b.remain, 0);
+  const more = bs.length > 4 ? '　等 ' + bs.length + ' 批' : '';
+  const rest = bs.slice(1, 4).map(b =>
+    '随后 ' + esc(expAtShort(b.at)) + ' · ' + fmtTok(b.remain)).join('　') + more;
+  return '<div class="exp-row"><span class="exp-dot" style="background:' + m.color + '"></span>' +
+    nm +
+    '<span class="exp-main">最近到期 <b>' + esc(m.at) + '</b>（' + esc(m.text) + '）· 该批 <b>' +
+    fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' + fmtTok(daily) + '</b>' +
+    (week > first.remain ? ' · 7 天内合计 ' + fmtTok(week) : '') +
+    (rest ? '<div class="note">' + rest + '</div>' : '') +
+    '</span></div>';
+}
+
+// expSortKeyed 按「最早到期时刻」升序（issue #125）；查询失败 / 无未来批次的账号
+// 没有可比较的时刻，统一沉底（稳定排序保留原相对顺序），且不分域。
+function expSortKeyed(list, batchesOf) {
+  const keyed = list.map(a => {
+    const bs = batchesOf(a);
+    return { a, bs, key: bs.length ? bs[0].at : null };
   });
   keyed.sort((x, y) => {
     if (x.key === y.key) return 0;
     if (x.key === null) return 1;
     if (y.key === null) return -1;
-    return x.key < y.key ? -1 : 1;
+    return x.key - y.key;
   });
-  const rows = keyed.map(({ a }) => {
-    if (a.error) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-        '<span class="exp-main err">查询失败：' + esc(a.error) + '</span></div>';
-    }
-    const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
-    if (!bs.length) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-        '<span class="exp-main">7 天内无到期积分</span></div>';
-    }
-    const first = bs[0];
-    const days = expDaysLeft(first.date, today);
-    const daily = Math.ceil(first.remain / Math.max(1, days));
-    const week = bs.filter(b => expDaysLeft(b.date, today) <= 7)
-      .reduce((s, b) => s + b.remain, 0);
-    // 危险度：≤3 天红（不抓紧就真没了）、≤7 天琥珀、更远绿。
-    // 上游扣包是 FEFO（按失效时刻升序，实测两号口径一致）：这些快过期批次正是
-    // 被消耗得最快的，日均需耗给的是「哪怕单靠这个账号的自然流量也能对齐」的参照。
-    const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
-    const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
-    const more = bs.length > 4 ? '　等 ' + bs.length + ' 批' : '';
-    const rest = bs.slice(1, 4).map(b =>
-      '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
-    return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-      '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
-      '）· 该批 <b>' + fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
-      fmtTok(daily) + '</b>' +
-      (week > first.remain ? ' · 7 天内合计 ' + fmtTok(week) : '') +
-      (rest ? '<div class="note">' + rest + '</div>' : '') +
-      '</span></div>';
-  }).join('');
+  return keyed;
+}
+
+function renderExpiry(d) {
+  const list = (d.accounts || []);
+  const now = Date.now();
+  // 后端 /panel/api/packages 是按**余额降序**返回的，恰好把 CN 账号排在前面、
+  // global 排在末尾，看起来像"按域分组"，其实只是余额顺序——这里按到期时刻重排。
+  const keyed = expSortKeyed(list, a => a.error ? [] : expBatches(a.packages).filter(b => b.at > now));
+  const rows = keyed.map(({ a, bs }) => expRowHtml(a, bs, now, a.error)).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
   // 数据新鲜度透明化：走缓存时标注年龄，免得把旧数据误当实时。
   const ageMin = lastPackages ? Math.floor((Date.now() - lastPackagesAt) / 60000) : 0;
   $('expNote').textContent = (lastPackagesAt && ageMin > 0)
     ? list.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，可点「检查」刷新'
     : list.length + ' 个账号 · 实时查询上游';
+  setExpBadge('live', lastPackagesAt);
   $('expBox').hidden = false;
 }
 
-/* 快照版到期提醒：不查上游，直接用 /overview 已有的 credits_earliest_expiry /
-   credits_earliest_remaining（由签到与余额后台刷新写入 state.json，默认每 5 分钟
-   更新一次）。打开面板即可看到「最近哪批要过期」，成本与首页统计条相同为零。
+/* 快照版到期提醒：不查上游，直接用 /overview 的 credits_batches（由签到与余额后台
+   刷新写入 state.json，默认每 5 分钟一次）。打开面板即可看到「最近哪批要过期」，
+   成本与首页统计条相同为零。
 
-   与 renderExpiry（逐包明细版）的差异：这里只有**最早一批**的日期与数量，没有
-   后续批次、也没法算「7 天内合计」——那是 packages 接口才有的信息。因此卡片上
-   保留「检查」按钮作为增强入口，用户想要完整明细再显式触发一次上游查询。 */
+   与 renderExpiry（逐包明细版）的差异**只剩新鲜度**：批次口径（DeductionEndTime）、
+   聚合粒度（到期时刻）、颜色阈值（真实小时）、文案（pkExpiryText）全部共用
+   expModel / expRowHtml，同一批积分在两条通路上必然给出同样的颜色与数字。
+   后端未升级（无 credits_batches）时回落旧字段，只显示最早一批（badge 标注）。 */
 function renderExpirySnapshot(d) {
   const list = (d && d.accounts) || [];
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const keyed = list.map(a => {
-    // 后端给的是 RFC3339 带时区；无到期信息（长期包/未刷新）的账号排在最后。
-    let key = null, ms = 0;
-    if (a.credits_earliest_expiry) {
-      const t = new Date(a.credits_earliest_expiry);
-      if (!isNaN(t.getTime())) { ms = t.getTime(); key = ms; }
-    }
-    return { a, key, ms };
+  const now = Date.now();
+  let legacy = false;
+  const keyed = expSortKeyed(list, a => {
+    const bs = expSnapshotBatches(a).filter(b => b.at > now);
+    if (bs.some(b => b.legacy)) legacy = true;
+    return bs;
   });
-  keyed.sort((x, y) => {
-    if (x.key === null && y.key === null) return 0;
-    if (x.key === null) return 1;
-    if (y.key === null) return -1;
-    return x.key - y.key;
-  });
-  const rows = keyed.map(({ a, ms }) => {
-    const nm = esc(a.nickname || String(a.uid || '').slice(0, 8));
-    if (!ms || !a.credits_earliest_remaining) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + nm + '</span>' +
-        '<span class="exp-main">无近期到期批次</span></div>';
-    }
-    const days = Math.max(0, Math.ceil((ms - today.getTime()) / 86400000));
-    const remain = Number(a.credits_earliest_remaining || 0);
-    const daily = Math.ceil(remain / Math.max(1, days));
-    const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
-    const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
-    const when = new Date(ms).toISOString().slice(0, 10);
-    return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + nm + '</span>' +
-      '<span class="exp-main">最近到期 <b>' + esc(when) + '</b>（' + dayWord +
-      '）· 该批 <b>' + fmtTok(remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
-      fmtTok(daily) + '</b>' +
-      '<div class="note">仅最早一批，点「检查」看全部到期批次</div>' +
-      '</span></div>';
-  }).join('');
+  const rows = keyed.map(({ a, bs }) => expRowHtml(a, bs, now, '')).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
-  $('expNote').textContent = list.length + ' 个账号 · 快照（来自本地状态，点「检查」拉实时明细）';
+  $('expNote').textContent = list.length + ' 个账号' +
+    (legacy ? ' · 后端未升级，仅最早一批' : ' · 点「检查」拉实时明细');
+  setExpBadge(legacy ? 'legacy' : 'snapshot', d && d.credits_snapshot_at);
   $('expBox').hidden = false;
 }
 

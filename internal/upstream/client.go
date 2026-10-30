@@ -1954,25 +1954,11 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 			SubProductCode: p.SubProductCode,
 			SubProductName: p.SubProductName,
 		}
-		switch {
-		case p.DeductionEndTime > 0:
-			// 真失效时刻（可抵扣窗口结束），语义见上方字段注释：判「用不完就没了」
-			// 用它而不是周期边界。epoch 毫秒 → RFC3339，与 CycleEndTime 字符串口径
-			// 共存（前端统一 slice(0,10) 取日期）。ExpiresAt 直接用原始毫秒——
-			// RFC3339 不是 packageEndLayout 形态，交给下方解析会静默失败得 0。
-			cp.EndTime = time.UnixMilli(p.DeductionEndTime).Format(time.RFC3339)
-			cp.ExpiresAt = p.DeductionEndTime
-		case p.ExpiredTime != "":
-			cp.EndTime = p.ExpiredTime
-		case p.PackageEndTime != "":
-			cp.EndTime = p.PackageEndTime
-		default:
-			cp.EndTime = p.CycleEndTime
-		}
-		if cp.ExpiresAt == 0 && cp.EndTime != "" {
-			if end, perr := time.ParseInLocation(packageEndLayout, cp.EndTime, softRateResetLoc); perr == nil {
-				cp.ExpiresAt = end.UnixMilli()
-			}
+		// 到期字段选择与余额聚合共用 packageExpiry（**单一实现**）：两条通路读同一个
+		// 字段，就不可能出现「明细说 3 天后到期、快照说 30 天后」的漂移。
+		if at, ok := packageExpiry(p.DeductionEndTime, p.ExpiredTime, p.PackageEndTime, p.CycleEndTime); ok {
+			cp.EndTime = at.Format(time.RFC3339)
+			cp.ExpiresAt = at.UnixMilli()
 		}
 		// CreateTime 是 epoch 毫秒；0 表示上游没给，留空而不是伪造 1970。
 		if p.CreateTime > 0 {
@@ -2012,6 +1998,79 @@ func (c *Client) UserResource(a *auth.Auth) (remain, total int64, err error) {
 // packageEndLayout 上游套餐到期时间的墙钟格式（UTC+8，与 softRateResetLoc 同口径）。
 const packageEndLayout = "2006-01-02 15:04:05"
 
+// packageExpiry 返回单个积分包的**真失效时刻**，字段优先级是全仓库唯一实现
+// （CreditPackages 与 UserResourceDetailedWithExpiry 都调它，杜绝两处漂移）：
+//
+//	DeductionEndTime（可抵扣窗口结束，epoch 毫秒，真「用不完就没了」）
+//	→ ExpiredTime → PackageEndTime → CycleEndTime（周期边界，仅兜底）
+//
+// 上游实测 ExpiredTime / PackageEndTime 在 CN/global 均恒 miss，真实下发的是
+// DeductionEndTime 与 CycleEndTime，但顺序仍按语义保留：谁更"真"用谁。
+// 字符串字段先按 packageEndLayout（UTC+8 墙钟）解析，失败再试 RFC3339——
+// 上游个别分支会下发 RFC3339，只认墙钟格式会静默失败得零值。
+func packageExpiry(deductionEndMs int64, expiredTime, packageEndTime, cycleEndTime string) (time.Time, bool) {
+	if deductionEndMs > 0 {
+		return time.UnixMilli(deductionEndMs), true
+	}
+	for _, raw := range []string{expiredTime, packageEndTime, cycleEndTime} {
+		if raw == "" {
+			continue
+		}
+		if t, ok := parsePackageEndTime(raw); ok {
+			return t, true
+		}
+		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// CreditBatch 单个到期批次：某时刻会作废的剩余积分合计（**展示口径**）。
+type CreditBatch struct {
+	At     time.Time `json:"at"`
+	Remain int64     `json:"remain"`
+}
+
+// ResourceSnapshot 一次余额查询的完整结果。两套到期口径**并存且允许不相等**，
+// 这是有意为之：
+//
+//   - Expiring / EarliestAt / EarliestRemaining 基于 CycleEndTime（周期边界），是
+//     选号 prefer_expiring / expiringNow 的唯一依据，语义与引入时逐字一致；
+//   - Batches 基于 packageExpiry（DeductionEndTime 优先，真失效时刻），只供面板
+//     「积分到期提醒」展示，与 CreditPackages 的逐包口径同源。
+//
+// **不要把两者合并**：合并会让「改卡片颜色」这类改动静默改变选号行为。
+type ResourceSnapshot struct {
+	Remain            int64
+	Total             int64
+	Expiring          int64
+	EarliestAt        time.Time
+	EarliestRemaining int64
+	Batches           []CreditBatch
+}
+
+// mergeBatches 按到期时刻升序合并同刻批次（同一时刻的多个包合成一批，与
+// EarliestRemaining 的求和语义一致），并剔除零/负剩余。
+func mergeBatches(in []CreditBatch) []CreditBatch {
+	if len(in) == 0 {
+		return nil
+	}
+	sort.Slice(in, func(i, j int) bool { return in[i].At.Before(in[j].At) })
+	out := in[:0]
+	for _, b := range in {
+		if b.Remain <= 0 {
+			continue
+		}
+		if n := len(out); n > 0 && out[n-1].At.Equal(b.At) {
+			out[n-1].Remain += b.Remain
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
 // parsePackageEndTime 统一解析上游套餐到期时间。空值、格式异常返回 false，
 // 调用方据此保守地不把该包计入最早到期路由。
 func parsePackageEndTime(raw string) (time.Time, bool) {
@@ -2038,8 +2097,8 @@ func parsePackageEndTime(raw string) (time.Time, bool) {
 // 钳 [0,size] 与 used 修正；消除双份逻辑漂移——旧中间 switch 只钳负值，上游脏数据
 // CycleRemain>Size 时会高估）。
 func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, err error) {
-	remain, total, expiring, _, _, err = c.UserResourceDetailedWithExpiry(a, soon)
-	return remain, total, expiring, err
+	snap, err := c.UserResourceDetailedWithExpiry(a, soon)
+	return snap.Remain, snap.Total, snap.Expiring, err
 }
 
 // enterpriseUnlimitedRemain / enterpriseUnlimitedTotal 企业版「不限量」在池内的等价表示
@@ -2061,6 +2120,9 @@ const (
 // 对 enterpriseId 非空的账号恒返回空 Accounts（实测 code 0 且 Accounts null），
 // 面板因此长期显示 0/未知（额度其实是有的）。
 //
+// 返回的 ResourceSnapshot 只填 Remain/Total/Expiring/EarliestAt/EarliestRemaining
+// 与（至多一条的）Batches：企业号上游不给逐包，展示口径与路由口径天然同值。
+//
 // 上游口径（实测 2026-10-07，企业号 a6239ec8）：
 //
 //	POST /v2/billing/meter/get-enterprise-user-usage   （X-Enterprise-Id 由 BillingHeaders 注入）
@@ -2076,16 +2138,16 @@ const (
 // 分桶：企业配额按周期重置、未用完即作废，与个人「奖励积分到期作废」同性质，故把
 // cycleEndTime 作为唯一到期批次——周期末企业号会被 prefer_expiring 优先选中（期望行为）。
 // limitNum < 0（不限量）无作废语义，不参与分桶。
-func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (ResourceSnapshot, error) {
 	// 与个人口径一致：余额是签到后的紧邻调用，偶发 500 值得有界重试。
 	var data json.RawMessage
-	err = c.retryBillingTransient(func() error {
+	err := c.retryBillingTransient(func() error {
 		var e error
 		data, e = c.billingJSON(a, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
 		return e
 	})
 	if err != nil {
-		return 0, 0, 0, time.Time{}, 0, err
+		return ResourceSnapshot{}, err
 	}
 	// 兼容上游两套字段命名（桌面端两条解析路径分别读 camelCase 与 snake_case）。
 	var resp struct {
@@ -2097,7 +2159,7 @@ func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, t
 		CycleResetTime string  `json:"cycleResetTime"`
 	}
 	if uerr := json.Unmarshal(data, &resp); uerr != nil {
-		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("enterprise resource parse: %w", uerr)
+		return ResourceSnapshot{}, fmt.Errorf("enterprise resource parse: %w", uerr)
 	}
 	limit := resp.LimitNum
 	if limit == 0 && resp.LimitNumSnake != 0 {
@@ -2109,7 +2171,7 @@ func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, t
 	}
 	// 不限量：池内无对应状态位，用大剩余量让路由权重与 credit_floor 都不构成限制。
 	if limit < 0 {
-		return enterpriseUnlimitedRemain, enterpriseUnlimitedTotal, 0, time.Time{}, 0, nil
+		return ResourceSnapshot{Remain: enterpriseUnlimitedRemain, Total: enterpriseUnlimitedTotal}, nil
 	}
 	// credit 是浮点（如 812.45），池内 credits 是整数：四舍五入到最近整数
 	// （向下取整会低报剩余额度，与"额度还有多少"的展示意图相悖）。
@@ -2117,30 +2179,33 @@ func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, t
 	if used-float64(usedInt) >= 0.5 {
 		usedInt++
 	}
-	remain = limit - usedInt
+	remain := limit - usedInt
 	if remain < 0 {
 		remain = 0
 	}
-	total = limit
+	snap := ResourceSnapshot{Remain: remain, Total: limit}
 	// 周期到期批次：cycleEndTime 优先，缺失回落 cycleResetTime。
+	// 企业号只有一个周期批次（上游不给逐包），故 Batches 至多一条：展示口径与
+	// 路由口径在这里天然同值，不存在个人号那种两套字段的分歧。
 	now := time.Now()
 	end, ok := parsePackageEndTime(resp.CycleEndTime)
 	if !ok {
 		end, ok = parsePackageEndTime(resp.CycleResetTime)
 	}
 	if ok && remain > 0 && end.After(now) {
-		earliestAt, earliestRemaining = end, remain
+		snap.EarliestAt, snap.EarliestRemaining = end, remain
+		snap.Batches = []CreditBatch{{At: end, Remain: remain}}
 		if soon > 0 && !end.After(now.Add(soon)) {
-			expiring = remain
+			snap.Expiring = remain
 		}
 	}
-	return remain, total, expiring, earliestAt, earliestRemaining, nil
+	return snap, nil
 }
 
 // UserResourceDetailedWithExpiry 在 UserResourceDetailed 基础上返回最早未来到期批次：
 // earliestAt 是最早的可用到期时刻，earliestRemaining 是同一时刻所有正余额包的剩余量之和。
 // 已过期、剩余为 0、缺少或无法解析到期时间的包都不会成为最早批次；无有效批次时返回零值。
-func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
+func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration) (ResourceSnapshot, error) {
 	// 企业版额度不在「个人资源包」体系内：get-user-resource* 对 enterpriseId 非空账号
 	// 恒返回空 Accounts（实测 code 0 且 Accounts null），故分流到企业口径端点。
 	if a.IsEnterprise() {
@@ -2158,20 +2223,23 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 	// 余额查询同样做瞬时错误有界重试（签到后紧接着的 user-resource 偶发 500 会让
 	// 该账号错过本次解冻/到期快照更新，只能等下一个刷新周期）。
 	var data json.RawMessage
-	err = c.retryBillingTransient(func() error {
+	err := c.retryBillingTransient(func() error {
 		var e error
 		data, e = c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
 		return e
 	})
 	if err != nil {
-		return 0, 0, 0, time.Time{}, 0, err
+		return ResourceSnapshot{}, err
 	}
 	var resp struct {
 		Response struct {
 			Data struct {
 				Accounts []struct {
-					PackageName         string `json:"PackageName"`
-					CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
+					PackageName      string `json:"PackageName"`
+					CycleEndTime     string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
+					ExpiredTime      string `json:"ExpiredTime"`
+					PackageEndTime   string `json:"PackageEndTime"`
+					DeductionEndTime int64  `json:"DeductionEndTime"` // epoch 毫秒，真失效时刻
 					CapacitySize        int64  `json:"CapacitySize"`
 					CapacityRemain      int64  `json:"CapacityRemain"`
 					CapacityUsed        int64  `json:"CapacityUsed"`
@@ -2183,8 +2251,9 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		} `json:"Response"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, 0, time.Time{}, 0, fmt.Errorf("resource parse: %w", err)
+		return ResourceSnapshot{}, fmt.Errorf("resource parse: %w", err)
 	}
+	snap := ResourceSnapshot{}
 	for _, acct := range resp.Response.Data.Accounts {
 		r, _, size := packageRemainUsed(respAccount{
 			CapacityRemain:      acct.CapacityRemain,
@@ -2200,27 +2269,31 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		if size < r {
 			size = r
 		}
-		remain += r
-		total += size
+		snap.Remain += r
+		snap.Total += size
 		if r <= 0 {
 			continue
 		}
-		end, ok := parsePackageEndTime(acct.CycleEndTime)
-		if !ok || !end.After(now) {
-			continue
+		// 路由口径：CycleEndTime（**行为不变**，改动会让选号静默换血）。
+		if end, ok := parsePackageEndTime(acct.CycleEndTime); ok && end.After(now) {
+			if snap.EarliestAt.IsZero() || end.Before(snap.EarliestAt) {
+				snap.EarliestAt = end
+				snap.EarliestRemaining = r
+			} else if end.Equal(snap.EarliestAt) {
+				snap.EarliestRemaining += r
+			}
+			// 分桶：仅 soon>0 且确实在窗口内 → expiring。
+			if soon > 0 && !end.After(now.Add(soon)) {
+				snap.Expiring += r
+			}
 		}
-		if earliestAt.IsZero() || end.Before(earliestAt) {
-			earliestAt = end
-			earliestRemaining = r
-		} else if end.Equal(earliestAt) {
-			earliestRemaining += r
-		}
-		// 分桶：仅 soon>0 且确实在窗口内 → expiring。
-		if soon > 0 && !end.After(now.Add(soon)) {
-			expiring += r
+		// 展示口径：真失效时刻（DeductionEndTime 优先），与 CreditPackages 同源。
+		if at, ok := packageExpiry(acct.DeductionEndTime, acct.ExpiredTime, acct.PackageEndTime, acct.CycleEndTime); ok && at.After(now) {
+			snap.Batches = append(snap.Batches, CreditBatch{At: at, Remain: r})
 		}
 	}
-	return remain, total, expiring, earliestAt, earliestRemaining, nil
+	snap.Batches = mergeBatches(snap.Batches)
+	return snap, nil
 }
 
 // respAccount 供 packageRemainUsed 解析的套餐字段（CreditPackages 的逐包结构同构）。

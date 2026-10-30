@@ -126,13 +126,17 @@ func (p *Pool) load() {
 	if json.Unmarshal(raw, &sf) != nil {
 		return
 	}
-	p.applyAccountsLocked(sf.Accounts)
+	p.applyAccountsLocked(sf.Accounts, sf.ExpirySchema)
 }
 
 // applyAccountsLocked 用持久化账号状态覆盖/插入 byUID（placeholder 凭证，Add 时换全）。
 // 本地 load() 与 Redis 快照恢复共用；调用方必须已持有 p.mu。
-func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
+func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount, schema int) {
 	now := time.Now()
+	// 到期快照口径版本闸（见 expirySchemaCurrent）：旧版本的 credits_earliest_* /
+	// credits_expiring 是 CycleEndTime 口径，与展示口径（DeductionEndTime）混用会
+	// 让卡片与明细互相矛盾，故整体丢弃，等下一轮余额刷新重建。
+	schemaOK := schema >= expirySchemaCurrent
 	for uid, s := range accounts {
 		// err_total 优先；旧文件的 err_count（连续错误）作一次性迁移源映射进来（二者取较大者，
 		// 尽最大可能保留历史观测信号——旧语义下 err_count 也真实发生过错误，不应丢）。
@@ -163,18 +167,26 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			consecutiveFails:         s.ConsecutiveFails,
 		}
 		// 到期快照按当前时刻惰性清洗：已过期、零剩余或超出总余额的脏数据不恢复。
-		if e.creditsExpiring < 0 {
+		if !schemaOK {
 			e.creditsExpiring = 0
-		}
-		if e.creditsExpiring > e.credits {
-			e.creditsExpiring = e.credits
-		}
-		if e.creditsEarliestRemaining < 0 || e.creditsEarliestRemaining > e.credits {
-			e.creditsEarliestRemaining = 0
-		}
-		if e.creditsEarliestRemaining == 0 || e.creditsEarliestExpiry.IsZero() || !now.Before(e.creditsEarliestExpiry) {
 			e.creditsEarliestExpiry = time.Time{}
 			e.creditsEarliestRemaining = 0
+			e.creditsBatches = nil
+		} else {
+			if e.creditsExpiring < 0 {
+				e.creditsExpiring = 0
+			}
+			if e.creditsExpiring > e.credits {
+				e.creditsExpiring = e.credits
+			}
+			if e.creditsEarliestRemaining < 0 || e.creditsEarliestRemaining > e.credits {
+				e.creditsEarliestRemaining = 0
+			}
+			if e.creditsEarliestRemaining == 0 || e.creditsEarliestExpiry.IsZero() || !now.Before(e.creditsEarliestExpiry) {
+				e.creditsEarliestExpiry = time.Time{}
+				e.creditsEarliestRemaining = 0
+			}
+			e.creditsBatches = normalizeBatches(s.CreditsBatches, e.credits, now)
 		}
 		// 熔断器持久化恢复：breakerUntil 未过期才恢复（过期不复活），retryCount 仅在
 		// 熔断仍有效时保留（否则归零，不保留无用退避指数）。
@@ -226,7 +238,7 @@ func (p *Pool) adoptSnapshot(s snapshot) {
 }
 func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
-	p.applyAccountsLocked(s.Accounts)
+	p.applyAccountsLocked(s.Accounts, s.ExpirySchema)
 }
 func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
@@ -281,7 +293,7 @@ func (p *Pool) notePersistFail(err error) {
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。
 func (p *Pool) stateOverviewLocked() stateFile {
 	now := time.Now()
-	sf := stateFile{Accounts: map[string]stateAccount{}}
+	sf := stateFile{ExpirySchema: expirySchemaCurrent, Accounts: map[string]stateAccount{}}
 	for uid, e := range p.byUID {
 		s := stateAccount{
 			Credits:                  e.credits,
@@ -303,6 +315,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsExpiring:          e.creditsExpiring,
 			CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 			CreditsEarliestRemaining: e.creditsEarliestRemaining,
+			CreditsBatches:           e.creditsBatches,
 		}
 		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
 		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {

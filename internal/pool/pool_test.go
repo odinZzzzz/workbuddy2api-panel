@@ -1748,9 +1748,9 @@ func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	p.Add(&auth.Auth{UID: "none"})
 
 	now := time.Now()
-	p.SetCreditsDetailed("later", 100, 100, 100, now.Add(48*time.Hour), 100)
-	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(2*time.Hour), 100)
-	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("later", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: now.Add(48 * time.Hour), EarliestRemaining: 100})
+	p.SetCreditsDetailed("soon", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: now.Add(2 * time.Hour), EarliestRemaining: 100})
+	p.SetCreditsDetailed("none", CreditsSnapshot{Remain: 100, Total: 100})
 
 	// 3:1 虚拟实例是软偏好而非硬优先。用确定性随机源统计长期分布：两个快过期
 	// 账号的合计份额应显著高于普通账号，同时普通账号仍保留少量流量。
@@ -1778,8 +1778,8 @@ func TestPickExpiringTieUsesExistingWeight(t *testing.T) {
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 
 	at := time.Now().Add(time.Hour)
-	p.SetCreditsDetailed("small", 10, 10, 10, at, 10)
-	p.SetCreditsDetailed("large", 50, 50, 50, at, 50)
+	p.SetCreditsDetailed("small", CreditsSnapshot{Remain: 10, Total: 10, Expiring: 10, EarliestAt: at, EarliestRemaining: 10})
+	p.SetCreditsDetailed("large", CreditsSnapshot{Remain: 50, Total: 50, Expiring: 50, EarliestAt: at, EarliestRemaining: 50})
 
 	got := p.Pick()
 	if got == nil || got.UID != "large" {
@@ -1792,8 +1792,8 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	p.Add(&auth.Auth{UID: "a"})
 	p.Add(&auth.Auth{UID: "b"})
 	now := time.Now()
-	p.SetCreditsDetailed("a", 100, 100, 50, now.Add(time.Hour), 50)
-	p.SetCreditsDetailed("b", 100, 100, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("a", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 50, EarliestAt: now.Add(time.Hour), EarliestRemaining: 50})
+	p.SetCreditsDetailed("b", CreditsSnapshot{Remain: 100, Total: 100})
 
 	p.mu.Lock()
 	we := p.routingWeightOf(p.byUID["a"], 100, now)
@@ -1818,7 +1818,7 @@ func TestCreditExpirySnapshotConsumptionAndClear(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	now := time.Now()
-	p.SetCreditsDetailed("u1", 100, 100, 50, now.Add(time.Hour), 40)
+	p.SetCreditsDetailed("u1", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 50, EarliestAt: now.Add(time.Hour), EarliestRemaining: 40})
 
 	st, _ := p.Status("u1")
 	if st.CreditsExpiring != 50 || st.CreditsEarliestRemaining != 40 || st.CreditsEarliestExpiry.IsZero() {
@@ -1837,8 +1837,8 @@ func TestCreditExpirySnapshotConsumptionAndClear(t *testing.T) {
 		t.Fatalf("after exhaustion=%+v", st)
 	}
 
-	p.SetCreditsDetailed("u1", 50, 50, 10, now.Add(time.Hour), 10)
-	p.SetCreditsDetailed("u1", 50, 50, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("u1", CreditsSnapshot{Remain: 50, Total: 50, Expiring: 10, EarliestAt: now.Add(time.Hour), EarliestRemaining: 10})
+	p.SetCreditsDetailed("u1", CreditsSnapshot{Remain: 50, Total: 50})
 	st, _ = p.Status("u1")
 	if st.CreditsExpiring != 0 || st.CreditsEarliestRemaining != 0 || !st.CreditsEarliestExpiry.IsZero() {
 		t.Fatalf("zero refresh did not clear snapshot=%+v", st)

@@ -441,6 +441,23 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// toPoolCredits 把上游快照转成池内写入包（唯一转换点：pool 不依赖 upstream 的
+// DTO，避免状态层反向依赖 HTTP 客户端）。
+func toPoolCredits(snap upstream.ResourceSnapshot) pool.CreditsSnapshot {
+	batches := make([]pool.CreditBatch, 0, len(snap.Batches))
+	for _, b := range snap.Batches {
+		batches = append(batches, pool.CreditBatch{At: b.At, Remain: b.Remain})
+	}
+	return pool.CreditsSnapshot{
+		Remain:            snap.Remain,
+		Total:             snap.Total,
+		Expiring:          snap.Expiring,
+		EarliestAt:        snap.EarliestAt,
+		EarliestRemaining: snap.EarliestRemaining,
+		Batches:           batches,
+	}
+}
+
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用账号默认跳过——
 // 若 schedule.include_disabled_in_tasks 打开则一并执行（禁用只关选号，不停保号）。
@@ -485,14 +502,15 @@ func (s *Scheduler) RunCheckinNow() {
 				log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
 			}
 		}
-		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次。
-		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
+		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次
+		// （路由口径）与逐批到期快照（展示口径）。
+		snap, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			continue
 		}
-		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
-		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
+		s.cfg.Pool.ReenableIfCredits(st.UID, snap.Remain, snap.Total)
+		s.cfg.Pool.SetCreditsDetailed(st.UID, toPoolCredits(snap))
 	}
 	s.RunStreakBonusNow()
 }
@@ -626,13 +644,13 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		wg.Add(1)
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
-			remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
+			snap, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
 				return
 			}
-			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
-			s.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
+			s.cfg.Pool.ReenableIfCredits(uid, snap.Remain, snap.Total)
+			s.cfg.Pool.SetCreditsDetailed(uid, toPoolCredits(snap))
 		}(a, st.UID)
 	}
 	wg.Wait()

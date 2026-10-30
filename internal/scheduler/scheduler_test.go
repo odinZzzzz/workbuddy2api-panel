@@ -458,7 +458,7 @@ func TestRunBalanceRefreshReplacesExpirySnapshot(t *testing.T) {
 
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
-	p.SetCreditsDetailed("u1", 999, 999, 999, time.Now().Add(time.Hour), 999)
+	p.SetCreditsDetailed("u1", pool.CreditsSnapshot{Remain: 999, Total: 999, Expiring: 999, EarliestAt: time.Now().Add(time.Hour), EarliestRemaining: 999})
 
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up, ExpiringSoonWindow: 7 * 24 * time.Hour})
@@ -480,7 +480,7 @@ func TestRunBalanceRefreshReplacesExpirySnapshot(t *testing.T) {
 func TestSetExpiringSoonWindowClearsSnapshot(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetCreditsDetailed("u1", 100, 100, 50, time.Now().Add(time.Hour), 50)
+	p.SetCreditsDetailed("u1", pool.CreditsSnapshot{Remain: 100, Total: 100, Expiring: 50, EarliestAt: time.Now().Add(time.Hour), EarliestRemaining: 50})
 	s := New(Config{Pool: p, ExpiringSoonWindow: 7 * 24 * time.Hour})
 
 	s.SetExpiringSoonWindow(24 * time.Hour)

@@ -76,7 +76,7 @@ func TestAvailableUIDsForModelRealm(t *testing.T) {
 func TestWeightedAvailableUIDsForModelRealm(t *testing.T) {
 	p := realmPool(t)
 	now := time.Now()
-	p.SetCreditsDetailed("cn2", 100, 100, 100, now.Add(time.Hour), 100)
+	p.SetCreditsDetailed("cn2", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: now.Add(time.Hour), EarliestRemaining: 100})
 
 	got := p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn")
 	want := []string{"cn1", "cn2", "cn2", "cn2"}

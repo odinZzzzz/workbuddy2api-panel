@@ -59,6 +59,14 @@ type TokenUsageDelta struct {
 	TokensPerSecond     float64
 }
 
+// CreditBatch 单个到期批次的**展示口径**快照：某时刻会作废的剩余积分。
+// 与 entry.creditsEarliestExpiry（路由口径，CycleEndTime）**不是**同一套数据，
+// 两者由同一次上游响应写入但允许不相等——面板「积分到期提醒」只认本类型。
+type CreditBatch struct {
+	At     time.Time `json:"at"`
+	Remain int64     `json:"remain"`
+}
+
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
 	UID          string `json:"uid"`
@@ -68,9 +76,14 @@ type Status struct {
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
 	// 的到期压力。CreditsExpiring 是配置窗口内的剩余积分；后两者是全部未来到期批次中
 	// 最早的一批及其剩余量，供 WorkDaddy 同口径的“最早到期优先”路由使用。
+	// 注意：以上三者是**路由口径**（CycleEndTime），供 pickEarliestExpiry /
+	// prefer_expiring 使用，**不得**用于展示。展示请用 CreditsBatches。
 	CreditsExpiring          int64     `json:"credits_expiring,omitempty"`
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
+	// CreditsBatches 逐批到期快照（**展示口径**，DeductionEndTime 优先），按到期
+	// 时刻升序。面板「积分到期提醒」用它渲染：最早一批 + 7 天合计 + 随后几批。
+	CreditsBatches []CreditBatch `json:"credits_batches,omitempty"`
 	Cooling                  bool      `json:"cooling"`
 	CoolKind                 string    `json:"cool_kind,omitempty"`
 	CoolRemaining            int64     `json:"cool_remaining_sec,omitempty"`
@@ -189,6 +202,10 @@ type entry struct {
 	creditsExpiring          int64
 	creditsEarliestExpiry    time.Time
 	creditsEarliestRemaining int64
+	// creditsBatches 逐批到期快照（展示口径，DeductionEndTime 优先），升序。
+	// 与上面三个标量并存：标量供路由（CycleEndTime），本字段供面板展示，两者
+	// 由同一次上游响应写入但**允许不相等**，不要合并（合并会改变选号行为）。
+	creditsBatches []CreditBatch
 	successCount             int64      // 累计成功
 	errTotal                 int64      // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
 	lastErr                  time.Time  // 最近一次错误时间
@@ -463,6 +480,10 @@ type stateAccount struct {
 	// 与 CreditsExpiring 一并持久化，重启后首次请求仍可沿用最近一次余额快照。
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
+	// CreditsBatches 逐批到期快照（展示口径）。仅 expiry_schema>=2 时可信：
+	// 旧版本的 credits_earliest_* 是 CycleEndTime 口径，与展示口径混用会让卡片与
+	// 明细互相矛盾，故加载时按 schema 版本整体丢弃（见 applyAccountsLocked）。
+	CreditsBatches []CreditBatch `json:"credits_batches,omitempty"`
 	// ModelCooldowns 模型级独立冷却表（model → 冷却记录：6004 重置墙钟 / 11102
 	// 负缓存退避）。持久化：6004 对齐上游重置墙钟后单模型冷却可长达数小时，
 	// 跨重启是常态；不持久化会导致 healthyForModel 重启失忆、重新踩雷区。
@@ -493,9 +514,20 @@ type stateModelCost struct {
 	Samples   int       `json:"samples,omitempty"`
 }
 
+// expirySchemaCurrent 到期快照的当前 schema 版本。
+//
+// 版本 2 起「展示口径」改为 DeductionEndTime（packageExpiry），而 version<2 的
+// state.json 里 credits_earliest_* 是 CycleEndTime 口径。两者混用会让卡片说
+// 「3 天后到期」而明细说「30 天后」——正是本版本要消灭的矛盾，故加载时整体丢弃
+// 旧快照，等下一轮余额刷新（默认 5 分钟）重建。空窗期显示「无未来到期批次」，
+// 比显示错的好。
+const expirySchemaCurrent = 2
+
 // stateFile 持久化格式。
 type stateFile struct {
-	Accounts map[string]stateAccount `json:"accounts"`
+	// ExpirySchema 到期快照口径版本（见 expirySchemaCurrent）。缺省 0 = 旧版本。
+	ExpirySchema int                     `json:"expiry_schema,omitempty"`
+	Accounts     map[string]stateAccount `json:"accounts"`
 }
 
 // flushInterval 后台落盘周期。
