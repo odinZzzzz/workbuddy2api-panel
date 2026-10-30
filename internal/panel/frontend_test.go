@@ -62,6 +62,30 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 	}
 }
 
+// TestIndexHTMLNoInlineEventHandlers index.html 不得含内联事件处理器（on*=）：
+// 严格 CSP（script-src 'self'，无 unsafe-inline）会把它们静默拦掉——代码在、
+// 行为不在，是最难排查的一类回归。实例：密钥框的 onsubmit="return false" 被拦，
+// 回车触发的隐式提交无人拦截（现已改为 app.js 里 addEventListener('submit')）。
+func TestIndexHTMLNoInlineEventHandlers(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	re := regexp.MustCompile(`(?i)\son[a-z]+\s*=\s*["']`)
+	if loc := re.FindStringIndex(body); loc != nil {
+		start := loc[0] - 60
+		if start < 0 {
+			start = 0
+		}
+		end := loc[1] + 40
+		if end > len(body) {
+			end = len(body)
+		}
+		t.Fatalf("index.html contains inline event handler (blocked by CSP): ...%s...", body[start:end])
+	}
+}
+
 // TestAppJSTopLevelSmoke app.js 顶层求值冒烟（v1.11.3/1.11.4 两连炸后补的运行时闸门）：
 // node + DOM 桩执行 app.js（含按 hash 落到各视图的 go() 顶层调用），抓 TDZ/
 // ReferenceError 类运行时错误——Go 侧 frontend_test 不执行 JS，语法层检查对此全盲。

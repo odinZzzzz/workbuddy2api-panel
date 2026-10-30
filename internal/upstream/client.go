@@ -2235,11 +2235,11 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 		Response struct {
 			Data struct {
 				Accounts []struct {
-					PackageName      string `json:"PackageName"`
-					CycleEndTime     string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
-					ExpiredTime      string `json:"ExpiredTime"`
-					PackageEndTime   string `json:"PackageEndTime"`
-					DeductionEndTime int64  `json:"DeductionEndTime"` // epoch 毫秒，真失效时刻
+					PackageName         string `json:"PackageName"`
+					CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
+					ExpiredTime         string `json:"ExpiredTime"`
+					PackageEndTime      string `json:"PackageEndTime"`
+					DeductionEndTime    int64  `json:"DeductionEndTime"` // epoch 毫秒，真失效时刻
 					CapacitySize        int64  `json:"CapacitySize"`
 					CapacityRemain      int64  `json:"CapacityRemain"`
 					CapacityUsed        int64  `json:"CapacityUsed"`

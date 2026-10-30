@@ -328,6 +328,10 @@ $('btnKey').onclick = async () => {
   } catch (e) { $('keyErr').hidden = false; }
 };
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
+// 隐式提交必须显式拦截：CSP（script-src 'self'）会拦掉内联 onsubmit，
+// 表单只剩一个输入框时回车会触发隐式提交，把「Enter 提交密钥」的流程打断。
+// 页面本来就没有提交目标，任何导航都只会丢掉当前会话。
+$('keyForm').addEventListener('submit', e => e.preventDefault());
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
 /* 积分包明细共享缓存：「积分构成」视图与首页「积分到期提醒」卡片共用同一份
