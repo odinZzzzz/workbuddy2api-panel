@@ -851,14 +851,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note">全局 api_key 始终有效，令牌是叠加通道</span>
         </header>
         <div class="pad">
-          <div class="fbar" style="flex-wrap:wrap;gap:8px">
-            <input id="tokName" placeholder="名称（如 客户端A）" />
+          <div class="fbar" style="flex-wrap:wrap;gap:8px;align-items:center">
+            <input id="tokName" placeholder="名称（必填，如 客户端A）" style="min-width:180px" />
             <input id="tokQuota" type="number" min="0" step="0.01" placeholder="配额积分（0=不限）" style="max-width:170px" />
             <input id="tokExpires" type="date" title="过期日期（可空=永不过期）" style="max-width:150px" />
-            <input id="tokModels" placeholder="模型白名单（逗号分隔，空=全部）" style="min-width:200px" />
+            <button class="primary" id="btnTokCreate">创建</button>
+            <span class="grow"></span>
+            <button class="xs" id="btnTokAdvanced" title="展开模型白名单与限流">高级选项 ▾</button>
+          </div>
+          <div class="fbar" id="tokAdvancedRow" hidden style="flex-wrap:wrap;gap:8px;margin-top:8px">
+            <input id="tokModels" placeholder="模型白名单（逗号分隔，空=全部）" style="min-width:240px" />
             <input id="tokRpm" type="number" min="0" placeholder="RPM（0=不限）" style="max-width:130px" title="每分钟请求数上限" />
             <input id="tokConc" type="number" min="0" placeholder="并发（0=不限）" style="max-width:130px" title="同时在途请求上限" />
-            <button class="primary" id="btnTokCreate">创建</button>
+            <input id="tokNote" placeholder="备注（可空）" style="min-width:180px" />
           </div>
           <div id="tokNewKey" hidden style="margin-top:12px"></div>
         </div>
@@ -871,10 +876,30 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="tokCount">—</span>
           <button class="xs" id="btnTokReload">刷新</button>
         </header>
+        <div class="pad" style="padding-bottom:0">
+          <div class="fbar" style="flex-wrap:wrap;gap:8px;align-items:center">
+            <input id="tokSearch" placeholder="搜索名称 / 备注 / 密钥" style="min-width:220px" />
+            <select id="tokState" title="按状态筛选">
+              <option value="">全部状态</option>
+              <option value="ok">可用</option>
+              <option value="disabled">已禁用</option>
+              <option value="expired">已过期</option>
+              <option value="quota">配额用尽</option>
+            </select>
+            <select id="tokSort" title="排序">
+              <option value="created">创建时间（新→旧）</option>
+              <option value="used">已用积分（高→低）</option>
+              <option value="requests">请求数（高→低）</option>
+              <option value="name">名称（A→Z）</option>
+            </select>
+            <span class="grow"></span>
+            <button class="xs" id="btnTokCopyAll" title="复制所有可用令牌的打码前缀，便于核对">复制清单</button>
+          </div>
+        </div>
         <div class="tbl-wrap">
           <table>
             <thead><tr>
-              <th>名称</th><th>密钥</th><th>状态</th><th>已用 / 配额</th><th>请求数</th><th>限流</th><th>过期</th><th>操作</th>
+              <th>名称</th><th>密钥（打码）</th><th>状态</th><th>已用 / 配额</th><th>请求数</th><th>限流</th><th>过期</th><th>操作</th>
             </tr></thead>
             <tbody id="tokBody"></tbody>
           </table>

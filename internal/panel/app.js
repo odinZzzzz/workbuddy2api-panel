@@ -14,6 +14,8 @@ let reqEntries = [];
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
 let reqRangeState = null; // 请求记录的时间范围（用量页的见 trangeState）
+let tokFilter = { q: '', state: '', sort: 'created' }; // 令牌列表的搜索/状态筛选/排序
+let tokAll = []; // 最近一次拉取的令牌全集（筛选在前端做，翻页/筛选不重新请求）
 
 const $ = id => document.getElementById(id);
 
@@ -3331,11 +3333,43 @@ async function loadTokens() {
   const note = $('tokCount');
   try {
     const d = await api('tokens');
-    renderTokens(d.tokens || [], d.disabled === true);
-    if (note) note.textContent = (d.tokens || []).length + ' 把令牌';
+    tokAll = d.tokens || [];
+    renderTokens(tokAll, d.disabled === true);
+    if (note) note.textContent = tokenCountText();
   } catch (e) {
     if (note) note.textContent = '读取失败：' + e.message;
   }
+}
+
+function tokenCountText() {
+  const shown = filteredTokens().length;
+  if (!tokAll.length) return '0 把令牌';
+  return shown === tokAll.length ? tokAll.length + ' 把令牌' : shown + ' / ' + tokAll.length + ' 把令牌';
+}
+
+function tokStateKey(t) {
+  if (!t.enabled) return 'disabled';
+  if (t.expired) return 'expired';
+  if (t.quota_exceeded) return 'quota';
+  return 'ok';
+}
+
+function filteredTokens() {
+  const q = (tokFilter.q || '').trim().toLowerCase();
+  let list = tokAll.filter(t => {
+    if (tokFilter.state && tokStateKey(t) !== tokFilter.state) return false;
+    if (!q) return true;
+    const hay = [(t.name || ''), (t.note || ''), (t.key || ''), (t.allowed_models || []).join(',')]
+      .join(' ').toLowerCase();
+    return hay.indexOf(q) >= 0;
+  });
+  const by = tokFilter.sort;
+  list = list.slice();
+  if (by === 'name') list.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN'));
+  else if (by === 'used') list.sort((a, b) => Number(b.used_credits || 0) - Number(a.used_credits || 0));
+  else if (by === 'requests') list.sort((a, b) => Number(b.used_requests || 0) - Number(a.used_requests || 0));
+  else list.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  return list;
 }
 
 function tokStatus(t) {
@@ -3371,11 +3405,17 @@ function renderTokens(list, disabled) {
     tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">还没有令牌</div>用上面的表单创建一把，客户端就能用独立的 key 接入</div></td></tr>';
     return;
   }
-  tb.innerHTML = list.map(t =>
+  const rows = filteredTokens();
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">没有匹配的令牌</div>换个搜索词，或把状态筛选切回「全部状态」</div></td></tr>';
+    const note = $('tokCount'); if (note) note.textContent = tokenCountText();
+    return;
+  }
+  tb.innerHTML = rows.map(t =>
     '<tr>' +
     '<td>' + esc(t.name || '—') + (t.note ? '<div class="note" style="margin-top:2px">' + esc(t.note) + '</div>' : '') +
       (t.allowed_models && t.allowed_models.length ? '<div class="note" style="margin-top:2px">仅 ' + esc(t.allowed_models.join(', ')) + '</div>' : '') + '</td>' +
-    '<td><code>' + esc(t.key) + '</code></td>' +
+    '<td><code title="完整密钥仅在创建时显示一次">' + esc(t.key) + '</code></td>' +
     '<td>' + tokStatus(t) + '</td>' +
     '<td>' + tokQuotaCell(t) + '</td>' +
     '<td>' + (t.used_requests || 0) + '</td>' +
@@ -3387,17 +3427,59 @@ function renderTokens(list, disabled) {
       '<button class="xs" data-tok="limits" data-id="' + esc(t.id) + '" data-cur="' + (t.rpm || 0) + '/' + (t.max_concurrency || 0) + '">限流</button> ' +
       '<button class="xs" data-tok="del" data-id="' + esc(t.id) + '">删除</button>' +
     '</td></tr>').join('');
+  const note = $('tokCount'); if (note) note.textContent = tokenCountText();
 }
 
+if ($('btnTokAdvanced')) $('btnTokAdvanced').onclick = () => {
+  const row = $('tokAdvancedRow');
+  if (!row) return;
+  row.hidden = !row.hidden;
+  $('btnTokAdvanced').textContent = row.hidden ? '高级选项 ▾' : '高级选项 ▴';
+};
+
+['tokSearch', 'tokState', 'tokSort'].forEach(id => {
+  const el = $(id);
+  if (!el) return;
+  const ev = id === 'tokSearch' ? 'input' : 'change';
+  el.addEventListener(ev, () => {
+    tokFilter.q = ($('tokSearch') || {}).value || '';
+    tokFilter.state = ($('tokState') || {}).value || '';
+    tokFilter.sort = ($('tokSort') || {}).value || 'created';
+    if (tokAll.length) renderTokens(tokAll, false);
+    else { const n = $('tokCount'); if (n) n.textContent = '0 把令牌'; }
+  });
+});
+
+if ($('btnTokCopyAll')) $('btnTokCopyAll').onclick = async () => {
+  const rows = filteredTokens();
+  if (!rows.length) { toast('没有可复制的令牌', 'warn'); return; }
+  const text = rows.map(t => (t.name || t.id) + '\t' + (t.key || '') + '\t' + (t.enabled ? '可用' : '已禁用')).join('\n');
+  try { await navigator.clipboard.writeText(text); toast('已复制 ' + rows.length + ' 条（打码清单）', 'ok'); }
+  catch { toast('复制失败，请检查浏览器权限', 'err'); }
+};
+
 if ($('btnTokCreate')) $('btnTokCreate').onclick = async () => {
+  const name = ($('tokName').value || '').trim();
+  if (!name) { toast('请先填写令牌名称', 'warn'); $('tokName').focus(); return; }
+  if (tokAll.some(t => (t.name || '') === name)) {
+    toast('已有同名令牌：' + name, 'warn');
+    return;
+  }
+  const quota = Number($('tokQuota').value || 0);
+  const rpm = Number($('tokRpm').value || 0);
+  const conc = Number($('tokConc').value || 0);
+  if (!Number.isFinite(quota) || quota < 0) { toast('配额必须是非负数字', 'err'); return; }
+  if (!Number.isFinite(rpm) || rpm < 0) { toast('RPM 必须是非负整数', 'err'); return; }
+  if (!Number.isFinite(conc) || conc < 0) { toast('并发必须是非负整数', 'err'); return; }
   const models = ($('tokModels').value || '').split(',').map(s => s.trim()).filter(Boolean);
   const body = {
-    name: ($('tokName').value || '').trim(),
-    quota_credits: Number($('tokQuota').value || 0),
+    name,
+    quota_credits: quota,
     expires_at: ($('tokExpires').value || '').trim(),
     allowed_models: models,
-    rpm: Number($('tokRpm').value || 0),
-    max_concurrency: Number($('tokConc').value || 0),
+    note: ($('tokNote').value || '').trim(),
+    rpm: Math.floor(rpm),
+    max_concurrency: Math.floor(conc),
   };
   const b = $('btnTokCreate'); b.disabled = true;
   try {
@@ -3415,7 +3497,7 @@ if ($('btnTokCreate')) $('btnTokCreate').onclick = async () => {
         catch { $('tokNewKeyVal').select(); toast('请手动复制（Ctrl+C）', 'warn'); }
       };
     }
-    $('tokName').value = ''; $('tokQuota').value = ''; $('tokExpires').value = ''; $('tokModels').value = ''; $('tokRpm').value = ''; $('tokConc').value = '';
+    ['tokName', 'tokQuota', 'tokExpires', 'tokModels', 'tokRpm', 'tokConc', 'tokNote'].forEach(id => { const el = $(id); if (el) el.value = ''; });
     toast('令牌已创建', 'ok');
     loadTokens();
   } catch (e) { toast(e.message, 'err'); }
@@ -3428,22 +3510,26 @@ if ($('tokBody')) $('tokBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-tok]');
   if (!b) return;
   const id = b.dataset.id, act = b.dataset.tok;
-  if (act === 'del' && !confirm('删除令牌后使用该 key 的客户端会立即失效，确认？')) return;
+  const tok = tokAll.find(t => t.id === id);
+  const tokLabel = tok ? (tok.name || tok.id) : id;
+  if (act === 'del' && !confirm('删除令牌「' + tokLabel + '」后，使用该 key 的客户端会立即失效。确认删除？')) return;
+  if (act === 'reset' && !confirm('把「' + tokLabel + '」的已用积分与请求数清零？\n（配额恢复到满额，用于新周期统计）')) return;
   b.disabled = true;
   try {
     if (act === 'toggle') await api('tokens/' + encodeURIComponent(id) + '/toggle', { method: 'POST' });
     else if (act === 'limits') {
       // 单次输入「rpm/并发」而不是连弹两个 prompt：一次交互、可粘贴、易校验。
       const cur = b.dataset.cur || '0/0';
-      const raw = prompt('限流设置（格式：每分钟请求数/并发数，0 = 不限）', cur);
+      const raw = prompt('设置「' + tokLabel + '」的限流\n格式：每分钟请求数/并发数（0 = 不限）\n示例：120/8', cur);
       if (raw === null) return;
       const parts = String(raw).split('/').map((x) => Number(String(x).trim() || 0));
       if (parts.some((n) => !Number.isFinite(n) || n < 0)) {
         toast('格式不对：示例 120/8（0 表示不限）', 'err');
+        b.disabled = false;
         return;
       }
-      const rpm = parts[0] || 0;
-      const conc = parts.length > 1 ? parts[1] : 0;
+      const rpm = Math.floor(parts[0] || 0);
+      const conc = parts.length > 1 ? Math.floor(parts[1] || 0) : 0;
       await api('tokens/' + encodeURIComponent(id) + '/limits', {
         method: 'POST',
         body: JSON.stringify({ rpm, max_concurrency: conc }),
