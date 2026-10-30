@@ -383,6 +383,11 @@ func main() {
 		defer close(shutdownDone)
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
+		// 令牌库的用量记账是合并落盘的（见 tokenstore.flushEvery），退出前必须
+		// Flush 一次，否则最近 flushEvery 窗口内的用量会丢。
+		if err := tokens.Close(); err != nil {
+			log.Printf("WARN: tokens flush: %v", err)
+		}
 		// 收尾窗口可配（server.shutdown_timeout，默认 15s）：SSE 长流的合法时长可达
 		// 数分钟，固定 5s 会把在途流硬切；同时不能无限等（systemd TimeoutStopSec 会强杀）。
 		timeout := cfg.Server.ShutdownTimeoutDur

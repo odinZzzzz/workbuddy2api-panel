@@ -750,6 +750,28 @@ http://127.0.0.1:7863/panel/
 
 **宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
 
+### 多令牌（API Key）管理
+
+形态对齐 one-api / new-api 那类中转站：一个网关签发多把 key，每把独立启停、过期时间、
+积分配额、模型白名单、rpm 与并发上限，各自统计用量。**全局 `api_key` 始终有效**，
+令牌是叠加通道——不建令牌时行为与旧版完全一致。
+
+| 能力 | 说明 |
+|---|---|
+| 鉴权 | `Authorization: Bearer` 与 `x-api-key` 都认；被拒原因区分 `token_disabled` / `token_expired` / `token_quota_exceeded` / `token_rate_limited` / `token_concurrency_limited` |
+| 配额 | 按**积分**计（`quota_credits`，0 = 不限）；上游当前计费为 0 的免费模型不消耗配额 |
+| 限流 | `rpm`（60s 滑动窗口）+ `max_concurrency`（在途闸门），超额 429 + `Retry-After` |
+| 白名单 | `allowed_models` 非空时只放行名单内模型（403 `model_not_allowed`，在选号前拦截，不白跑上游） |
+| 面板 | 「令牌」视图：列表打码、创建返回完整 key（仅一次）、启停/重置用量/改限流/删除 |
+
+**持久化**：`data/tokens.json`（0600，tmp + fsync + rename 原子替换）。
+
+- 结构变更（建/删/启停/改限流/重置用量）**同步落盘**——低频且用户可见，必须立刻持久。
+- 用量记账（每请求都发生）**合并落盘**：默认每 2 秒把脏数据写一次，避免"每请求全量
+  重写 JSON 并持锁"把请求吞吐绑在磁盘 I/O 上；一次崩溃最多丢 2 秒用量计数。
+- 进程收到 SIGTERM 时会 `Flush()` 一次（见 `tokenstore.Close()`），所以**请求后立刻重启
+  也不会丢用量**（实测：请求后 <2s 重启，`used_requests` 仍为 1）。
+
 ### Anthropic Messages 兼容层
 
 `POST /v1/messages` + `POST /v1/messages/count_tokens` 让 **Claude Code**、cc-switch 的 claude

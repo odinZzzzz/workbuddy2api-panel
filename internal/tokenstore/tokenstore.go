@@ -98,6 +98,18 @@ type Store struct {
 	// limiters 每令牌的限流状态（进程内，不持久化——重启清零是合理语义：
 	// 限流窗口是秒级观测，重启后重新计数即可）。
 	limiters map[string]*limiter
+
+	// flushEvery 用量记账的合并落盘间隔（0 = 关闭后台 flusher，只在 Flush 时写）。
+	//
+	// 为什么需要合并：AddUsage 是**每请求**都调用的，而 saveLocked 会全量重写
+	// tokens.json（marshal + 临时文件 + rename）并且持锁——高并发下等于把请求吞吐
+	// 绑在磁盘 I/O 上。结构变更（建/删/启停/改限流/重置）仍然同步落盘：那些是低频
+	// 且用户可见的操作，必须立刻持久。
+	flushEvery time.Duration
+	stop       chan struct{}
+	stopOnce   sync.Once
+	// saves 落盘次数（测试用：验证合并是否真的生效）。
+	saves int64
 }
 
 type fileFormat struct {
@@ -107,33 +119,112 @@ type fileFormat struct {
 
 // Open 加载（或初始化）令牌库。path 为空表示纯内存（测试用）。
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, byID: map[string]*Token{}, byKey: map[string]*Token{}, limiters: map[string]*limiter{}}
-	if path == "" {
-		return s, nil
+	return OpenWithFlush(path, defaultFlushEvery)
+}
+
+// defaultFlushEvery 用量记账的默认合并间隔。
+//
+// 2s 是折中：一次崩溃最多丢 2 秒的用量计数（可接受——它是统计，不是账本），
+// 换来的是每请求零磁盘 I/O。真正需要"立刻持久"的结构变更不走这条路。
+const defaultFlushEvery = 2 * time.Second
+
+// OpenWithFlush 同 Open，但可指定用量合并落盘间隔（flushEvery<=0 = 不做后台落盘）。
+func OpenWithFlush(path string, flushEvery time.Duration) (*Store, error) {
+	s := &Store{
+		path: path, byID: map[string]*Token{}, byKey: map[string]*Token{},
+		limiters: map[string]*limiter{}, flushEvery: flushEvery,
 	}
-	raw, err := os.ReadFile(path)
+	if path == "" || flushEvery <= 0 {
+		return s, s.load()
+	}
+	if err := s.load(); err != nil {
+		return nil, err
+	}
+	s.startFlusher()
+	return s, nil
+}
+
+// load 从磁盘载入令牌（首次运行返回空库）。
+func (s *Store) load() error {
+	if s.path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return s, nil // 首次运行：空库
+			return nil
 		}
-		return nil, fmt.Errorf("tokenstore: 读取 %s: %w", path, err)
+		return fmt.Errorf("tokenstore: 读取 %s: %w", s.path, err)
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
-		return s, nil
+		return nil
 	}
 	var f fileFormat
 	if err := json.Unmarshal(raw, &f); err != nil {
-		return nil, fmt.Errorf("tokenstore: 解析 %s: %w", path, err)
+		return fmt.Errorf("tokenstore: 解析 %s: %w", s.path, err)
 	}
 	for _, t := range f.Tokens {
 		if t == nil || t.ID == "" || t.Key == "" {
-			continue // 脏数据直接跳过，不让一条坏记录拖垮整个库
+			continue
 		}
 		s.byID[t.ID] = t
 		s.byKey[t.Key] = t
 	}
-	return s, nil
+	return nil
 }
+
+// startFlusher 后台按 flushEvery 合并落盘（只有脏了才写）。
+func (s *Store) startFlusher() {
+	s.stop = make(chan struct{})
+	go func() {
+		t := time.NewTicker(s.flushEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.stop:
+				return
+			case <-t.C:
+				s.mu.Lock()
+				if s.dirty {
+					if err := s.saveLocked(); err != nil {
+						logf("tokenstore: 合并落盘失败: %v", err)
+					}
+				}
+				s.mu.Unlock()
+			}
+		}
+	}()
+}
+
+// Flush 立刻把内存中的脏数据落盘（优雅退出时调用）。
+func (s *Store) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.dirty {
+		return nil
+	}
+	return s.saveLocked()
+}
+
+// Close 停止后台 flusher 并做最后一次落盘。
+func (s *Store) Close() error {
+	s.stopOnce.Do(func() {
+		if s.stop != nil {
+			close(s.stop)
+		}
+	})
+	return s.Flush()
+}
+
+// SaveCount 返回累计落盘次数（测试与观测用）。
+func (s *Store) SaveCount() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saves
+}
+
+// logf 允许包内打印而不引 log 依赖进调用链（保持本包无外部依赖）。
+var logf = func(format string, args ...any) {}
 
 // Save 原子落盘（tmp + rename，0600）。
 func (s *Store) Save() error {
@@ -160,17 +251,33 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
 	}
-	// 显式 chmod：os.WriteFile 的 perm 参数只在创建时生效，且 Windows 上映射有限，
-	// 这里补一次，保证 Unix 部署下令牌文件确实是 0600（里面是明文密钥）。
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	// fsync 后再 rename：rename 保证"要么旧文件、要么新文件"，但数据块可能还在
+	// 页缓存里；断电后可能得到一个长度正确却内容为空/截断的文件。令牌文件里是
+	// 明文密钥与配额，宁可多一次 Sync。
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// 显式 chmod：创建时的 perm 参数在 Windows 上映射有限，这里补一次，
+	// 保证 Unix 部署下令牌文件确实是 0600（里面是明文密钥）。
 	_ = os.Chmod(tmp, 0o600)
 	if err := os.Rename(tmp, s.path); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
 	s.dirty = false
+	s.saves++
 	return nil
 }
 
@@ -322,8 +429,10 @@ func (s *Store) AddUsage(id string, credits float64) {
 	if credits > 0 {
 		t.UsedCredits += credits
 	}
+	// 只标脏，不在这里落盘：AddUsage 是每请求都走的，同步写会把请求吞吐绑在
+	// 磁盘 I/O 上（全量 marshal + rename 且持锁）。由后台 flusher 每 flushEvery
+	// 合并一次，优雅退出时 Flush() 兜底。
 	s.dirty = true
-	_ = s.saveLocked()
 }
 
 // AddUsageByKey 便于在只有 key 的地方记账（当前主链路用 id）。

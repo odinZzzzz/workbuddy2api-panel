@@ -99,6 +99,10 @@ func TestUsageAccountingAndPersistence(t *testing.T) {
 	tok, _ := s.Create("持久化", 10, time.Time{}, nil, "", 0, 0)
 	s.AddUsage(tok.ID, 0.25)
 	s.AddUsage(tok.ID, 0.5)
+	// 用量是合并落盘的（每请求不同步写），这里显式 Flush 后再验证持久化。
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
 
 	// 重新加载应看到累计值（验证原子落盘）
 	s2, err := Open(path)
@@ -230,5 +234,108 @@ func TestSetLimits(t *testing.T) {
 	}
 	if got.RPM != 5 || got.MaxConcurrency != 0 {
 		t.Fatalf("limits=%+v want rpm=5 conc=0", got)
+	}
+}
+
+// 用量记账必须**合并落盘**：N 次 AddUsage 只产生 1 次写盘（外加建令牌那一次）。
+//
+// 动机：AddUsage 是每请求都调的，早期实现每请求全量重写 tokens.json（marshal +
+// rename + 持锁），把请求吞吐绑在磁盘 I/O 上。这里用 SaveCount 把"合并真的生效"
+// 变成可断言的数字，避免以后又被人改回同步写。
+func TestUsageWritesAreCoalesced(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenWithFlush(dir+"/tokens.json", time.Hour) // 长间隔：只靠显式 Flush
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	tok, _ := s.Create("c", 0, time.Time{}, nil, "", 0, 0)
+	base := s.SaveCount() // 建令牌 = 1 次同步落盘
+
+	for i := 0; i < 50; i++ {
+		s.AddUsage(tok.ID, 0.01)
+	}
+	if got := s.SaveCount(); got != base {
+		t.Fatalf("50 次 AddUsage 不应触发落盘：saves=%d want %d", got, base)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := s.SaveCount(); got != base+1 {
+		t.Fatalf("Flush 应只写一次：saves=%d want %d", got, base+1)
+	}
+	// 再 Flush 一次：没有脏数据，不该写盘
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush2: %v", err)
+	}
+	if got := s.SaveCount(); got != base+1 {
+		t.Fatalf("无脏数据时 Flush 不应写盘：saves=%d want %d", got, base+1)
+	}
+
+	// 落盘内容包含累计用量
+	re, err := OpenWithFlush(dir+"/tokens.json", 0)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	list := re.List()
+	if len(list) != 1 || list[0].UsedRequests != 50 {
+		t.Fatalf("重开后用量不对: %+v", list)
+	}
+}
+
+// 结构变更（建/删/启停/改限流/重置）必须**立刻**持久，不能等合并窗口。
+func TestStructuralChangesPersistImmediately(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/tokens.json"
+	s, err := OpenWithFlush(path, time.Hour)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	tok, _ := s.Create("立刻持久", 0, time.Time{}, nil, "", 0, 0)
+	// 不 Flush 直接重开：建令牌必须已经在盘上
+	re, err := OpenWithFlush(path, 0)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if len(re.List()) != 1 {
+		t.Fatalf("建令牌应立即落盘，重开后令牌数=%d", len(re.List()))
+	}
+
+	s.SetEnabled(tok.ID, false)
+	re2, _ := OpenWithFlush(path, 0)
+	if got := re2.List()[0]; got.Enabled {
+		t.Fatalf("禁用应立即落盘，重开后仍 enabled")
+	}
+
+	s.SetLimits(tok.ID, 120, 8)
+	re3, _ := OpenWithFlush(path, 0)
+	if got := re3.List()[0]; got.RPM != 120 || got.MaxConcurrency != 8 {
+		t.Fatalf("改限流应立即落盘，重开后=%+v", got)
+	}
+}
+
+// Close 应停止后台 flusher 并做最后一次落盘（优雅退出的兜底路径）。
+func TestCloseFlushesAndStops(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/tokens.json"
+	s, err := OpenWithFlush(path, time.Hour)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tok, _ := s.Create("x", 0, time.Time{}, nil, "", 0, 0)
+	s.AddUsage(tok.ID, 1.5)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	re, _ := OpenWithFlush(path, 0)
+	if got := re.List()[0]; got.UsedRequests != 1 || got.UsedCredits != 1.5 {
+		t.Fatalf("Close 应落盘用量，重开后=%+v", got)
+	}
+	// 重复 Close 不应 panic（stopOnce 保护）
+	if err := s.Close(); err != nil {
+		t.Fatalf("重复 Close: %v", err)
 	}
 }
