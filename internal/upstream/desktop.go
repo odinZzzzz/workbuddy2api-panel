@@ -418,7 +418,14 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 // expert_actual_use 等 JOIN 事件的 requestId 必须是该服务端 id——自造 UUID 不计数
 // （客户端 resolveRealRequestId 同款语义，Sunny row 2113 实证）。
 func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversationID, requestID string, err error) {
-	conversationID = fmt.Sprintf("wb2api-conv-%d", time.Now().UnixNano())
+	// 三层 ID 形状逐位对齐官方客户端（见 session 包「ID 形态」注释）：
+	//   Conversation-ID         = 带横线 v4（客户端 session.id）
+	//   Conversation-Request-ID = 32 hex v7（客户端 mintConversationRequestId）
+	//   Message-ID = X-Request-ID = 32 hex v4（同一值发两个头）
+	// 此前两者同值 wb2api-conv-<纳秒>：既自曝网关品牌，又让两个语义不同的头同源
+	// （客户端几乎不会出现 conv-id == conv-req，本身就是个可检测的模式）。
+	conversationID = session.NewConversationID()
+	convReqID := session.NewConversationRequestID()
 	body := map[string]any{
 		"model": "fast-model",
 		"messages": []any{
@@ -452,7 +459,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	// 刻意保持原样（本路径走 c.HTTP 与独立 UA，有意与主 chat 路径区分）。
 	messageID := session.NewMessageID()
 	h.Set("X-Conversation-ID", conversationID)
-	h.Set("X-Conversation-Request-ID", conversationID)
+	h.Set("X-Conversation-Request-ID", convReqID)
 	h.Set("X-Conversation-Message-ID", messageID)
 	h.Set("X-Request-ID", messageID)
 	h.Set("X-Agent-Intent", "craft")

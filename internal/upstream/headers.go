@@ -263,10 +263,12 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 //     优先；客户端没给时**不再留空**——上游按「三件套是否齐全」做渠道校验，缺任一头
 //     即 400 code=11128 "conversation id missing"（displayMsg「请求被拦截，请重新发送」，
 //     displayTips「这次调用没通过渠道校验，可能不是官方客户端发出的」）。兜底顺序：
-//     meta.ConversationID → meta.SessionKey → 现造 32 hex（见 resolveConversationID）。
+//     meta.ConversationID → 由 meta.SessionKey 稳定派生的带横线 v4 → 现造带横线 v4
+//     （见 resolveConversationID）。
 //   - X-Conversation-Request-ID：**对话轮级聚合主键**，必发。一次 user send 内的
 //     所有 tool call/重试/换号/降级复用同一个 → 后台按它聚合成一条（不再碎片化）。
-//   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex）。
+//   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex UUID v4，
+//     两个头同值——客户端 generateUUUID 去横线后同时塞进这两个头）。
 //   - X-Root-Request-ID：= conversationRequestID（根请求追踪）。
 //   - X-Trace-ID：入站透传或 = conversationRequestID。
 //   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
@@ -276,8 +278,9 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {
 		// 零值 meta（直接调 ChatHeaders 的调用方/测试）也要保证聚合主键必发：
-		// 本级补一个 32 hex，调用方（handler）已生成稳定的不走到这里。
-		convReqID = session.NewMessageID()
+		// 本级补一个 32 hex UUID v7（客户端 mintConversationRequestId 的形态），
+		// 调用方（handler）已生成稳定的不走到这里。
+		convReqID = session.NewConversationRequestID()
 	}
 	messageID := session.NewMessageID()
 	req.Header.Set("X-Conversation-ID", c.resolveConversationID(meta))
@@ -311,8 +314,13 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 // 兜底优先级（透传优先，不伪造客户端原值）：
 //  1. meta.ConversationID —— 客户端 body 的 conversationId，或 handler 的 sessKey；
 //  2. meta.SessionKey     —— 零值 ChatMeta 的调用方（blackcat/autotask）无 body 会话
-//     概念，用它保持「同会话稳定」而非每请求乱跳；
-//  3. 现造 32 hex         —— 一次性合成对话（无任何会话身份），对齐官方形态。
+//     概念，用它**稳定派生**一个带横线 v4（保持「同会话稳定」而非每请求乱跳）；
+//  3. 现造带横线 v4       —— 一次性合成对话（无任何会话身份）。
+//
+// 为什么 2/3 不再直发原串或 32 hex：官方客户端给这个头的恒为**带横线 v4**的
+// session id（@genie/agent-harness shared.cjs 实测：X-Conversation-ID = session.id）。
+// sessKey 是网关自己编的键、形状不受控；32 hex 又和官方形态不同——两者都是可检测
+// 的形状缺口，且与 conv-req（32 hex v7）撞形态会暴露「两个头同源」。
 //
 // 与 ConversationRequestID 的差异：本头是**会话级**（多轮稳定，利于上游 prompt
 // cache 与后台按对话聚合），故优先复用稳定键；RequestID 是轮级聚合主键，各自独立。
@@ -321,12 +329,12 @@ func (c *Client) resolveConversationID(meta ChatMeta) string {
 		return meta.ConversationID
 	}
 	if meta.SessionKey != "" {
-		return meta.SessionKey
+		return session.StableConversationID(meta.SessionKey)
 	}
 	// 走到这里说明调用方连会话键都没给（零值 meta）。此前该形态直接不发头 →
 	// 必被渠道校验拦截。现造一个并留痕：真机验证时能区分「我们没发」与「发了
 	// 上游不认」——前者是本分支命中，后者不会出现本日志。
-	id := session.NewMessageID()
+	id := session.NewConversationID()
 	log.Printf("chat: minted fallback X-Conversation-ID (zero-value ChatMeta) id=%s", id)
 	return id
 }

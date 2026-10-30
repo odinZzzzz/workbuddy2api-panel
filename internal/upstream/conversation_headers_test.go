@@ -17,17 +17,30 @@ import (
 //   1. chat 出站**恒**发全三件套——包括零值 ChatMeta{}（blackcat/autotask 的实际形态）；
 //   2. 爆炸半径——refresh / billing 等非 chat 路径**永不**携带，避免头族外溢。
 //
-// 形态：本项目的会话 ID 是 32 位 hex（UUID 去横线，session.NewMessageID），
-// 与官方 X-Request-ID / B3 约定一致，故钉 32 hex 而非带横线的 v4 UUID。
+// 形态：三层 ID 逐位对齐官方客户端（实测 app.asar:/main/conversations.js 与
+// @genie/agent-harness shared.cjs）——
+//   Conversation-ID        带横线 UUID v4（客户端 session.id）
+//   Conversation-Request-ID 32 hex UUID v7（客户端 mintConversationRequestId）
+//   Message-ID = X-Request-ID 32 hex UUID v4（客户端 generateUUUID 去横线）
+// 为什么必须钉：客户端的 isCanonicalConversationRequestId 用
+// ^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$ 校验服务端回显的 conv-req，
+// 不合规即丢弃重造（resolveConversationRequestId）——形状错会真的改行为。
 
 const (
-	hdrConvID      = "X-Conversation-ID"
-	hdrConvReqID   = "X-Conversation-Request-ID"
-	hdrConvMsgID   = "X-Conversation-Message-ID"
+	hdrConvID    = "X-Conversation-ID"
+	hdrConvReqID = "X-Conversation-Request-ID"
+	hdrConvMsgID = "X-Conversation-Message-ID"
 )
 
 // id32Hex 钉 ID 形态：32 位小写 hex（session.NewMessageID 的契约）。
 var id32Hex = regexp.MustCompile("^[0-9a-f]{32}$")
+
+// 三层 ID 的精确形态（与官方客户端逐位一致，见文件头注释）。
+var (
+	reConvReqV7Hex32 = regexp.MustCompile(`^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
+	reConvMsgV4Hex32 = regexp.MustCompile(`^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$`)
+	reConvIDUUIDv4   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+)
 
 // trioOf 取出三件套的值，便于逐项断言。
 func trioOf(t *testing.T, h http.Header) map[string]string {
@@ -57,23 +70,35 @@ func assertTrioPresent(t *testing.T, h http.Header, context string) {
 	}
 }
 
-// assertTrioMinted 断言三件套齐全**且三个值均为现造 32 hex**——
-// 仅在调用方未提供任何会话身份（零值 meta）时成立。
+// assertTrioMinted 断言三件套齐全**且形态各自对齐官方客户端**——
+// 仅在调用方未提供任何会话身份（零值 meta）时成立：
+//
+//	Conversation-ID         带横线 v4
+//	Conversation-Request-ID 32 hex v7
+//	Message-ID              32 hex v4
 func assertTrioMinted(t *testing.T, h http.Header, context string) {
 	t.Helper()
+	want := []struct {
+		name string
+		re   *regexp.Regexp
+	}{
+		{hdrConvID, reConvIDUUIDv4},
+		{hdrConvReqID, reConvReqV7Hex32},
+		{hdrConvMsgID, reConvMsgV4Hex32},
+	}
 	seen := map[string]string{}
-	for _, name := range []string{hdrConvID, hdrConvReqID, hdrConvMsgID} {
-		v := h.Get(name)
+	for _, w := range want {
+		v := h.Get(w.name)
 		if v == "" {
-			t.Fatalf("%s: %s 缺失（渠道校验会以 11128 conversation id missing 拦截）", context, name)
+			t.Fatalf("%s: %s 缺失（渠道校验会以 11-128 conversation id missing 拦截）", context, w.name)
 		}
-		if !id32Hex.MatchString(v) {
-			t.Errorf("%s: %s = %q，期望现造 32 位 hex", context, name, v)
+		if !w.re.MatchString(v) {
+			t.Errorf("%s: %s = %q，形态与官方客户端不符", context, w.name, v)
 		}
 		if prev, dup := seen[v]; dup {
-			t.Errorf("%s: %s 与 %s 同值（%q）——三层 ID 必须互异", context, name, prev, v)
+			t.Errorf("%s: %s 与 %s 同值（%q）——三层 ID 必须互异", context, w.name, prev, v)
 		}
-		seen[v] = name
+		seen[v] = w.name
 	}
 }
 
@@ -119,11 +144,22 @@ func TestChatHeadersConversationIDPrefersPassthrough(t *testing.T) {
 		t.Errorf("ConversationID 应优先透传，got %q", got)
 	}
 
-	// 无 ConversationID 时回落 SessionKey（保持同会话稳定，而非每请求乱跳）。
+	// 无 ConversationID 时回落 SessionKey：**稳定派生**成带横线 v4，不再直发 sessKey
+	// 原串——那是网关自编键（形状不受控），而官方客户端该头恒为带横线 v4 的 session id。
 	req2 := httptest.NewRequest(http.MethodPost, "/v2/chat/completions", nil)
 	c.ChatHeaders(req2, &auth.Auth{AccessToken: "at", UID: "u1"}, "", ChatMeta{SessionKey: "sess-key"})
-	if got := req2.Header.Get(hdrConvID); got != "sess-key" {
-		t.Errorf("无 ConversationID 时应回落 SessionKey，got %q", got)
+	got2 := req2.Header.Get(hdrConvID)
+	if !reConvIDUUIDv4.MatchString(got2) {
+		t.Errorf("无 ConversationID 时应派生带横线 v4，got %q", got2)
+	}
+	if got2 == "sess-key" {
+		t.Error("不应再把 SessionKey 原串直接当 Conversation-ID")
+	}
+	// 同键再出站一次必须同值（会话级稳定的契约不变）。
+	req3 := httptest.NewRequest(http.MethodPost, "/v2/chat/completions", nil)
+	c.ChatHeaders(req3, &auth.Auth{AccessToken: "at", UID: "u1"}, "", ChatMeta{SessionKey: "sess-key"})
+	if got3 := req3.Header.Get(hdrConvID); got3 != got2 {
+		t.Errorf("同 SessionKey 派生值应稳定：%q != %q", got3, got2)
 	}
 }
 
@@ -190,7 +226,14 @@ func TestDesktopChatWithExpertSendsTrio(t *testing.T) {
 	if got == nil {
 		t.Fatal("服务端未收到请求")
 	}
-	// 本路径的 Conversation-ID 是自造的 wb2api-conv-<纳秒>（保持原样，未改动），
-	// 故只钉「齐全」，不钉 32 hex 形态。
-	assertTrioPresent(t, got, "DesktopChatWithExpert")
+	// 本路径三层 ID 全部现造，且形态对齐官方客户端（不再有 wb2api-conv-<纳秒>）。
+	assertTrioMinted(t, got, "DesktopChatWithExpert")
+	// Message-ID 与 X-Request-ID 必须同值（客户端一次生成、两个头复用）。
+	if msg, reqID := got.Get(hdrConvMsgID), got.Get("X-Request-ID"); msg != reqID {
+		t.Errorf("X-Conversation-Message-ID 应与 X-Request-ID 同值：%q vs %q", msg, reqID)
+	}
+	// Conversation-ID 与 Request-ID 必须是两个不同的值（客户端几乎不会让它们相等）。
+	if got.Get(hdrConvID) == got.Get(hdrConvReqID) {
+		t.Error("Conversation-ID 与 Conversation-Request-ID 不应同值")
+	}
 }
