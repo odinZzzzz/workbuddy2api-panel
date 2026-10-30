@@ -204,11 +204,15 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 风控紧域压低并发），0 = 回落默认 2
-		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		// RealmPriority 跨域路由（模型名 auto:<model>）的候选域顺序，默认 ["global","cn"]。
+		// 语义：auto 请求先按第一个域选号，该域无可用号时依次退到后面的域。
+		// 只接受 "cn"/"global"（其他值忽略），重复项去重，空/全非法 → 回落默认。
+		RealmPriority      []string `json:"realm_priority"`
+		MaxInFlight        int      `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal  int      `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 风控紧域压低并发），0 = 回落默认 2
+		BreakerThreshold   int      `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string   `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string   `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114）：ErrClient/传输层这类「不罚号」失败连续计数，达阈
 		// 临时出池。与冷却/熔断并存取更长者不叠加。默认 5 次 / 10m。
 		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
@@ -564,6 +568,23 @@ func (c *Config) normalize() error {
 	if c.ExpiringSoonDur < 0 {
 		c.ExpiringSoonDur = 0
 		c.Pool.ExpiringSoon = "0"
+	}
+	// 跨域优先级（auto:<model>）：只接受 cn/global，去重保序；空或全非法 → 默认 global→cn。
+	{
+		cleaned := make([]string, 0, 2)
+		seen := map[string]bool{}
+		for _, r := range c.Pool.RealmPriority {
+			r = strings.ToLower(strings.TrimSpace(r))
+			if (r != "cn" && r != "global") || seen[r] {
+				continue
+			}
+			seen[r] = true
+			cleaned = append(cleaned, r)
+		}
+		if len(cleaned) == 0 {
+			cleaned = []string{"global", "cn"}
+		}
+		c.Pool.RealmPriority = cleaned
 	}
 	// costTier 探索窗口（issue #136）：空值回落默认 30m（Default 已置；此兜底覆盖
 	// 显式 ""）；"0" 是合法值（关停，完全回到现状行为），不回落；负值钳 0 同关停

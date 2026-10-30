@@ -77,6 +77,10 @@ type Config struct {
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
 
+	// RealmPriority 跨域路由（auto: 前缀）的候选域优先级，默认 ["global","cn"]。
+	// 来自 config 的 pool.realm_priority；为空时用 server.DefaultRealmPriority。
+	RealmPriority []string
+
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	// 在 recordAttempt 这一唯一汇聚点调用，因此流式/非流式、成功/失败都会计入，
 	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
@@ -688,7 +692,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
+	// 候选域序列（跨域路由）：cn:/global: 单域；auto: 按 pool.realm_priority 依次尝试
+	// （默认 global→cn）；裸名维持历史的 cn 单域语义（零回归）。
+	realmPlan, bareModel := resolveModelPlan(peek.Model, h.cfg.RealmPriority)
+	realmIdx := 0
+	realm := realmPlan[0]
 	// 令牌模型白名单：命中令牌且名单非空时，只放行名单内模型。
 	// 放在选号之前——不白跑一次上游请求才被拒（那会白扣账号配额）。
 	if tok := tokenFrom(r); tok != nil && !tok.AllowsModel(peek.Model) {
@@ -919,6 +927,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
 		}
 		if acct == nil {
+			// 跨域回退（auto:）：当前域没有可用号（整域冷却/熔断/无额度/在途占满）时，
+			// 换下一个候选域继续，而不是直接 503——global 全挂而 cn 有号时，
+			// auto 请求应当落到 cn。tried 保留不清空：已试过的账号不该再被选中。
+			if realmIdx+1 < len(realmPlan) {
+				realmIdx++
+				realm = realmPlan[realmIdx]
+				continue
+			}
 			st.status = http.StatusServiceUnavailable
 			// 记下"是不是模型级阻塞"。选号返回 nil 有两种完全不同的成因：
 			//   (a) 池子真的没有可用号（账号级冷却/在途占满/积分保底）；
