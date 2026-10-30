@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
+	"time"
 )
 
 // ResolveConversationID 从请求体提取会话头族的 conversationId（snake/camel 双形态，
@@ -44,22 +45,122 @@ func ResolveConversationID(body []byte) string {
 	return strOrEmpty(obj["conversationId"])
 }
 
-// NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线的长度形态），对齐官方
-// X-Request-ID / X-Conversation-Message-ID。crypto/rand 失败（理论上不可能）时回落
-// math/rand/v2 双 uint64 拼 32 hex——恒 32 hex、恒合法，可安全用作 B3 TraceId。
+// ---------------------------------------------------------------- ID 形态 ----
+//
+// 三层 ID 的形态逐位对齐官方 WorkBuddy 客户端（实测于 app.asar:/main/conversations.js
+// 与 @genie/agent-harness/cli/dist-server/shared.cjs）：
+//
+//	X-Conversation-ID          带横线 UUID v4（客户端 session.id）
+//	X-Conversation-Request-ID  32 hex UUID v7（客户端 mintConversationRequestId）
+//	X-Conversation-Message-ID  32 hex UUID v4（客户端 generateUUUID 去横线）
+//	X-Request-ID               与 Message-ID 同值
+//
+// 为什么 conv-req 必须是**真 v7** 而不是「随便 32 hex」：客户端的
+// isCanonicalConversationRequestId 用 ^[0-9a-f]{12}7[0-9a-f]{3}[89ab][0-9a-f]{15}$
+// 校验服务端回显的 conv-req，不合规即丢弃重造（resolveConversationRequestId）；
+// readUuidV7TimestampMs 还会把前 12 hex 当毫秒解析，做「2 分钟内复用」判定。
+// 随机版本位的 32 hex 会被判成非法——这不是审美问题，是行为问题。
+
+// fillRandom 用 crypto/rand 填满 b；熵源故障时回落 math/rand/v2（理论不可达），
+// 保证调用方永远拿到合法字节、不 panic、不返回空串。
+func fillRandom(b []byte) {
+	if _, err := cryptorand.Read(b); err == nil {
+		return
+	}
+	for i := range b {
+		b[i] = byte(rand.Uint32())
+	}
+}
+
+// formatUUID 把 16 字节排成 8-4-4-4-12 的带横线形态。
+func formatUUID(b []byte) string {
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// v7Bytes 把 16 字节就地改写为 UUID v7 布局：前 6 字节 = 48 bit 大端毫秒时间戳，
+// 第 7 字节高 4 位固定 7，第 9 字节高 2 位固定 10（RFC 9562）。
+func v7Bytes(ms int64, b []byte) []byte {
+	t := uint64(ms)
+	b[0] = byte(t >> 40)
+	b[1] = byte(t >> 32)
+	b[2] = byte(t >> 24)
+	b[3] = byte(t >> 16)
+	b[4] = byte(t >> 8)
+	b[5] = byte(t)
+	b[6] = b[6]&0x0f | 0x70 // version 7
+	b[8] = b[8]&0x3f | 0x80 // variant 10xx
+	return b
+}
+
+// NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线），对齐官方
+// X-Request-ID / X-Conversation-Message-ID（客户端同一值发两个头）。
+// 恒 32 hex、恒合法，可安全用作 B3 TraceId。
 func NewMessageID() string {
 	b := make([]byte, 16)
-	if _, err := cryptorand.Read(b); err == nil {
-		return hex.EncodeToString(b)
-	}
-	// 熵源故障的极端兜底：仍保证 32 hex（fallbackID 不 panic、不空串）。
-	return fmt.Sprintf("%016x%016x", uint64(rand.Uint64())|1, rand.Uint64())
+	fillRandom(b)
+	b[6] = b[6]&0x0f | 0x40 // version 4
+	b[8] = b[8]&0x3f | 0x80 // variant 10xx
+	return hex.EncodeToString(b)
+}
+
+// NewConversationID 生成会话级 ID：**带横线** UUID v4，对齐官方客户端 session.id
+// （X-Conversation-ID）。客户端给这个头从不发去横线形态。
+func NewConversationID() string {
+	b := make([]byte, 16)
+	fillRandom(b)
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return formatUUID(b)
+}
+
+// NewConversationRequestID 生成对话轮级 ID：32 hex UUID v7（前 48 bit = 当前毫秒）。
+// 时间戳取 now()：客户端会解析它做复用判定，偏离当前时刻等于自报非客户端。
+// 不加单调护栏（同毫秒并发可能同前缀）——官方客户端本身就没有，复刻其行为。
+func NewConversationRequestID() string {
+	b := make([]byte, 16)
+	fillRandom(b)
+	return hex.EncodeToString(v7Bytes(time.Now().UnixMilli(), b))
 }
 
 // deriveSalt 进程启动随机盐：对所有稳定聚合 ID 的纯派生统一加盐，使派生值无法
 // 按外部可控的键内容（会话键/轮级键）被预计算；重启换新（重启时旧对话轮/会话已
 // 结束，不构成断档）。会话级（RequestIDForKey）与轮级（TurnRequestID）共用同一盐。
 var deriveSalt = NewMessageID()
+
+// deriveBaseMS 派生 ID 的 v7 时间前缀：deriveSalt 生成那一刻的毫秒，进程内恒定。
+// 为什么不用 now()：派生 ID 的契约是「同键恒同值」（上游按它聚合对话轮），
+// 时间前缀若随调用时刻变化，同一轮会被拆成多条记录。代价是同进程内所有派生 ID
+// 共享同一毫秒前缀——只有同时抓到多条才能看出，风险远低于契约破裂。
+var deriveBaseMS = time.Now().UnixMilli()
+
+// derivedV7 把任意种子哈希成 v7 布局的 32 hex：时间前缀固定 deriveBaseMS，
+// 其余 64 bit（第 8 字节 + 第 10..16 字节）取 sha256 熵。
+func derivedV7(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	b := make([]byte, 16)
+	copy(b, sum[:16])
+	return hex.EncodeToString(v7Bytes(deriveBaseMS, b))
+}
+
+// StableConversationID 按会话键稳定派生**带横线 v4** 形态的 X-Conversation-ID。
+//
+// 用途：客户端没给对话 id、调用方只给了网关自己的会话键（sessKey）时，替代
+// 「原样透传 sessKey」。那个键的形状不受控（可能是任意串），而官方客户端的该头
+// 恒为带横线 v4 的 session id——形状不符本身就是可检测的指纹。
+// 同 key 进程内恒同值（deriveSalt 重启换新，与其它派生 ID 同口径），
+// 故会话内多轮/换号/重试复用同一 Conversation-ID 的语义不变。
+func StableConversationID(key string) string {
+	if key == "" {
+		return NewConversationID()
+	}
+	sum := sha256.Sum256([]byte(deriveSalt + "|conv|" + key))
+	b := make([]byte, 16)
+	copy(b, sum[:16])
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return formatUUID(b)
+}
 
 // RequestIDForKey 返回会话键的稳定 conversationRequestID：sha256(盐|键) 前 16 字节
 // 的 hex，纯派生（无缓存、无 TTL、内存不随键数增长——此前 sync.Map 惰性缓存随
@@ -69,13 +170,12 @@ var deriveSalt = NewMessageID()
 //   - 空 key：每次生成新值（无会话则无"会话内稳定"语义——调用方应在请求级
 //     捕获复用，handler 在轮转循环外取一次即天然共享）。
 //
-// 返回值恒为 32 hex（NewMessageID 形态），可直接用作 B3 TraceId（16/32 hex 合法）。
+// 返回值恒为 32 hex 的 v7 布局（derivedV7），可直接用作 B3 TraceId（16/32 hex 合法）。
 func RequestIDForKey(key string) string {
 	if key == "" {
-		return NewMessageID()
+		return NewConversationRequestID()
 	}
-	sum := sha256.Sum256([]byte(deriveSalt + "|" + key))
-	return hex.EncodeToString(sum[:16])
+	return derivedV7(deriveSalt + "|" + key)
 }
 
 // TurnKey 派生「对话轮级」聚合键：body 里**最后一条** role=="user" 消息的
@@ -213,8 +313,8 @@ func contentSignature(raw json.RawMessage) string {
 	return strings.TrimSpace(out)
 }
 
-// TurnRequestID 返回轮级键对应的聚合 ID：sha256(盐|键) 前 16 字节的 hex（32 位，
-// 与 NewMessageID 同形态，可直接作 B3 TraceId）。
+// TurnRequestID 返回轮级键对应的聚合 ID：v7 布局的 32 hex（时间前缀恒 deriveBaseMS，
+// 其余取 sha256(盐|键)，可直接作 B3 TraceId）。
 //
 // 纯派生，无缓存、无 TTL、不随进程内请求数增长内存 —— 这点与会话级的
 // RequestIDForKey 相反：会话键数量有限（与粘性会话同源）可以常驻缓存，而轮级键
@@ -222,8 +322,7 @@ func contentSignature(raw json.RawMessage) string {
 // 空键返回新随机值（无轮可聚合时保持原有的「每请求独立」行为）。
 func TurnRequestID(turnKey string) string {
 	if turnKey == "" {
-		return NewMessageID()
+		return NewConversationRequestID()
 	}
-	sum := sha256.Sum256([]byte(deriveSalt + "|" + turnKey))
-	return hex.EncodeToString(sum[:16])
+	return derivedV7(deriveSalt + "|" + turnKey)
 }

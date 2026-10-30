@@ -116,7 +116,7 @@ func TestBuildExpertUseEvents(t *testing.T) {
 		DisplayNameZH: "卖得好", ProfessionZH: "中国电商运营专家",
 		Version: "1.0.1", Categories: []any{"05-Ecommerce"},
 	}
-	const conv, req = "wb2api-conv-1", "cmb-0123456789abcdef0123456789abcdef"
+	const conv, req = "15079494-7f8a-4f8b-a476-e4189c324436", "cmb-0123456789abcdef0123456789abcdef"
 
 	events := buildExpertUseEvents(ex, conv, req)
 	if len(events) == 0 {
@@ -164,7 +164,7 @@ func TestBuildExpertUseEvents(t *testing.T) {
 // （不重发对话），mode=craft 且 cost 非零——与 LOCAL 形态区分开，供判据未实测时兜底。
 func TestCraftFallbackEvent(t *testing.T) {
 	ex := upstream.MarketExpert{ExpertID: "ex_FbY5nlWTqDod", ExpertType: "agent", DisplayNameZH: "斗音音"}
-	const conv, req = "wb2api-conv-2", "cmb-fedcba9876543210fedcba9876543210"
+	const conv, req = "7cb7b791-e11b-4c64-ac43-5927ca0a36eb", "cmb-fedcba9876543210fedcba9876543210"
 
 	ev := upstream.DesktopExpertActualUseEvent(ex, conv, req)
 	if ev["eventCode"] != "expert_actual_use" {
