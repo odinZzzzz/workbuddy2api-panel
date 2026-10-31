@@ -261,7 +261,7 @@ func (b *Bridge) gunsmithCard(weapon string) (string, bool) {
 	w := strings.ToUpper(strings.TrimSpace(weapon))
 	if w == "" {
 		if summary != "" {
-			return summary, true
+			return trimCardMeta(summary), true
 		}
 		return "", false
 	}
@@ -269,10 +269,31 @@ func (b *Bridge) gunsmithCard(weapon string) (string, bool) {
 	sort.Slice(cands, func(i, j int) bool { return len(cands[i].gun) > len(cands[j].gun) })
 	for _, c := range cands {
 		if gunMentioned(w, strings.ToUpper(c.gun)) {
-			return c.text, true
+			return trimCardMeta(c.text), true
 		}
 	}
 	return "", false
+}
+
+// trimCardMeta 去掉卡片里的元信息（视频链接/抓取时间/免责说明）。
+//
+// 群友要的是码，不是溯源报告；链接和抓取时间留在文件里备查就行，别发给用户。
+func trimCardMeta(text string) string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "视频链接") || strings.HasPrefix(t, "抓取时间") ||
+			strings.HasPrefix(t, "（码是博主") || strings.HasPrefix(t, "(码是博主") {
+			continue
+		}
+		out = append(out, ln)
+	}
+	res := strings.Join(out, "\n")
+	for strings.Contains(res, "\n\n\n") {
+		res = strings.ReplaceAll(res, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(res)
 }
 
 // gunMentioned 判断枪名是否在文本里**独立出现**（词边界），避免 M7 命中 M700。
