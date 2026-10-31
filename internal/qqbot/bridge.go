@@ -42,6 +42,9 @@ type chatMsg struct {
 	Content    string     `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+	// ImageURLs 本轮用户消息附带的图片（多模态）：非空时 content 会发成
+	// [{type:text},{type:image_url}...] 数组，而不是纯字符串。
+	ImageURLs []string `json:"-"`
 }
 
 type session struct {
@@ -171,6 +174,21 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	text, atBot := ParseText(ev.Message, ev.RawMessage, ev.SelfID)
 	atTargets := ParseAtTargets(ev.Message, ev.RawMessage)
 	images := ParseImages(ev.Message)
+	// 多模态：把图片真的喂给模型（最多 2 张，仅 http(s)/base64）。
+	var visionURLs []string
+	for _, u := range images {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") ||
+			strings.HasPrefix(u, "base64://") || strings.HasPrefix(u, "data:") {
+			visionURLs = append(visionURLs, u)
+		}
+		if len(visionURLs) >= 2 {
+			break
+		}
+	}
 	if len(images) > 0 {
 		// 模型看不到图，但必须知道"有人发了图"，否则答非所问。
 		marker := "[图片×" + itoa(int64(len(images))) + "]"
@@ -311,7 +329,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	prompt := b.cfg().PersonaDefaultPrompt
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
-	go b.reply(&ev, key, name, text, atTargets, prompt)
+	go b.reply(&ev, key, name, text, atTargets, prompt, visionURLs)
 }
 
 // allow 令牌桶限速：每用户每分钟 RatePerMinute 次（0 = 不限）。
@@ -344,8 +362,8 @@ func (b *Bridge) allow(userID int64) bool {
 }
 
 // reply 调网关拿回复并发出。
-func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64, prompt string) {
-	answer, err := b.chat(key, ev, text, atTargets, prompt)
+func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64, prompt string, images []string) {
+	answer, err := b.chat(key, ev, text, atTargets, prompt, images)
 	if err != nil {
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
@@ -390,9 +408,13 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 }
 
 // chat 走网关 /chat/completions（非流式），带会话历史。
-func (b *Bridge) chat(key string, ev *Event, userText string, atTargets []int64, prompt string) (string, error) {
+func (b *Bridge) chat(key string, ev *Event, userText string, atTargets []int64, prompt string, images []string) (string, error) {
 	uid := ev.UserID
 	msgs := b.buildMessagesWithPrompt(key, uid, userText, prompt)
+	if len(images) > 0 && len(msgs) > 0 {
+		// 图片只挂在本轮 user 消息上（历史里不带，省 token）
+		msgs[len(msgs)-1].ImageURLs = images
+	}
 
 	var tools *toolRegistry
 	if b.cfg().ToolsEnabled {
@@ -463,7 +485,7 @@ func (b *Bridge) doChat(msgs []chatMsg, tools *toolRegistry) (chatRespMsg, error
 	var zero chatRespMsg
 	payload := map[string]any{
 		"model":    b.cfg().Model,
-		"messages": msgs,
+		"messages": toPayloadMessages(msgs),
 		"stream":   false,
 	}
 	if tools != nil && len(tools.defs) > 0 {
@@ -875,6 +897,21 @@ func (b *Bridge) sendPoke(ev *Event) error {
 	return b.callAction(action, payload)
 }
 
+// sendRecord 发一条语音（本地 mp3 路径；NapCat 负责转码成 QQ 语音）。
+func (b *Bridge) sendRecord(ev *Event, path string) error {
+	action := "send_private_msg"
+	payload := map[string]any{"message": []map[string]any{
+		{"type": "record", "data": map[string]string{"file": path}},
+	}}
+	if ev.MessageType == "group" {
+		action = "send_group_msg"
+		payload["group_id"] = ev.GroupID
+	} else {
+		payload["user_id"] = ev.UserID
+	}
+	return b.callAction(action, payload)
+}
+
 // sendImage 发一张图（本地文件路径或 URL，NapCat 都接受）。
 func (b *Bridge) sendImage(ev *Event, ref string) error {
 	action := "send_private_msg"
@@ -1049,4 +1086,36 @@ func (b *Bridge) nickOf(uid int64) string {
 		}
 	}
 	return "那位"
+}
+
+// toPayloadMessages 把内部 chatMsg 转成请求体消息：
+// 带图的那条 user 消息展开成 OpenAI 多模态数组（text + image_url），其余原样。
+func toPayloadMessages(msgs []chatMsg) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		item := map[string]any{"role": m.Role}
+		if len(m.ImageURLs) > 0 {
+			parts := []map[string]any{}
+			if strings.TrimSpace(m.Content) != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": m.Content})
+			}
+			for _, u := range m.ImageURLs {
+				parts = append(parts, map[string]any{
+					"type":      "image_url",
+					"image_url": map[string]any{"url": u},
+				})
+			}
+			item["content"] = parts
+		} else {
+			item["content"] = m.Content
+		}
+		if len(m.ToolCalls) > 0 {
+			item["tool_calls"] = m.ToolCalls
+		}
+		if m.ToolCallID != "" {
+			item["tool_call_id"] = m.ToolCallID
+		}
+		out = append(out, item)
+	}
+	return out
 }

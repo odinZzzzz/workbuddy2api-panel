@@ -140,7 +140,7 @@ func TestChatToolLoop(t *testing.T) {
 	cfg.ProfileEnabled = false
 	b := New(cfg)
 	ev := &Event{MessageType: "private", UserID: 941628696, SelfID: 3467208422}
-	ans, err := b.chat("private:941628696", ev, "记住我喜欢鲸鱼娘", nil, "")
+	ans, err := b.chat("private:941628696", ev, "记住我喜欢鲸鱼娘", nil, "", nil)
 	if err != nil {
 		t.Fatalf("chat: %v", err)
 	}
