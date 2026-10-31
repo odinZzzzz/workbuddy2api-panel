@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 )
 
 // tools.go —— 给模型的工具（function calling）。
@@ -101,6 +102,29 @@ func (b *Bridge) buildTools() *toolRegistry {
 			}
 			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_sticker"})
 			return "已把自绘表情包发到当前会话", nil
+		})
+
+	add("daily_password", "查三角洲行动今日地图密码（零号大坝/长弓溪谷/巴克什/航天基地/潮汐监狱/AZ3）。数据来自 kkrb.net 实时接口，有 10 分钟缓存。有人问密码、密码门、今天密码时调用。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			if !tc.b.cfg().KkrbEnabled {
+				return "实时数据源已关闭（kkrb_enabled=false）", nil
+			}
+			ttl := time.Duration(tc.b.cfg().KkrbCacheMinutes) * time.Minute
+			list, err := kkrbSingleton.DailyPasswords(ttl)
+			if err != nil {
+				return "", fmt.Errorf("查每日密码失败: %w", err)
+			}
+			var sb strings.Builder
+			sb.WriteString("今日地图密码：\n")
+			for _, it := range list {
+				sb.WriteString("- " + it.Map + "：" + it.Code)
+				if it.Updated != "" {
+					sb.WriteString("（" + it.Updated + " 更新）")
+				}
+				sb.WriteString("\n")
+			}
+			return sb.String(), nil
 		})
 
 	add("list_sticker_templates", "列出可用的名画/风格 SVG 模板（神奈川冲浪里、星月夜、呐喊、珍珠耳环等）。想画「有名画感」的表情包时先看这里。",

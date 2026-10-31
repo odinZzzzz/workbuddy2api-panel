@@ -61,6 +61,13 @@ type Config struct {
 	ActivationKeywords []string `json:"activation_keywords"`
 	// ActivationWindowSeconds 激活期长度（秒），期间每说一句自动续期。
 	ActivationWindowSeconds int `json:"activation_window_seconds"`
+	// KkrbEnabled 是否接入 kkrb.net 实时数据（每日密码等）；默认 true。
+	KkrbEnabled bool `json:"kkrb_enabled"`
+	// KkrbCacheMinutes 实时数据缓存时长（分钟，默认 10）。
+	KkrbCacheMinutes int `json:"kkrb_cache_minutes"`
+	// KBEnabled 是否注入预设知识库（三角洲相关事实卡）；默认 true。
+	KBEnabled bool `json:"kb_enabled"`
+
 	// PersonaDefaultPrompt 默认人格（善良热心好青年）的 system prompt。
 	PersonaDefaultPrompt string `json:"persona_default_prompt"`
 	// PersonaAltPrompt 备用人格（龙王）的 system prompt，被攻击时切换。
@@ -154,6 +161,9 @@ func Default() Config {
 		RatePerMinute:      6,
 		MaxReplyRunes:      1200,
 		TimeoutSeconds:     120,
+		KkrbEnabled:        true,
+		KkrbCacheMinutes:   10,
+		KBEnabled:          true,
 		PersonaAltSeconds:  600,
 		AngerThreshold:     100,
 		AngerMildGain:      25,
@@ -206,6 +216,9 @@ func (c *Config) normalize() {
 	c.OneBotAPI = strings.TrimRight(c.OneBotAPI, "/")
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
+	}
+	if c.KkrbCacheMinutes <= 0 {
+		c.KkrbCacheMinutes = 10
 	}
 	if c.AngerThreshold <= 0 {
 		c.AngerThreshold = 100

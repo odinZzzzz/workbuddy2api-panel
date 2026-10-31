@@ -114,8 +114,14 @@ func TestHistoryTTL(t *testing.T) {
 	b.mu.Unlock()
 
 	msgs := b.buildMessages("group:1", 1001, "新问题")
-	// 只有本轮 user（无 system、无历史）
-	if len(msgs) != 1 || msgs[0].Content != "新问题" {
+	// 忽略 system（人设+排版规则+记忆总会有），只看对话消息：应只剩本轮 user
+	var dialog []chatMsg
+	for _, m := range msgs {
+		if m.Role != "system" {
+			dialog = append(dialog, m)
+		}
+	}
+	if len(dialog) != 1 || dialog[0].Content != "新问题" {
 		t.Fatalf("过期会话应清空历史，得到 %+v", msgs)
 	}
 }

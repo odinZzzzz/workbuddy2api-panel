@@ -538,6 +538,14 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 			}
 		}
 	}
+	// 预设知识库：命中相关条目就附在 system 末尾（事实卡，优先于模型记忆）
+	if b.cfg().KBEnabled {
+		if kb := kbContext(userText); kb != "" {
+			system += "\n\n" + kb
+		}
+	}
+	// 排版规则：知识类回答要分行，别把列表压成一句话（QQ 不渲染 Markdown，但换行有效）
+	system += "\n\n" + layoutGuide
 	if system != "" {
 		out = append(out, chatMsg{Role: "system", Content: system})
 	}
@@ -947,3 +955,15 @@ func (b *Bridge) personaSnapshot() []PersonaView {
 	}
 	return b.persona.Snapshot()
 }
+
+// layoutGuide 排版规则（对所有回答生效）。
+//
+// 背景：QQ 不渲染 Markdown，但**换行有效**。之前把"六张图的密码"压成一句话，
+// 群友得逐字找；分行后一眼扫完。规则只针对"列表类信息"，闲聊仍保持 1~3 句。
+const layoutGuide = `【排版规则】
+- 列表类信息（密码、价格、点位、材料、步骤、多个选项）**必须每行一条**，不要用顿号压成一句话。
+- 每行格式：名称：值（必要时补一句极短说明），行首用「·」或「-」都可以。
+- 第一行给一句结论/总数，列表跟在下面；末尾一句话补充（如刷新时间），不要重复列表内容。
+- 工具返回的列表要**原样保留分行**，不要自己压平或改写顺序。
+- 非列表内容仍然保持 1~3 句短句，别为了排版硬拆行。
+- 不用 Markdown 语法（加粗星号、井号标题、表格），QQ 不渲染，只会变成噪音。`
