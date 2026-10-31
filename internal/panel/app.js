@@ -3420,15 +3420,15 @@ function renderTokens(list, disabled) {
   }
   tb.innerHTML = rows.map(t =>
     '<tr>' +
-    '<td>' + esc(t.name || '—') + (t.note ? '<div class="note" style="margin-top:2px">' + esc(t.note) + '</div>' : '') +
+    '<td class="tok-name">' + esc(t.name || '—') + (t.note ? '<div class="note" style="margin-top:2px">' + esc(t.note) + '</div>' : '') +
       (t.allowed_models && t.allowed_models.length ? '<div class="note" style="margin-top:2px">仅 ' + esc(t.allowed_models.join(', ')) + '</div>' : '') + '</td>' +
-    '<td><code title="完整密钥仅在创建时显示一次">' + esc(t.key) + '</code></td>' +
+    '<td><code class="tok-key" title="完整密钥仅在创建时显示一次">' + esc(t.key) + '</code></td>' +
     '<td>' + tokStatus(t) + '</td>' +
-    '<td>' + tokQuotaCell(t) + '</td>' +
-    '<td>' + (t.used_requests || 0) + '</td>' +
+    '<td class="num">' + tokQuotaCell(t) + '</td>' +
+    '<td class="num">' + (t.used_requests || 0) + '</td>' +
     '<td>' + tokLimitCell(t) + '</td>' +
     '<td>' + (t.expires_at ? esc(t.expires_at.slice(0, 10)) : '—') + '</td>' +
-    '<td>' +
+    '<td class="tok-actions">' +
       '<button class="xs" data-tok="toggle" data-id="' + esc(t.id) + '">' + (t.enabled ? '禁用' : '启用') + '</button> ' +
       '<button class="xs" data-tok="reset" data-id="' + esc(t.id) + '">重置用量</button> ' +
       '<button class="xs" data-tok="limits" data-id="' + esc(t.id) + '" data-cur="' + (t.rpm || 0) + '/' + (t.max_concurrency || 0) + '">限流</button> ' +

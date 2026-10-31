@@ -206,6 +206,35 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 
 /* ── 账号表（签名元素：健康色条 + 积分量条）───────────────────────── */
 .tbl-wrap { overflow-x: auto; }
+/* ---- 令牌页排版 ---- */
+.tok-form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 14px; }
+.tok-form .fld { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.tok-form .fld > span { font-size: 11.5px; color: var(--ink-3); }
+.tok-form .fld > input, .tok-form .fld > select { width: 100%; }
+.tok-form .fld.wide { grid-column: span 2; }
+.tok-form .fld.act { justify-content: flex-end; }
+@media (max-width: 1180px) { .tok-form { grid-template-columns: repeat(2, minmax(0, 1fr)); } .tok-form .fld.wide { grid-column: span 2; } }
+@media (max-width: 720px) { .tok-form { grid-template-columns: 1fr; } .tok-form .fld.wide { grid-column: span 1; } }
+
+.tok-tbl { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 1060px; }
+.tok-tbl thead th {
+  position: sticky; top: 0; z-index: 1; background: var(--surface);
+  text-align: left; font-weight: 500; font-size: 11.5px; color: var(--ink-3);
+  padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.tok-tbl tbody td { padding: 11px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+.tok-tbl tbody tr:hover { background: var(--surface-2, rgba(127,127,127,.04)); }
+.tok-tbl th.num, .tok-tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tok-tbl td.tok-actions { white-space: nowrap; }
+.tok-tbl td.tok-actions .xs { margin-right: 4px; }
+.tok-tbl td.tok-actions .xs:last-child { margin-right: 0; }
+.tok-tbl code.tok-key {
+  display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: bottom; font-family: var(--mono); font-size: 12px;
+}
+.tok-tbl td.tok-name { max-width: 260px; }
+.tok-tbl .ifbar { height: 4px; }
+
 .acc { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 640px; }
 .acc th {
   text-align: left; font-weight: 500; font-size: 11.5px; color: var(--ink-3);
@@ -854,19 +883,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note">全局 api_key 始终有效，令牌是叠加通道</span>
         </header>
         <div class="pad">
-          <div class="fbar" style="flex-wrap:wrap;gap:8px;align-items:center">
-            <input id="tokName" placeholder="名称（必填，如 客户端A）" style="min-width:180px" />
-            <input id="tokQuota" type="number" min="0" step="0.01" placeholder="配额积分（0=不限）" style="max-width:170px" />
-            <input id="tokExpires" type="date" title="过期日期（可空=永不过期）" style="max-width:150px" />
-            <button class="primary" id="btnTokCreate">创建</button>
-            <span class="grow"></span>
-            <button class="xs" id="btnTokAdvanced" title="展开模型白名单与限流">高级选项 ▾</button>
-          </div>
-          <div class="fbar" id="tokAdvancedRow" hidden style="flex-wrap:wrap;gap:8px;margin-top:8px">
-            <input id="tokModels" placeholder="模型白名单（逗号分隔，空=全部）" style="min-width:240px" />
-            <input id="tokRpm" type="number" min="0" placeholder="RPM（0=不限）" style="max-width:130px" title="每分钟请求数上限" />
-            <input id="tokConc" type="number" min="0" placeholder="并发（0=不限）" style="max-width:130px" title="同时在途请求上限" />
-            <input id="tokNote" placeholder="备注（可空）" style="min-width:180px" />
+          <div class="tok-form">
+            <label class="fld wide"><span>名称（必填）</span>
+              <input id="tokName" placeholder="如 客户端A / 手机端" /></label>
+            <label class="fld"><span>配额积分（0=不限）</span>
+              <input id="tokQuota" type="number" min="0" step="0.01" placeholder="0" /></label>
+            <label class="fld"><span>过期日期（空=永久）</span>
+              <input id="tokExpires" type="date" /></label>
+            <label class="fld"><span>模型白名单（逗号分隔，空=全部）</span>
+              <input id="tokModels" placeholder="cn:deepseek-v4-flash, ..." /></label>
+            <label class="fld"><span>RPM（0=不限）</span>
+              <input id="tokRpm" type="number" min="0" placeholder="0" title="每分钟请求数上限" /></label>
+            <label class="fld"><span>并发（0=不限）</span>
+              <input id="tokConc" type="number" min="0" placeholder="0" title="同时在途请求上限" /></label>
+            <label class="fld"><span>备注（可空）</span>
+              <input id="tokNote" placeholder="用途说明" /></label>
+            <div class="fld act"><button class="primary" id="btnTokCreate">创建令牌</button></div>
           </div>
           <div id="tokNewKey" hidden style="margin-top:12px"></div>
         </div>
@@ -900,9 +932,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
         </div>
         <div class="tbl-wrap">
-          <table>
+          <table class="tok-tbl">
             <thead><tr>
-              <th>名称</th><th>密钥（打码）</th><th>状态</th><th>已用 / 配额</th><th>请求数</th><th>限流</th><th>过期</th><th>操作</th>
+              <th>名称</th><th>密钥（打码）</th><th>状态</th>
+              <th class="num">已用 / 配额</th><th class="num">请求数</th>
+              <th>限流</th><th>过期</th><th>操作</th>
             </tr></thead>
             <tbody id="tokBody"></tbody>
           </table>
