@@ -675,8 +675,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
       <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navRedis">-</span></div>
-      <div class="row" style="margin-top:5px;display:none" id="navDegradeRow"><span class="tag warn" id="navDegrade" title="出站 system prompt 已被换成中性提示词：客户端 system 提示词指纹被上游误判为渠道校验（400）。到期自动恢复，也可重启网关立即恢复。">提示词降级中</span></div>
-    </div>
+</div>
   </nav>
 
   <div class="main">
@@ -694,6 +693,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
     <!-- 账号池 -->
     <section class="view" id="view-accounts">
+      <div class="row" id="accDegradeRow" hidden
+           style="margin:0 0 10px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2,rgba(127,127,127,.05))">
+        <span class="tag warn" id="accDegrade">提示词降级中</span>
+        <span class="note" id="accDegradeNote" style="margin-left:8px"></span>
+      </div>
       <div class="stats">
         <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
         <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
@@ -1270,62 +1274,116 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
     <!-- 日志 -->
     <section class="view" id="view-qqbot" hidden>
-      <div class="grid4">
-        <div class="box kpi"><div class="k">事件</div><div class="v" id="qbEvents">—</div></div>
-        <div class="box kpi"><div class="k">已回复</div><div class="v ok" id="qbReplied">—</div></div>
-        <div class="box kpi"><div class="k">忽略/静默</div><div class="v muted" id="qbSkipped">—</div></div>
-        <div class="box kpi"><div class="k">记住的用户</div><div class="v" id="qbMemUsers">—</div></div>
+      <div class="stats">
+        <div class="stat"><div class="v" id="qbEvents">—</div><div class="k">事件</div></div>
+        <div class="stat good"><div class="v" id="qbReplied">—</div><div class="k">已回复</div></div>
+        <div class="stat warn"><div class="v" id="qbSkipped">—</div><div class="k">忽略 / 静默</div></div>
+        <div class="stat"><div class="v" id="qbMemUsers">—</div><div class="k">记住的用户</div></div>
       </div>
 
       <div class="box">
-        <header><h3>人设与策略</h3><span class="grow"></span><span class="note" id="qbStatus">—</span></header>
+        <header>
+          <h3>人设</h3>
+          <span class="grow"></span>
+          <span class="note" id="qbPersonaCount">—</span>
+          <span class="note" id="qbStatus">—</span>
+        </header>
         <div class="pad">
-          <textarea id="qbPersona" rows="10" style="width:100%;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace"></textarea>
-          <div class="grid3" style="margin-top:10px">
-            <label>模型<input id="qbModel" type="text" placeholder="cn:deepseek-v4-flash"></label>
-            <label>每号每分钟上限<input id="qbRate" type="number" min="0"></label>
-            <label>回复字数上限<input id="qbMaxRunes" type="number" min="0"></label>
-            <label>上下文轮数<input id="qbHist" type="number" min="0"></label>
-            <label>激活期(秒)<input id="qbActWin" type="number" min="0"></label>
-            <label>静默(秒)<input id="qbSilence" type="number" min="0"></label>
-            <label>白名单群<input id="qbGroups" type="text" placeholder="992511553"></label>
-            <label>免@群<input id="qbNoAt" type="text" placeholder="992511553"></label>
-            <label>私聊白名单<input id="qbUsers" type="text" placeholder="941628696"></label>
-            <label>忽略 QQ<input id="qbIgnored" type="text" placeholder="190839970"></label>
-            <label>激活词<input id="qbActKw" type="text" placeholder="小八嘎,龙王"></label>
-            <label>中断词<input id="qbIntKw" type="text" placeholder="闭嘴,退下"></label>
+          <textarea id="qbPersona" rows="6" spellcheck="false"
+            style="width:100%;font:12.5px/1.6 ui-monospace,Menlo,Consolas,monospace;resize:vertical"></textarea>
+          <div class="note" style="margin-top:6px">
+            人设越短越稳：只写性格与底线，长度/排版/称呼这类规则由后端统一注入，重复写反而会稀释人设。
           </div>
-          <div class="row" style="margin-top:10px">
-            <label style="margin:0"><input type="checkbox" id="qbEnabled"> 启用</label>
-            <label style="margin:0"><input type="checkbox" id="qbRequireAt"> 群内默认需 @</label>
-            <button class="btn" id="qbSave">保存并热生效</button>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>基本</h3><span class="grow"></span><span class="note">保存后热生效，不用重启</span></header>
+        <div class="pad">
+          <div class="tok-form">
+            <label class="fld"><span>模型</span>
+              <input id="qbModel" type="text" placeholder="cn:deepseek-v4-flash" /></label>
+            <label class="fld"><span>每号每分钟上限</span>
+              <input id="qbRate" type="number" min="0" placeholder="8" /></label>
+            <label class="fld"><span>回复字数上限（闲聊另受 20 字约束）</span>
+              <input id="qbMaxRunes" type="number" min="0" placeholder="600" /></label>
+            <label class="fld"><span>上下文轮数</span>
+              <input id="qbHist" type="number" min="0" placeholder="6" /></label>
+            <div class="fld act" style="flex-direction:row;gap:14px;align-items:center;grid-column:span 2">
+              <label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="qbEnabled" /> 启用</label>
+              <label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="qbRequireAt" /> 群内默认需 @</label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>闸门（听觉）</h3><span class="grow"></span><span class="note">激活/静默是房间级：一个群被叫醒或被叫停，所有人共享</span></header>
+        <div class="pad">
+          <div class="tok-form">
+            <label class="fld"><span>激活期（秒）</span>
+              <input id="qbActWin" type="number" min="0" placeholder="300" /></label>
+            <label class="fld"><span>静默（秒）</span>
+              <input id="qbSilence" type="number" min="0" placeholder="60" /></label>
+            <label class="fld wide"><span>激活词（逗号分隔）</span>
+              <input id="qbActKw" type="text" placeholder="小八嘎,龙王,我去" /></label>
+            <label class="fld wide"><span>中断词（逗号分隔）</span>
+              <input id="qbIntKw" type="text" placeholder="闭嘴,退下" /></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>白名单</h3><span class="grow"></span><span class="note">留空 = 不限制；多个用逗号分隔</span></header>
+        <div class="pad">
+          <div class="tok-form">
+            <label class="fld"><span>白名单群</span>
+              <input id="qbGroups" type="text" placeholder="992511553" /></label>
+            <label class="fld"><span>免 @ 群</span>
+              <input id="qbNoAt" type="text" placeholder="992511553" /></label>
+            <label class="fld"><span>私聊白名单</span>
+              <input id="qbUsers" type="text" placeholder="941628696" /></label>
+            <label class="fld"><span>忽略 QQ</span>
+              <input id="qbIgnored" type="text" placeholder="190839970" /></label>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn primary" id="qbSave">保存并热生效</button>
             <span class="note" id="qbSaveHint"></span>
           </div>
         </div>
       </div>
 
       <div class="box">
-        <header><h3>用户记忆（每人独立上下文）</h3><span class="grow"></span><span class="note">点评 = 上一轮收尾那句</span></header>
-        <table>
-          <thead><tr><th>QQ</th><th>昵称</th><th>次数</th><th>好感度</th><th>最后活跃</th><th>最近说过</th><th>上次点评</th><th></th></tr></thead>
-          <tbody id="qbMemBody"></tbody>
-        </table>
+        <header><h3>用户记忆</h3><span class="grow"></span><span class="note">每人独立上下文；点评 = 上一轮收尾那句</span></header>
+        <div class="tbl-wrap">
+          <table class="tok-tbl">
+            <thead><tr>
+              <th>QQ</th><th>昵称</th><th class="num">次数</th><th class="num">好感度</th>
+              <th>最后活跃</th><th>最近说过</th><th>上次点评</th><th></th>
+            </tr></thead>
+            <tbody id="qbMemBody"></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="box">
         <header><h3>闸门 / bot 风控状态</h3></header>
-        <table>
-          <thead><tr><th>会话</th><th>模式</th><th>到期</th><th>命中次数</th></tr></thead>
-          <tbody id="qbGateBody"></tbody>
-        </table>
+        <div class="tbl-wrap">
+          <table class="tok-tbl">
+            <thead><tr><th>会话</th><th>模式</th><th>到期</th><th class="num">命中次数</th></tr></thead>
+            <tbody id="qbGateBody"></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="box">
         <header><h3>最近事件</h3></header>
-        <table>
-          <thead><tr><th>时间</th><th>类型</th><th>群</th><th>用户</th><th>@</th><th>结果</th></tr></thead>
-          <tbody id="qbEvBody"></tbody>
-        </table>
+        <div class="tbl-wrap">
+          <table class="tok-tbl">
+            <thead><tr><th>时间</th><th>类型</th><th>群</th><th>用户</th><th>@</th><th>结果</th></tr></thead>
+            <tbody id="qbEvBody"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 

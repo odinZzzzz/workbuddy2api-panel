@@ -13,10 +13,10 @@ import (
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
-	"x-anthropic-billing-header",                      // header 键值段键名
-	"cc_entrypoint=",                                  // 尾随裸键值（截断前缀即可命中）
-	"You are Claude Code",                             // 身份句（截断前缀即可命中）
-	"Main branch (",                                   // 注入指令句（截断前缀即可命中）
+	"x-anthropic-billing-header", // header 键值段键名
+	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
+	"You are Claude Code",        // 身份句（截断前缀即可命中）
+	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
 	"11128",                                           // 上游反探测：裸数字错误码
@@ -134,7 +134,19 @@ const (
 	// （this page / this GUI / this app）连续出现时命中同一套校验；缩成 `DeepSeek`
 	// 即可通过，语义损失最小。只吃空格/制表符：`deepseek-harness`、
 	// `deepseek_harness`、`/opt/deepseek-harness/app` 这类路径与标识符必须原样保留。
-	sanitizeBrandPat = `DeepSeek[ \t]+Harness`
+	// 品牌词里可能夹零宽空格（U+200B）：官方发布版就是 `DeepSeek\u200B Harness`。
+	// 只吃空格/制表符/零宽空格，路径与标识符（deepseek-harness）必须原样保留。
+	sanitizeBrandPat = `DeepSeek[ \t\x{200B}]+Harness`
+
+	// sanitizeGuiURLPat GUI 段的 B 句（`Current ... Web GUI URL: "http://..."`）。
+	// README 实测：A 句+B 句连续出现才判定，B 句在 system 尾部（偏移 6552 左右），
+	// 只修开头的做法够不到它。
+	sanitizeGuiURLPat = `Current[ \t\x{200B}]+DeepSeek[ \t\x{200B}]+Harness[ \t\x{200B}]+` +
+		`Web[ \t\x{200B}]+GUI[ \t\x{200B}]+URL:[^\n"]*("[^"\n]*")?\.?`
+
+	// sanitizeAtTokenHint / sanitizeGuiURLHint 探针（全小写，必须是匹配文本的子串）
+	sanitizeAtTokenHint = "prefixed with"
+	sanitizeGuiURLHint  = "web gui url"
 )
 
 var (
@@ -153,6 +165,9 @@ var (
 	// 多空格/大小写变体，因此不需要 canon 版本。
 	sanitizeBrandRe   = regexp.MustCompile("(?i)" + sanitizeBrandPat)
 	sanitizeBrandRepl = "DeepSeek"
+
+	sanitizeGuiURLRe   = regexp.MustCompile("(?i)" + sanitizeGuiURLPat)
+	sanitizeGuiURLRepl = "The runtime context supplies the GUI URL."
 )
 
 // ── 指纹探测（热路径）──────────────────────────────────────────────────────
@@ -172,10 +187,12 @@ const (
 	maskIdentity                          // 自我介绍句式
 	maskGui                               // GUI 描述段
 	maskBrand                             // 品牌缩减
+	maskAtToken                           // @ 文件引用句（把 @ 换成 (at)）
+	maskGuiURL                            // GUI 段 B 句（Current … Web GUI URL: "…"）
 )
 
 // 句式层三条规则的位：identity=false（user/tool 数据）时整体清掉。
-const maskSentenceLayer = maskIdentity | maskGui | maskBrand
+const maskSentenceLayer = maskIdentity | maskGui | maskBrand | maskAtToken | maskGuiURL
 
 // 折叠探针（全小写）。每条都必须是**对应规则匹配文本的子串**——探测只准超、不准漏：
 // 假阳性只多跑一次正则，假阴性会让指纹原样出站（那正是这条流水线存在的理由）。
@@ -259,6 +276,9 @@ func probeMask(text string) sanitizeMask {
 			if foldAt(text, i, sanitizeGuiHint) {
 				m |= maskGui
 			}
+			if foldAt(text, i, sanitizeGuiURLHint) {
+				m |= maskGuiURL
+			}
 		case 'y':
 			if foldAt(text, i, sanitizeYouAreHint) {
 				youAreAt = i
@@ -266,6 +286,9 @@ func probeMask(text string) sanitizeMask {
 		case 'p':
 			if foldAt(text, i, verbPoweredBy) {
 				verb = verb || inIdentityWindow(youAreAt, i)
+			}
+			if foldAt(text, i, sanitizeAtTokenHint) {
+				m |= maskAtToken
 			}
 		case 'b':
 			if foldAt(text, i, verbBuiltOn) || foldAt(text, i, verbBuiltBy) {
@@ -329,8 +352,16 @@ func sanitizeTextScoped(text string, identity bool) string {
 		// GUI 段规则要认品牌全名，必须排在品牌缩减之前（先缩就锚不到了）。
 		text = sanitizeDshGuiCanonRe.ReplaceAllString(text, sanitizeDshGuiRepl)
 	}
+	if mask&maskGuiURL != 0 {
+		text = sanitizeGuiURLRe.ReplaceAllString(text, sanitizeGuiURLRepl)
+	}
 	if mask&maskBrand != 0 {
 		text = strings.ReplaceAll(text, "DeepSeek Harness", sanitizeBrandRepl)
+	}
+	// @ 文件引用句：上游对「Tokens prefixed with @ are paths…」这类句式判定，
+	// 真机 A/B 结论是**去掉任意一个 @ 就 200**。这里把 @ 换成 (at)，语义不变。
+	if mask&maskAtToken != 0 && strings.Contains(text, "@") {
+		text = strings.ReplaceAll(text, "@", "(at)")
 	}
 	// 快路只吃规范形态：重探一次，仍有残留才动用 (?i) 正则。
 	// 命中路径多付一次探测（~70µs/80KB），换掉三次全量 (?i) 扫描（~2ms）。

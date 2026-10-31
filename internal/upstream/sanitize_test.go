@@ -560,3 +560,49 @@ func TestPrepareBodySanitizesDshPrompt(t *testing.T) {
 		t.Errorf("两句都该替换为中性句: %s", s)
 	}
 }
+
+// 11-128 渠道校验的四类触发源（依据 curo22/dsh-wb400-guard 真机 A/B）：
+// 本用例钉住我们**新增**的两条 + 零宽空格品牌变体，避免以后被顺手删掉。
+func TestSanitizeChannelGateTriggers(t *testing.T) {
+	// 1) @ 文件引用句：真机结论「去掉任意一个 @ 就 200」
+	in := "Tokens prefixed with @ are paths the user explicitly referenced. " +
+		"Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
+	got := sanitizeText(in)
+	if strings.Contains(got, "@") {
+		t.Errorf("@ 没被替换掉：%q", got)
+	}
+	if !strings.Contains(got, "(at)") {
+		t.Errorf("@ 应换成 (at) 而不是直接删：%q", got)
+	}
+	if !strings.Contains(got, "prefixed with") {
+		t.Errorf("句子其余部分应保留：%q", got)
+	}
+
+	// 2) GUI 段 B 句（system 尾部那条）
+	gui := `Current DeepSeek Harness Web GUI URL: "http://127.0.0.1:43120".`
+	got2 := sanitizeText(gui)
+	if strings.Contains(got2, "Web GUI URL") || strings.Contains(got2, "127.0.0.1") {
+		t.Errorf("GUI URL 段没被中性化：%q", got2)
+	}
+	if !strings.Contains(got2, "runtime context") {
+		t.Errorf("应换成中性句：%q", got2)
+	}
+
+	// 3) 品牌词夹零宽空格（官方发布版就是 DeepSeek\u200B Harness）
+	zw := "powered by DeepSeek\u200b Harness.\n"
+	got3 := sanitizeText(zw)
+	if strings.Contains(got3, "\u200b") {
+		t.Errorf("零宽空格品牌没被缩减：%q", got3)
+	}
+
+	// 4) 作用域：user 数据（identity=false）里的 @ 不许改写
+	userText := "看这个 @file.txt 和 @dir/ 里有什么"
+	if got4 := sanitizeTextScoped(userText, false); got4 != userText {
+		t.Errorf("user 数据不该被改写：%q", got4)
+	}
+
+	// 5) 幂等：重复净化不再变化
+	if again := sanitizeText(got); again != got {
+		t.Errorf("净化不幂等：%q -> %q", got, again)
+	}
+}

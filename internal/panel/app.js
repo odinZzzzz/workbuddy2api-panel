@@ -545,12 +545,13 @@ async function loadOverview(quiet) {
     $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
     // 提示词降级（degrade_active）：降级期出站 system prompt 已被**静默**换成中性提示词，
     // 客户端只表现为「模型变笨了」。不显式提示的话这类故障只能靠人猜，所以这里必须亮出来。
-    if ($('navDegradeRow')) {
-      $('navDegradeRow').style.display = d.degrade_active ? '' : 'none';
-      if (d.degrade_active && $('navDegrade')) {
+    if ($('accDegradeRow')) {
+      $('accDegradeRow').hidden = !d.degrade_active;
+      if (d.degrade_active && $('accDegrade')) {
         const until = d.degrade_until ? new Date(d.degrade_until) : null;
         const when = until && !isNaN(until) ? until.toLocaleString('zh-CN', { hour12: false }) : '次日 00:00';
-        $('navDegrade').textContent = '提示词降级中 · 至 ' + when;
+        $('accDegrade').textContent = '提示词降级中 · 至 ' + when;
+        if ($('accDegradeNote')) $('accDegradeNote').textContent = '降级期出站 system prompt 已被静默换成中性提示词；下方带「降权」标记的账号不参与选号';
       }
     }
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
