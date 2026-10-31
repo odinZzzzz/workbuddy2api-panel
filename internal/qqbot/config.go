@@ -65,6 +65,11 @@ type Config struct {
 	KkrbEnabled bool `json:"kkrb_enabled"`
 	// KkrbCacheMinutes 实时数据缓存时长（分钟，默认 10）。
 	KkrbCacheMinutes int `json:"kkrb_cache_minutes"`
+	// ChartFont 画图表文字用的字体（.ttf；.ttc 集合字体 opentype 解析不了）。
+	ChartFont string `json:"chart_font"`
+
+	// KBDir 外部知识库目录（*.md，首行 `keys: a, b`，其余为正文）；空 = 只用内置。
+	KBDir string `json:"kb_dir"`
 	// KBEnabled 是否注入预设知识库（三角洲相关事实卡）；默认 true。
 	KBEnabled bool `json:"kb_enabled"`
 
@@ -161,6 +166,7 @@ func Default() Config {
 		RatePerMinute:      6,
 		MaxReplyRunes:      1200,
 		TimeoutSeconds:     120,
+		ChartFont:          "/usr/share/fonts/chinese/simhei.ttf",
 		KkrbEnabled:        true,
 		KkrbCacheMinutes:   10,
 		KBEnabled:          true,

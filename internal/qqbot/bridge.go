@@ -540,7 +540,7 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 	}
 	// 预设知识库：命中相关条目就附在 system 末尾（事实卡，优先于模型记忆）
 	if b.cfg().KBEnabled {
-		if kb := kbContext(userText); kb != "" {
+		if kb := b.kbContext(userText); kb != "" {
 			system += "\n\n" + kb
 		}
 	}
@@ -967,3 +967,12 @@ const layoutGuide = `【排版规则】
 - 工具返回的列表要**原样保留分行**，不要自己压平或改写顺序。
 - 非列表内容仍然保持 1~3 句短句，别为了排版硬拆行。
 - 不用 Markdown 语法（加粗星号、井号标题、表格），QQ 不渲染，只会变成噪音。`
+
+// kkrbOverview 取 kkrb 概览数据（统一缓存入口，供各市场工具复用）。
+func (b *Bridge) kkrbOverview() (*KkrbOverview, error) {
+	if !b.cfg().KkrbEnabled {
+		return nil, fmt.Errorf("实时数据源已关闭（kkrb_enabled=false）")
+	}
+	ttl := time.Duration(b.cfg().KkrbCacheMinutes) * time.Minute
+	return kkrbSingleton.Overview(ttl)
+}

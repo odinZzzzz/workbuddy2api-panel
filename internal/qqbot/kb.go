@@ -1,7 +1,11 @@
 package qqbot
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // kb.go —— 三角洲行动知识库（预设，可扩展）。
@@ -81,6 +85,11 @@ var kbEntries = []KBEntry{
 //
 // 命中即注入；多条命中按命中关键词数量排序（越相关越靠前）。
 func matchKB(text string, limit int) []KBEntry {
+	return matchKBIn(kbEntries, text, limit)
+}
+
+// matchKBIn 在给定条目集合里匹配（内置 + 外部目录合并后用）。
+func matchKBIn(entries []KBEntry, text string, limit int) []KBEntry {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
@@ -90,7 +99,7 @@ func matchKB(text string, limit int) []KBEntry {
 		score int
 	}
 	var hits []scored
-	for _, e := range kbEntries {
+	for _, e := range entries {
 		score := 0
 		for _, k := range e.Keys {
 			if k != "" && strings.Contains(lower, strings.ToLower(k)) {
@@ -117,9 +126,81 @@ func matchKB(text string, limit int) []KBEntry {
 	return out
 }
 
+// kbDirCache 外部知识库缓存（按目录 mtime 失效）。
+var kbDirCache struct {
+	mu      sync.Mutex
+	dir     string
+	mtime   time.Time
+	entries []KBEntry
+}
+
+// loadKBDir 读目录下的 *.md 知识卡。
+//
+// 文件格式（首行声明关键词，其余为正文）：
+//
+//	keys: 密码, 密码门
+//	---
+//	正文可以多行……
+//
+// 目录 mtime 变了才重读，避免每条消息都扫盘。
+func loadKBDir(dir string) []KBEntry {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return nil
+	}
+	kbDirCache.mu.Lock()
+	defer kbDirCache.mu.Unlock()
+	if kbDirCache.dir == dir && kbDirCache.mtime.Equal(info.ModTime()) {
+		return kbDirCache.entries
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []KBEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		text := string(raw)
+		keys := []string{}
+		body := text
+		if i := strings.IndexByte(text, '\n'); i > 0 {
+			first := strings.TrimSpace(text[:i])
+			if strings.HasPrefix(strings.ToLower(first), "keys:") {
+				for _, kk := range strings.Split(first[5:], ",") {
+					if s := strings.TrimSpace(kk); s != "" {
+						keys = append(keys, s)
+					}
+				}
+				body = strings.TrimSpace(text[i+1:])
+				body = strings.TrimPrefix(body, "---")
+				body = strings.TrimSpace(body)
+			}
+		}
+		if len(keys) == 0 || body == "" {
+			continue
+		}
+		out = append(out, KBEntry{Keys: keys, Text: body})
+	}
+	kbDirCache.dir = dir
+	kbDirCache.mtime = info.ModTime()
+	kbDirCache.entries = out
+	return out
+}
+
 // kbContext 把命中的知识拼成给模型的一段文字（无命中返回空串）。
-func kbContext(text string) string {
-	hits := matchKB(text, 2)
+func (b *Bridge) kbContext(text string) string {
+	// 外部目录（你自己写的）排在前面：同分时优先于内置卡——手写的事实应该盖过预设。
+	entries := append(append([]KBEntry{}, loadKBDir(b.cfg().KBDir)...), kbEntries...)
+	hits := matchKBIn(entries, text, 3)
 	if len(hits) == 0 {
 		return ""
 	}

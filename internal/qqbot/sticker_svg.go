@@ -73,6 +73,54 @@ const (
 	defaultSVGSide = 256
 )
 
+// RenderSVGTo 按指定宽高渲染（保持 viewBox 比例，用于宽图/柱状图）。
+func RenderSVGTo(svg string, w, h int) ([]byte, error) {
+	if strings.TrimSpace(svg) == "" {
+		return nil, fmt.Errorf("svg 为空")
+	}
+	if len(svg) > maxSVGBytes {
+		return nil, fmt.Errorf("svg 太大（%d 字节，上限 %d）", len(svg), maxSVGBytes)
+	}
+	if !strings.Contains(svg, "<svg") {
+		return nil, fmt.Errorf("不像 SVG（缺少 <svg> 标签）")
+	}
+	if w <= 0 || h <= 0 {
+		return nil, fmt.Errorf("宽高必须为正")
+	}
+	if w > 2000 || h > 2000 {
+		return nil, fmt.Errorf("画布过大（%dx%d，上限 2000）", w, h)
+	}
+	var out []byte
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("渲染 SVG 失败: %v", r)
+			}
+		}()
+		icon, e := oksvg.ReadIconStream(strings.NewReader(svg), oksvg.WarnErrorMode)
+		if e != nil {
+			err = fmt.Errorf("解析 SVG: %w", e)
+			return
+		}
+		icon.SetTarget(0, 0, float64(w), float64(h))
+		img := image.NewRGBA(image.Rect(0, 0, w, h))
+		scanner := rasterx.NewScannerGV(w, h, img, img.Bounds())
+		dasher := rasterx.NewDasher(w, h, scanner)
+		icon.Draw(dasher, 1.0)
+		var buf bytes.Buffer
+		if e := png.Encode(&buf, img); e != nil {
+			err = fmt.Errorf("编码 PNG: %w", e)
+			return
+		}
+		out = buf.Bytes()
+	}()
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RenderSVG 把 SVG 源码渲染成 PNG 字节。
 func RenderSVG(svg string, side int) ([]byte, error) {
 	if strings.TrimSpace(svg) == "" {

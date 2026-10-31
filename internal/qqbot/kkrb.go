@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,10 +16,11 @@ import (
 // kkrb.go —— 接入 kkrb.net（三角洲行动一图流）的实时数据。
 //
 // 为什么这么绕：对方接口 `POST /getOVData` 需要 **先访问页面拿 cookie**（csrf_token +
-// PHPSESSID），否则回 `{"code":-101,"msg":"系统繁忙"}`（实测：裸 POST 被挡，带 cookie 就
-// 返回 200 + 222KB JSON）。所以这里用 cookiejar 走两步：GET 页面 → POST 接口。
+// PHPSESSID），否则回 `{"code":-101,"msg":"系统繁忙"}`（实测：裸 POST 被挡，带 cookie 才
+// 返回 200 + 222KB JSON）。所以用 cookiejar 走两步：GET 页面 → POST 接口。
 //
-// 数据每天更新（每日地图密码），所以按 TTL 缓存（默认 10 分钟），避免每次提问都打对方。
+// 一次请求里同时包含：每日密码(bdData)、制造推荐(spData)、材料浮动(smpData)、
+// 热门子弹(hapData)、子弹兑换利润(dtaData)。所以只解析一次、缓存一份，各工具共用。
 
 const (
 	kkrbHome   = "https://www.kkrb.net/?viewpage=overview"
@@ -36,27 +38,74 @@ var kkrbMapNames = []struct{ code, name string }{
 	{"az3", "AZ3"},
 }
 
-// KkrbPassword 一条每日密码。
+// kkrbCraftOrder 制造台展示顺序。
+var kkrbCraftOrder = []string{"tech", "workbench", "pharmacy", "armory"}
+
+// KkrbPassword 每日密码。
 type KkrbPassword struct {
 	Map     string `json:"map"`
 	Code    string `json:"code"`
 	Updated string `json:"updated,omitempty"`
 }
 
+// KkrbCraft 制造推荐（每台一条）。
+type KkrbCraft struct {
+	Place    string  `json:"place"`
+	Pic      string  `json:"pic,omitempty"`
+	Item     string  `json:"item"`
+	Profit   float64 `json:"profit"`
+	Material float64 `json:"material_value"`
+	Price    float64 `json:"single_price"`
+	SellHint string  `json:"sell_hint,omitempty"`
+	Level    int     `json:"level,omitempty"`
+}
+
+// KkrbMaterial 材料价格浮动。
+type KkrbMaterial struct {
+	Item     string `json:"item"`
+	Pic      string `json:"pic,omitempty"`
+	Current  int    `json:"current"`
+	High     int    `json:"high"`
+	HighTime string `json:"high_time,omitempty"`
+	Low      int    `json:"low"`
+	LowTime  string `json:"low_time,omitempty"`
+}
+
+// KkrbAmmo 热门子弹。
+type KkrbAmmo struct {
+	Item    string `json:"item"`
+	Current int    `json:"current"`
+	Level   int    `json:"level,omitempty"`
+}
+
+// KkrbAmmoProfit 子弹兑换利润。
+type KkrbAmmoProfit struct {
+	Item   string  `json:"item"`
+	Pic    string  `json:"pic,omitempty"`
+	Profit float64 `json:"profit"`
+}
+
+// KkrbOverview 一次拉取的全部概览数据。
+type KkrbOverview struct {
+	FetchedAt  time.Time        `json:"fetched_at"`
+	Passwords  []KkrbPassword   `json:"passwords"`
+	Crafts     []KkrbCraft      `json:"crafts"`
+	Materials  []KkrbMaterial   `json:"materials"`
+	AmmoHot    []KkrbAmmo       `json:"ammo_hot"`
+	AmmoProfit []KkrbAmmoProfit `json:"ammo_profit"`
+}
+
 // kkrbClient 带 cookie 与缓存的客户端。
 type kkrbClient struct {
 	mu      sync.Mutex
 	http    *http.Client
-	cached  []KkrbPassword
+	cached  *KkrbOverview
 	fetched time.Time
-	lastErr error
 }
 
 func newKkrbClient() *kkrbClient {
 	jar, _ := cookiejar.New(nil)
-	return &kkrbClient{
-		http: &http.Client{Timeout: 20 * time.Second, Jar: jar},
-	}
+	return &kkrbClient{http: &http.Client{Timeout: 25 * time.Second, Jar: jar}}
 }
 
 // warm 访问页面拿 cookie（对方要求有会话）。
@@ -75,29 +124,26 @@ func (k *kkrbClient) warm() error {
 	return nil
 }
 
-// DailyPasswords 取每日地图密码（带缓存）。
-func (k *kkrbClient) DailyPasswords(ttl time.Duration) ([]KkrbPassword, error) {
+// Overview 取概览数据（带 TTL 缓存；失败时回退旧缓存）。
+func (k *kkrbClient) Overview(ttl time.Duration) (*KkrbOverview, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if ttl > 0 && len(k.cached) > 0 && time.Since(k.fetched) < ttl {
+	if ttl > 0 && k.cached != nil && time.Since(k.fetched) < ttl {
 		return k.cached, nil
 	}
-	list, err := k.fetch()
+	ov, err := k.fetch()
 	if err != nil {
-		k.lastErr = err
-		// 拿不到但有旧数据：返回旧的（标 stale 由调用方决定），总比"没有"强
-		if len(k.cached) > 0 {
-			return k.cached, nil
+		if k.cached != nil {
+			return k.cached, nil // 拉不到新的：用旧的，总比"没有"强
 		}
 		return nil, err
 	}
-	k.cached = list
+	k.cached = ov
 	k.fetched = time.Now()
-	k.lastErr = nil
-	return list, nil
+	return ov, nil
 }
 
-func (k *kkrbClient) fetch() ([]KkrbPassword, error) {
+func (k *kkrbClient) fetch() (*KkrbOverview, error) {
 	if err := k.warm(); err != nil {
 		return nil, fmt.Errorf("访问 kkrb 页面失败: %w", err)
 	}
@@ -115,8 +161,12 @@ func (k *kkrbClient) fetch() ([]KkrbPassword, error) {
 		return nil, fmt.Errorf("请求 kkrb 数据失败: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	return parseKkrbOverview(raw)
+}
 
+// parseKkrbOverview 解析接口 JSON（独立函数便于用固定样本测试）。
+func parseKkrbOverview(raw []byte) (*KkrbOverview, error) {
 	var out struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
@@ -125,6 +175,35 @@ func (k *kkrbClient) fetch() ([]KkrbPassword, error) {
 				Password string `json:"password"`
 				Updated  string `json:"updated"`
 			} `json:"bdData"`
+			SpData map[string]struct {
+				ItemName             string  `json:"itemName"`
+				Pic                  string  `json:"pic"`
+				PlaceName            string  `json:"placeName"`
+				RequiredLevel        int     `json:"requiredLevel"`
+				TotalMaterialValue   float64 `json:"totalMaterialValue"`
+				SinglePrice          float64 `json:"singlePrice"`
+				Profit               float64 `json:"profit"`
+				YesterdayHighestTime string  `json:"yesterdayHighestTime"`
+			} `json:"spData"`
+			SmpData []struct {
+				ItemName              string `json:"itemName"`
+				Pic                   string `json:"pic"`
+				CurrectPrice          int    `json:"currectPrice"`
+				YesterdayHighestPrice int    `json:"yesterdayHighestPrice"`
+				YesterdayHighestTime  string `json:"yesterdayHighestTime"`
+				YesterdayLowestPrice  int    `json:"yesterdayLowestPrice"`
+				YesterdayLowestTime   string `json:"yesterdayLowestTime"`
+			} `json:"smpData"`
+			HapData []struct {
+				ObjectName   string `json:"objectName"`
+				CurrectPrice int    `json:"currectPrice"`
+				ItemGrade    int    `json:"itemGrade"`
+			} `json:"hapData"`
+			DtaData []struct {
+				ItemName string  `json:"itemName"`
+				Pic      string  `json:"pic"`
+				Profit   float64 `json:"profit"`
+			} `json:"dtaData"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -133,16 +212,44 @@ func (k *kkrbClient) fetch() ([]KkrbPassword, error) {
 	if out.Code != 1 {
 		return nil, fmt.Errorf("kkrb 返回错误: code=%d msg=%s", out.Code, out.Msg)
 	}
-	list := make([]KkrbPassword, 0, len(kkrbMapNames))
+	ov := &KkrbOverview{FetchedAt: time.Now()}
+
 	for _, m := range kkrbMapNames {
 		if v, ok := out.Data.BdData[m.code]; ok && strings.TrimSpace(v.Password) != "" {
-			list = append(list, KkrbPassword{Map: m.name, Code: v.Password, Updated: formatKkrbUpdated(v.Updated)})
+			ov.Passwords = append(ov.Passwords, KkrbPassword{
+				Map: m.name, Code: v.Password, Updated: formatKkrbUpdated(v.Updated),
+			})
 		}
 	}
-	if len(list) == 0 {
-		return nil, fmt.Errorf("kkrb 响应里没有密码数据")
+	for _, place := range kkrbCraftOrder {
+		v, ok := out.Data.SpData[place]
+		if !ok || strings.TrimSpace(v.ItemName) == "" {
+			continue
+		}
+		ov.Crafts = append(ov.Crafts, KkrbCraft{
+			Place: v.PlaceName, Item: v.ItemName, Profit: v.Profit, Pic: v.Pic,
+			Material: v.TotalMaterialValue, Price: v.SinglePrice,
+			SellHint: v.YesterdayHighestTime, Level: v.RequiredLevel,
+		})
 	}
-	return list, nil
+	for _, m := range out.Data.SmpData {
+		ov.Materials = append(ov.Materials, KkrbMaterial{
+			Item: m.ItemName, Pic: m.Pic, Current: m.CurrectPrice,
+			High: m.YesterdayHighestPrice, HighTime: m.YesterdayHighestTime,
+			Low: m.YesterdayLowestPrice, LowTime: m.YesterdayLowestTime,
+		})
+	}
+	for _, a := range out.Data.HapData {
+		ov.AmmoHot = append(ov.AmmoHot, KkrbAmmo{Item: a.ObjectName, Current: a.CurrectPrice, Level: a.ItemGrade})
+	}
+	for _, d := range out.Data.DtaData {
+		ov.AmmoProfit = append(ov.AmmoProfit, KkrbAmmoProfit{Item: d.ItemName, Profit: d.Profit, Pic: d.Pic})
+	}
+	sort.Slice(ov.AmmoProfit, func(i, j int) bool { return ov.AmmoProfit[i].Profit > ov.AmmoProfit[j].Profit })
+	if len(ov.Passwords) == 0 && len(ov.Crafts) == 0 {
+		return nil, fmt.Errorf("kkrb 响应里没有可用数据")
+	}
+	return ov, nil
 }
 
 // formatKkrbUpdated "20261031000001" → "2026-10-31"。

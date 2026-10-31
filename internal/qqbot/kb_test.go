@@ -33,14 +33,15 @@ func TestMatchKB(t *testing.T) {
 	if hits := matchKB("今天天气不错", 2); len(hits) != 0 {
 		t.Errorf("无关消息不该命中，实际 %d 条", len(hits))
 	}
-	if kbContext("今天天气不错") != "" {
+	b := New(Default())
+	if b.kbContext("今天天气不错") != "" {
 		t.Error("无命中时 kbContext 应为空")
 	}
 }
 
 // 命中时 kbContext 要带上"参考资料"抬头，避免模型把它当用户发言。
 func TestKBContextHeader(t *testing.T) {
-	got := kbContext("今天密码是多少")
+	got := New(Default()).kbContext("今天密码是多少")
 	if !strings.HasPrefix(got, "【参考资料") {
 		t.Errorf("应有参考资料抬头: %.60s", got)
 	}

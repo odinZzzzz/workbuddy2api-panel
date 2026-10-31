@@ -111,18 +111,180 @@ func (b *Bridge) buildTools() *toolRegistry {
 				return "实时数据源已关闭（kkrb_enabled=false）", nil
 			}
 			ttl := time.Duration(tc.b.cfg().KkrbCacheMinutes) * time.Minute
-			list, err := kkrbSingleton.DailyPasswords(ttl)
+			ov, err := kkrbSingleton.Overview(ttl)
 			if err != nil {
 				return "", fmt.Errorf("查每日密码失败: %w", err)
 			}
 			var sb strings.Builder
 			sb.WriteString("今日地图密码：\n")
-			for _, it := range list {
+			for _, it := range ov.Passwords {
 				sb.WriteString("- " + it.Map + "：" + it.Code)
 				if it.Updated != "" {
 					sb.WriteString("（" + it.Updated + " 更新）")
 				}
 				sb.WriteString("\n")
+			}
+			return sb.String(), nil
+		})
+
+	add("draw_chart", "把数据画成柱状图发到当前会话（图文结合）。items 传 [{label,value}]，最多 12 条。回答涉及数值对比（利润、价格、伤害）时用。",
+		obj(map[string]any{
+			"title": map[string]any{"type": "string", "description": "图标题，简短"},
+			"items": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"label": map[string]any{"type": "string"},
+						"value": map[string]any{"type": "number"},
+					},
+					"required": []string{"label", "value"},
+				},
+			},
+		}, "title", "items"),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				Title string      `json:"title"`
+				Items []ChartItem `json:"items"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			png, err := RenderBarChart(in.Title, in.Items, tc.b.cfg().ChartFont)
+			if err != nil {
+				return "", err
+			}
+			path, err := tc.b.SaveGeneratedSticker(png)
+			if err != nil {
+				return "", err
+			}
+			if err := tc.b.sendImage(tc.ev, path); err != nil {
+				return "", err
+			}
+			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_chart"})
+			return fmt.Sprintf("已画出柱状图（%d 条数据）并发到当前会话", len(in.Items)), nil
+		})
+
+	add("chart_market", "把三角洲市场数据画成柱状图（一次调用：取数 + 画图 + 发送）。kind=craft（制造利润）/material（材料当前价）/ammo（子弹兑换利润）。",
+		obj(map[string]any{
+			"kind": map[string]any{"type": "string", "enum": []string{"craft", "material", "ammo"}},
+		}, "kind"),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", err
+			}
+			ov, err := tc.b.kkrbOverview()
+			if err != nil {
+				return "", err
+			}
+			var title string
+			var items []ChartItem
+			switch in.Kind {
+			case "material":
+				title = "材料当前价"
+				for _, m := range ov.Materials {
+					items = append(items, ChartItem{Label: m.Item, Value: float64(m.Current), Icon: m.Pic})
+				}
+			case "ammo":
+				title = "子弹兑换利润"
+				for _, a := range ov.AmmoProfit {
+					items = append(items, ChartItem{Label: a.Item, Value: a.Profit, Icon: a.Pic})
+				}
+			default:
+				title = "特勤处制造利润"
+				for _, c := range ov.Crafts {
+					items = append(items, ChartItem{Label: c.Item, Value: c.Profit, Icon: c.Pic})
+				}
+			}
+			if len(items) == 0 {
+				return "没有可画的数据", nil
+			}
+			png, err := RenderBarChart(title, items, tc.b.cfg().ChartFont)
+			if err != nil {
+				return "", err
+			}
+			path, err := tc.b.SaveGeneratedSticker(png)
+			if err != nil {
+				return "", err
+			}
+			if err := tc.b.sendImage(tc.ev, path); err != nil {
+				return "", err
+			}
+			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_chart"})
+			return fmt.Sprintf("已把「%s」画成柱状图并发送（%d 条）", title, len(items)), nil
+		})
+
+	add("market_craft", "查三角洲特勤处制造推荐（技术中心/工作台/制药台/防具台各一条：产物、利润、材料成本、建议卖出时段）。有人问制造赚什么、特勤处做什么时调用。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			ov, err := tc.b.kkrbOverview()
+			if err != nil {
+				return "", err
+			}
+			if len(ov.Crafts) == 0 {
+				return "今天没有制造推荐数据", nil
+			}
+			var sb strings.Builder
+			sb.WriteString("特勤处制造推荐：\n")
+			for _, c := range ov.Crafts {
+				fmt.Fprintf(&sb, "- %s：%s，利润 %.0f（材料 %.0f / 售价 %.0f）", c.Place, c.Item, c.Profit, c.Material, c.Price)
+				if c.SellHint != "" {
+					sb.WriteString("，最高价时段 " + c.SellHint)
+				}
+				sb.WriteString("\n")
+			}
+			return sb.String(), nil
+		})
+
+	add("market_material", "查三角洲价格浮动大的制造材料（当前价、昨日最高/最低与时段）。有人问什么材料值得囤/什么时候买时调用。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			ov, err := tc.b.kkrbOverview()
+			if err != nil {
+				return "", err
+			}
+			if len(ov.Materials) == 0 {
+				return "今天没有材料浮动数据", nil
+			}
+			var sb strings.Builder
+			sb.WriteString("材料价格浮动（当前 / 昨日高 / 昨日低）：\n")
+			for _, m := range ov.Materials {
+				fmt.Fprintf(&sb, "- %s：%d / %d（%s）/ %d（%s）\n", m.Item, m.Current, m.High, m.HighTime, m.Low, m.LowTime)
+			}
+			return sb.String(), nil
+		})
+
+	add("market_ammo", "查三角洲热门子弹与子弹兑换利润榜。有人问哪种子弹好卖/兑换子弹赚不赚时调用。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			ov, err := tc.b.kkrbOverview()
+			if err != nil {
+				return "", err
+			}
+			var sb strings.Builder
+			if len(ov.AmmoProfit) > 0 {
+				sb.WriteString("子弹兑换利润（前 5）：\n")
+				for i, a := range ov.AmmoProfit {
+					if i >= 5 {
+						break
+					}
+					fmt.Fprintf(&sb, "- %s：%.0f\n", a.Item, a.Profit)
+				}
+			}
+			if len(ov.AmmoHot) > 0 {
+				sb.WriteString("热门子弹（前 5，当前价）：\n")
+				for i, a := range ov.AmmoHot {
+					if i >= 5 {
+						break
+					}
+					fmt.Fprintf(&sb, "- %s：%d\n", a.Item, a.Current)
+				}
+			}
+			if sb.Len() == 0 {
+				return "今天没有子弹数据", nil
 			}
 			return sb.String(), nil
 		})
