@@ -119,9 +119,18 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return "已戳对方一下", nil
 		})
 
-	add("recall_user", "查你对当前说话人的记忆（次数/原话/点评/好感度/画像）。在你需要「记得他」时调用。",
-		obj(map[string]any{}),
+	add("recall_user", "查你对某个人的记忆（次数/原话/点评/好感度/画像）。默认查当前说话人；要看别人就传 uid（本条消息 @ 的人）。",
+		obj(map[string]any{
+			"uid": map[string]any{"type": "integer", "description": "要查的 QQ 号；不传=当前说话人"},
+		}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				UID int64 `json:"uid"`
+			}
+			_ = json.Unmarshal(args, &in)
+			if in.UID > 0 {
+				return tc.b.summaryOf(tc.ev, strconvFormat(in.UID), nil), nil
+			}
 			return tc.b.summaryOf(tc.ev, "", nil), nil
 		})
 
@@ -158,3 +167,6 @@ func (r *toolRegistry) exec(tc toolContext, call ToolCall) (string, error) {
 	log.Printf("[qqbot] tool: %s(%s)", call.Function.Name, truncateRunes(call.Function.Arguments, 120))
 	return fn(tc, json.RawMessage(call.Function.Arguments))
 }
+
+// strconvFormat 小工具：把 uid 转字符串（避免为一个转换到处引 strconv）。
+func strconvFormat(v int64) string { return itoa(v) }

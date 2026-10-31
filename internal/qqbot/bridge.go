@@ -260,6 +260,17 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 把"本条 @ 了谁"告诉模型：否则它只会看到被剥掉 @ 的纯文本，
+	// 遇到"@某人 总结一下"时根本不知道要总结谁，只能拿说话人凑数（实测踩过）。
+	if others := otherAtTargets(atTargets, ev.SelfID); len(others) > 0 {
+		var names []string
+		for _, uid := range others {
+			names = append(names, itoa(uid))
+		}
+		text = text + "（本条 @ 了 QQ " + strings.Join(names, "、") + "，如果要对" +
+			"这些人说话/总结，就用他们的 QQ 号）"
+	}
+
 	// 表情包：命中关键词就发一张（不消耗模型额度）
 	if b.matchesSticker(text) {
 		b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
@@ -297,7 +308,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	b.refreshProfileAsync(ev.UserID)
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
-	go b.reply(&ev, key, name, text)
+	go b.reply(&ev, key, name, text, atTargets)
 }
 
 // allow 令牌桶限速：每用户每分钟 RatePerMinute 次（0 = 不限）。
@@ -330,8 +341,8 @@ func (b *Bridge) allow(userID int64) bool {
 }
 
 // reply 调网关拿回复并发出。
-func (b *Bridge) reply(ev *Event, key, name, text string) {
-	answer, err := b.chat(key, ev, text)
+func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64) {
+	answer, err := b.chat(key, ev, text, atTargets)
 	if err != nil {
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
@@ -366,13 +377,15 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 	if out == "" {
 		return
 	}
+	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+		User: ev.UserID, Nick: name, Action: "cmd_" + strings.TrimPrefix(cmd, "/")})
 	if err := b.send(ev, out); err != nil {
 		log.Printf("[qqbot] command send failed: %v", err)
 	}
 }
 
 // chat 走网关 /chat/completions（非流式），带会话历史。
-func (b *Bridge) chat(key string, ev *Event, userText string) (string, error) {
+func (b *Bridge) chat(key string, ev *Event, userText string, atTargets []int64) (string, error) {
 	uid := ev.UserID
 	msgs := b.buildMessages(key, uid, userText)
 
@@ -422,7 +435,8 @@ func (b *Bridge) chat(key string, ev *Event, userText string) (string, error) {
 	}
 	// 抽「〔点评：…〕」存进记忆，并从**可见回复**里剥掉（点评是内心活动，不必每轮外发）
 	if v := extractVerdict(answer); v != "" {
-		if b.mem != nil {
+		// 本条若 @ 了别人，点评很可能是针对被 @ 的那个人的，别写进说话人记忆里
+		if b.mem != nil && len(otherAtTargets(atTargets, ev.SelfID)) == 0 {
 			b.mem.SetVerdict(uid, v)
 		}
 		if stripped := stripVerdict(answer); strings.TrimSpace(stripped) != "" {
@@ -892,4 +906,15 @@ func (b *Bridge) sendSticker(ev *Event) {
 	if err := b.sendImage(ev, ref); err != nil {
 		log.Printf("[qqbot] sticker send failed: %v", err)
 	}
+}
+
+// otherAtTargets 过滤掉"@ 机器人自己"，只留被 @ 的其他人。
+func otherAtTargets(at []int64, self int64) []int64 {
+	out := make([]int64, 0, len(at))
+	for _, uid := range at {
+		if uid != 0 && uid != self {
+			out = append(out, uid)
+		}
+	}
+	return out
 }

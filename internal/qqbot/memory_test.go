@@ -105,3 +105,23 @@ func TestAffinityVisible(t *testing.T) {
 		t.Errorf("总结里应带好感度: %s", s)
 	}
 }
+
+// @某人 时，总结应针对被 @ 的人；且不把点评写进说话人记忆。
+func TestSummaryTargetFromAt(t *testing.T) {
+	cfg := Default()
+	cfg.MemoryFile = ""
+	b := New(cfg)
+	b.mem.Observe(2001, "被艾特的人", "我来了")
+	b.mem.Observe(1001, "说话的人", "我是说话的人")
+
+	sender := &Event{MessageType: "group", GroupID: 1, UserID: 1001, SelfID: 3467208422}
+	// 本条 @ 了 2001（机器人自己不在 atTargets 里时也算他人）
+	got := b.summaryOf(sender, "", []int64{3467208422, 2001})
+	if !strings.Contains(got, "被艾特的人") || strings.Contains(got, "说话的人") {
+		t.Errorf("总结目标应是被 @ 的人，得到: %s", got)
+	}
+	// otherAtTargets 应过滤掉自己
+	if others := otherAtTargets([]int64{3467208422, 2001}, 3467208422); len(others) != 1 || others[0] != 2001 {
+		t.Errorf("otherAtTargets 过滤错误: %v", others)
+	}
+}
