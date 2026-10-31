@@ -33,6 +33,18 @@ type UserMemory struct {
 	Notes     []string  `json:"notes,omitempty"`
 	// Verdict 上一次对这个人下的点评（每轮收尾那句"〔点评：…〕"），下次说话会带上。
 	Verdict string `json:"verdict,omitempty"`
+	// Affinity 好感度 -100~100：低=更刻薄，高=勉强认可。由确定性规则增减（不调模型）。
+	Affinity int `json:"affinity,omitempty"`
+
+	// 以下来自 OneBot get_stranger_info 的静态画像（一天拉一次，见 profile.go）
+	QQLevel   int       `json:"qq_level,omitempty"`
+	Sign      string    `json:"sign,omitempty"`
+	Sex       string    `json:"sex,omitempty"`
+	Age       int       `json:"age,omitempty"`
+	City      string    `json:"city,omitempty"`
+	Digits    int       `json:"digits,omitempty"`
+	Avatar    string    `json:"avatar,omitempty"`
+	ProfileAt time.Time `json:"profile_at,omitempty"`
 }
 
 // Memory 记忆库。
@@ -135,6 +147,12 @@ func (m *Memory) Describe(uid int64) string {
 		b.WriteString(strings.Join(u.Notes, "；"))
 		b.WriteString("。")
 	}
+	if line := u.ProfileLine(); line != "" {
+		b.WriteString("你对他的印象：")
+		b.WriteString(line)
+		b.WriteString("。")
+	}
+	fmt.Fprintf(&b, "你对他的好感度 %d/100（%s）。", u.Affinity, AffinityTier(u.Affinity))
 	if u.Verdict != "" {
 		b.WriteString("你上次对他的点评是：")
 		b.WriteString(u.Verdict)
@@ -219,4 +237,106 @@ func (m *Memory) Lookup(uid int64) (UserMemory, bool) {
 	cp := *u
 	cp.Notes = append([]string(nil), u.Notes...)
 	return cp, true
+}
+
+// 好感度增减的事件权重（确定性规则，不调模型——省钱且可解释）。
+const (
+	AffinityPerChat      = 1  // 正常聊一轮
+	AffinityPerAt        = 2  // 主动 @ 机器人
+	AffinityPerInterrupt = -5 // 被"闭嘴/退下"打断
+	AffinityPerCalm      = -8 // 被"@+冷静"强制冷静
+)
+
+// AffinityTier 把分数映射成档位标签（给 prompt 与后台看）。
+func AffinityTier(v int) string {
+	switch {
+	case v <= -30:
+		return "厌恶"
+	case v < 0:
+		return "看不顺眼"
+	case v < 20:
+		return "蝼蚁而已"
+	case v < 50:
+		return "勉强顺眼"
+	case v < 80:
+		return "还算识相"
+	default:
+		return "本王认了"
+	}
+}
+
+// AddAffinity 调整好感度（-100~100 夹紧），返回调整后的值。
+func (m *Memory) AddAffinity(uid int64, delta int) int {
+	if uid == 0 || delta == 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := m.users[uid]
+	if u == nil {
+		u = &UserMemory{UID: uid, FirstSeen: time.Now()}
+		m.users[uid] = u
+	}
+	u.Affinity += delta
+	if u.Affinity > 100 {
+		u.Affinity = 100
+	}
+	if u.Affinity < -100 {
+		u.Affinity = -100
+	}
+	m.dirty = true
+	return u.Affinity
+}
+
+// ProfileLine 把记忆里存的画像压成一行人话。
+func (u *UserMemory) ProfileLine() string {
+	p := Profile{
+		UID: u.UID, Nick: u.Nick, Sex: u.Sex, Age: u.Age, QQLevel: u.QQLevel,
+		Sign: u.Sign, City: u.City, Digits: u.Digits, Avatar: u.Avatar,
+	}
+	if p.Digits == 0 {
+		p.Digits = DigitsOf(u.UID)
+	}
+	return p.Line()
+}
+
+// SetProfile 把拉到的画像写进记忆（只覆盖非空字段，避免把已有信息抹掉）。
+func (m *Memory) SetProfile(p Profile) {
+	if p.UID == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := m.users[p.UID]
+	if u == nil {
+		u = &UserMemory{UID: p.UID, FirstSeen: time.Now()}
+		m.users[p.UID] = u
+	}
+	if p.Nick != "" {
+		u.Nick = p.Nick
+	}
+	if p.Remark != "" {
+		u.Nick = p.Remark
+	}
+	if p.QQLevel > 0 {
+		u.QQLevel = p.QQLevel
+	}
+	if p.Sign != "" {
+		u.Sign = p.Sign
+	}
+	if p.Sex != "" {
+		u.Sex = p.Sex
+	}
+	if p.Age > 0 {
+		u.Age = p.Age
+	}
+	if p.City != "" || p.Province != "" {
+		u.City = strings.TrimSpace(p.Province + p.City)
+	}
+	u.Digits = p.Digits
+	if p.Avatar != "" {
+		u.Avatar = p.Avatar
+	}
+	u.ProfileAt = time.Now()
+	m.dirty = true
 }

@@ -61,6 +61,18 @@ type Config struct {
 	ActivationKeywords []string `json:"activation_keywords"`
 	// ActivationWindowSeconds 激活期长度（秒），期间每说一句自动续期。
 	ActivationWindowSeconds int `json:"activation_window_seconds"`
+	// ProfileEnabled 是否拉群友画像（昵称/等级/签名/号位数）；默认 true。
+	ProfileEnabled bool `json:"profile_enabled"`
+
+	// StickerDir 表情包目录（本地图片，随机挑一张发）；空 = 不支持发表情。
+	StickerDir string `json:"sticker_dir"`
+	// StickerCommand 发表情包的关键词（默认「表情」「来个表情」）。
+	StickerCommand []string `json:"sticker_command"`
+	// PokeBack 被戳一戳时是否回戳（默认 true）。
+	PokeBack bool `json:"poke_back"`
+	// PokeReply 被戳时的回话（空 = 不说话，只回戳）。
+	PokeReply string `json:"poke_reply"`
+
 	// CalmKeywords 冷静词：**@机器人 + 命中冷静词** → 直接进入冷静期（默认 5 分钟）。
 	// 与 interrupt_keywords 的区别：中断词=短静默（默认 60s，谁都能触发）；
 	// 冷静词=长冷静（需 @，用于"别刷屏了"的强指令），且能把已静默期升级加长。
@@ -116,6 +128,10 @@ func Default() Config {
 		RatePerMinute:      6,
 		MaxReplyRunes:      1200,
 		TimeoutSeconds:     120,
+		ProfileEnabled:     true,
+		StickerCommand:     []string{"表情", "来个表情", "发表情"},
+		PokeBack:           true,
+		PokeReply:          "戳什么戳？手痒就跪下。",
 	}
 }
 
@@ -154,6 +170,9 @@ func (c *Config) normalize() {
 	c.OneBotAPI = strings.TrimRight(c.OneBotAPI, "/")
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
+	}
+	if c.StickerCommand == nil {
+		c.StickerCommand = []string{"表情", "来个表情", "发表情"}
 	}
 	if c.CalmSeconds <= 0 {
 		c.CalmSeconds = 300

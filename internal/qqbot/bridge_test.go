@@ -178,6 +178,7 @@ func TestHandleEventEndToEnd(t *testing.T) {
 	cfg.GatewayBase = gw.URL
 	cfg.OneBotAPI = ob.URL
 	cfg.Model = "cn:test-model"
+	cfg.ProfileEnabled = false
 	cfg.AllowedGroups = []int64{992511553}
 	cfg.RequireAtInGroup = true
 	b := New(cfg)

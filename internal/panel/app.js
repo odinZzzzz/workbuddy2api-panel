@@ -3588,6 +3588,7 @@ async function loadQQBot() {
   const mem = d.memory || [];
   $('qbMemBody').innerHTML = mem.length ? mem.map(m =>
     '<tr><td><code>' + esc(String(m.uid)) + '</code></td><td>' + esc(m.nick || '—') + '</td><td>' + m.count +
+    '</td><td>' + (m.affinity || 0) + ' <span class="note">' + esc(m.tier || '') + '</span>' +
     '</td><td class="note">' + esc(m.last_seen || '') + '</td><td class="note">' + esc((m.notes || []).join(' / ')) +
     '</td><td>' + esc(m.verdict || '—') + '</td>' +
     '<td><button class="xs" data-qbforget="' + m.uid + '">忘掉</button></td></tr>').join('')

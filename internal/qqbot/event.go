@@ -19,6 +19,8 @@ type Event struct {
 	GroupID     int64           `json:"group_id"`
 	UserID      int64           `json:"user_id"`
 	MessageID   int64           `json:"message_id"`
+	NoticeType  string          `json:"notice_type"`
+	TargetID    int64           `json:"target_id"`
 	RawMessage  string          `json:"raw_message"`
 	Message     json.RawMessage `json:"message"`
 	Sender      struct {
@@ -33,7 +35,37 @@ type segment struct {
 	Data struct {
 		Text string `json:"text"`
 		QQ   string `json:"qq"`
+		File string `json:"file"`
+		URL  string `json:"url"`
 	} `json:"data"`
+}
+
+// ParseImages 抽出消息里的图片/表情（file 或 url），返回可用的引用列表。
+//
+// 为什么返回"引用"而不是直接下载：下载要落盘、要限流、还要判断是不是超大图；
+// 先拿到引用，需要时再取（发送时 NapCat 也接受 url/file 直接引用）。
+func ParseImages(raw json.RawMessage) []string {
+	var out []string
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || !strings.HasPrefix(trimmed, "[") {
+		return out
+	}
+	var segs []segment
+	if json.Unmarshal(raw, &segs) != nil {
+		return out
+	}
+	for _, sg := range segs {
+		if sg.Type == "image" || sg.Type == "mface" {
+			ref := sg.Data.URL
+			if ref == "" {
+				ref = sg.Data.File
+			}
+			if ref != "" {
+				out = append(out, ref)
+			}
+		}
+	}
+	return out
 }
 
 // ParseText 从 message 字段抽出纯文本，并报告是否 @ 了指定机器人。

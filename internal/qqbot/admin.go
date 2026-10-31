@@ -134,6 +134,13 @@ func (b *Bridge) adminState(w http.ResponseWriter, r *http.Request) {
 		LastSeen  string   `json:"last_seen"`
 		Notes     []string `json:"notes"`
 		Verdict   string   `json:"verdict,omitempty"`
+		Affinity  int      `json:"affinity"`
+		Tier      string   `json:"tier"`
+		QQLevel   int      `json:"qq_level"`
+		Sign      string   `json:"sign,omitempty"`
+		Digits    int      `json:"digits"`
+		Avatar    string   `json:"avatar,omitempty"`
+		Profile   string   `json:"profile,omitempty"`
 	}
 	var mems []memView
 	if b.mem != nil {
@@ -145,6 +152,13 @@ func (b *Bridge) adminState(w http.ResponseWriter, r *http.Request) {
 				LastSeen:  u.LastSeen.Format("2006-01-02 15:04"),
 				Notes:     u.Notes,
 				Verdict:   u.Verdict,
+				Affinity:  u.Affinity,
+				Tier:      AffinityTier(u.Affinity),
+				QQLevel:   u.QQLevel,
+				Sign:      u.Sign,
+				Digits:    u.Digits,
+				Avatar:    u.Avatar,
+				Profile:   u.ProfileLine(),
 			})
 		}
 		b.mem.mu.Unlock()

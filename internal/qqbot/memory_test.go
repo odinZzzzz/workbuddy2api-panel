@@ -56,3 +56,52 @@ func TestSummaryOf(t *testing.T) {
 		t.Errorf("@ 目标应优先: %s", s)
 	}
 }
+
+// 好感度：增减、夹紧、档位标签、注入描述。
+func TestAffinityClampAndTier(t *testing.T) {
+	m, _ := OpenMemory("", 3)
+	if got := m.AddAffinity(1, AffinityPerChat); got != 1 {
+		t.Errorf("聊一轮应 +1，得到 %d", got)
+	}
+	if got := m.AddAffinity(1, AffinityPerCalm); got != -7 {
+		t.Errorf("冷静应 -8，得到 %d", got)
+	}
+	// 上夹紧
+	for i := 0; i < 200; i++ {
+		m.AddAffinity(1, 10)
+	}
+	if u, _ := m.Lookup(1); u.Affinity != 100 {
+		t.Errorf("上限应夹到 100，得到 %d", u.Affinity)
+	}
+	// 下夹紧
+	for i := 0; i < 200; i++ {
+		m.AddAffinity(1, -10)
+	}
+	if u, _ := m.Lookup(1); u.Affinity != -100 {
+		t.Errorf("下限应夹到 -100，得到 %d", u.Affinity)
+	}
+	// 档位
+	cases := map[int]string{-100: "厌恶", -10: "看不顺眼", 0: "蝼蚁而已", 30: "勉强顺眼", 60: "还算识相", 90: "本王认了"}
+	for v, want := range cases {
+		if got := AffinityTier(v); got != want {
+			t.Errorf("AffinityTier(%d)=%q want %q", v, got, want)
+		}
+	}
+}
+
+// 好感度要出现在 prompt 注入与总结里（否则"系统"只是自嗨）。
+func TestAffinityVisible(t *testing.T) {
+	cfg := Default()
+	cfg.MemoryFile = ""
+	b := New(cfg)
+	b.mem.Observe(1001, "怪我咯", "你好")
+	b.mem.AddAffinity(1001, 60)
+
+	if d := b.mem.Describe(1001); !strings.Contains(d, "好感度 60/100") || !strings.Contains(d, "还算识相") {
+		t.Errorf("描述里应带好感度与档位: %s", d)
+	}
+	ev := &Event{MessageType: "private", UserID: 1001, SelfID: 3467208422}
+	if s := b.summaryOf(ev, "", nil); !strings.Contains(s, "好感度 60/100") {
+		t.Errorf("总结里应带好感度: %s", s)
+	}
+}

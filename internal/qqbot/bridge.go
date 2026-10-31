@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -155,12 +156,29 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, `{"ok":true}`)
 
+	// 戳一戳：notice 事件里 notice_type=poke 且目标是自己。
+	if ev.PostType == "notice" && ev.NoticeType == "poke" && ev.TargetID != 0 && ev.TargetID == ev.SelfID {
+		b.handlePoke(&ev)
+		return
+	}
 	// 只处理消息事件；心跳/通知/请求一律忽略。
 	if ev.PostType != "message" {
 		return
 	}
 	text, atBot := ParseText(ev.Message, ev.RawMessage, ev.SelfID)
 	atTargets := ParseAtTargets(ev.Message, ev.RawMessage)
+	images := ParseImages(ev.Message)
+	if len(images) > 0 {
+		// 模型看不到图，但必须知道"有人发了图"，否则答非所问。
+		marker := "[图片×" + itoa(int64(len(images))) + "]"
+		if !strings.Contains(text, marker) {
+			if text == "" {
+				text = marker
+			} else {
+				text = text + " " + marker
+			}
+		}
+	}
 	// 到达即记一行：排查"为什么没回复"时，必须先能区分"事件没到"与"规则挡掉"。
 	log.Printf("[qqbot] event type=%s group=%d user=%d at=%v len=%d",
 		ev.MessageType, ev.GroupID, ev.UserID, atBot, len([]rune(text)))
@@ -205,9 +223,27 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 激活闸门：idle 只认激活词/@；active 期内正常回话并续期；silent 期内一律不理。
+	// 激活闸门只作用于群聊：私聊是"直接找上门"，再要求激活词等于把门焊死。
+	// 私聊仍受静默/冷静约束（用户自己叫停的场合），所以走 Decide 但忽略 idle 结果。
 	if b.gate != nil {
 		d := b.gate.Decide(b.cfg(), key, text, atBot)
+		// 私聊里 idle 视为放行（不需要激活词）；silent/calm/interrupted 仍然生效
+		if ev.MessageType == "private" && d.Reason == "idle" {
+			d.Allow = true
+		}
+		// 好感度按闸门结果增减（确定性规则，不调模型）
+		if b.mem != nil {
+			switch d.Reason {
+			case "interrupted":
+				b.mem.AddAffinity(ev.UserID, AffinityPerInterrupt)
+			case "calm":
+				b.mem.AddAffinity(ev.UserID, AffinityPerCalm)
+			case "activated":
+				if atBot {
+					b.mem.AddAffinity(ev.UserID, AffinityPerAt)
+				}
+			}
+		}
 		if !d.Allow {
 			b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 				User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)),
@@ -215,6 +251,14 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[qqbot] gate: %s 不放行（%s）user=%d", key, d.Reason, ev.UserID)
 			return
 		}
+	}
+
+	// 表情包：命中关键词就发一张（不消耗模型额度）
+	if b.matchesSticker(text) {
+		b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+			User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "sticker"})
+		go b.sendSticker(&ev)
+		return
 	}
 
 	// 内置指令：不消耗网关额度。
@@ -242,6 +286,8 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	if b.mem != nil {
 		b.mem.Observe(ev.UserID, name, text)
 	}
+	// 顺手刷新画像（昵称/等级/签名/号位数）：异步、一天一次，失败静默。
+	b.refreshProfileAsync(ev.UserID)
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
 	go b.reply(&ev, key, name, text)
@@ -365,10 +411,18 @@ func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
 	}
 	answer := strings.TrimSpace(out.Choices[0].Message.Content)
 
-	// 抽「〔点评：…〕」并入库（人设要求每轮收尾点评对方），正文保留点评行。
+	// 聊成一轮 → 好感度 +1（封顶 100）
 	if b.mem != nil {
-		if v := extractVerdict(answer); v != "" {
+		b.mem.AddAffinity(uid, AffinityPerChat)
+	}
+	// 抽「〔点评：…〕」存进记忆，并从**可见回复**里剥掉——点评是给系统记的内心活动，
+	// 每轮都甩给用户看会显得啰嗦（龙王嘴上刻薄，但没必要每句都附一行自我总结）。
+	if v := extractVerdict(answer); v != "" {
+		if b.mem != nil {
 			b.mem.SetVerdict(uid, v)
+		}
+		if stripped := stripVerdict(answer); strings.TrimSpace(stripped) != "" {
+			answer = strings.TrimSpace(stripped)
 		}
 	}
 	// 记入历史（只记成功的一轮）
@@ -565,6 +619,7 @@ func (b *Bridge) summaryOf(ev *Event, arg string, atTargets []int64) string {
 		sb.WriteString(strings.Join(u.Notes, "；"))
 		sb.WriteString("。")
 	}
+	fmt.Fprintf(&sb, "好感度 %d/100（%s）。", u.Affinity, AffinityTier(u.Affinity))
 	if u.Verdict != "" {
 		sb.WriteString("本王上次点评：")
 		sb.WriteString(u.Verdict)
@@ -587,4 +642,183 @@ func (b *Bridge) botGuardSnapshot() []BotGuardView {
 		return nil
 	}
 	return b.botGuard.Snapshot()
+}
+
+// stripVerdict 从可见回复里删掉「〔点评：…〕」整段（含包裹符号与多余空行）。
+//
+// 保留 extractVerdict 不动：点评仍然要生成、要入库，只是不再外发。
+func stripVerdict(s string) string {
+	openers := []string{"〔点评：", "〔点评:", "（点评：", "(点评:", "【点评】"}
+	for _, op := range openers {
+		for {
+			i := strings.Index(s, op)
+			if i < 0 {
+				break
+			}
+			// 找对应的收尾符：括号类找配对的，【点评】找行尾
+			var end int
+			switch op {
+			case "〔点评：", "〔点评:":
+				end = strings.Index(s[i:], "〕")
+			case "（点评：":
+				end = strings.Index(s[i:], "）")
+			case "(点评:":
+				end = strings.Index(s[i:], ")")
+			default:
+				end = strings.IndexByte(s[i:], '\n')
+			}
+			if end < 0 {
+				// 没有收尾符：从该位置截到行尾
+				if nl := strings.IndexByte(s[i:], '\n'); nl >= 0 {
+					end = nl
+				} else {
+					end = len(s) - i
+				}
+			} else {
+				end += len("〕") // 吃掉收尾符（长度 1~3 字节不等，下面按 rune 处理）
+			}
+			// 安全：按字节截断时回退到收尾符末尾
+			cut := i + end
+			if cut > len(s) {
+				cut = len(s)
+			}
+			s = s[:i] + s[cut:]
+		}
+	}
+	// 清理多余空行
+	for strings.Contains(s, "\n\n\n") {
+		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(s)
+}
+
+// handlePoke 被戳一戳：按配置回一句 + 回戳（不消耗模型额度）。
+func (b *Bridge) handlePoke(ev *Event) {
+	cfg := b.cfg()
+	b.state.note(RecentEvent{Time: time.Now(), Type: "poke", Group: ev.GroupID, User: ev.UserID, Action: "poked"})
+	log.Printf("[qqbot] 被戳: group=%d user=%d（回戳=%v）", ev.GroupID, ev.UserID, cfg.PokeBack)
+	if cfg.PokeBack {
+		if err := b.sendPoke(ev); err != nil {
+			log.Printf("[qqbot] poke back failed: %v", err)
+		}
+	}
+	if strings.TrimSpace(cfg.PokeReply) != "" {
+		if err := b.send(ev, cfg.PokeReply); err != nil {
+			log.Printf("[qqbot] poke reply failed: %v", err)
+		}
+	}
+}
+
+// sendPoke 调 OneBot 的戳一戳动作。
+func (b *Bridge) sendPoke(ev *Event) error {
+	action := "friend_poke"
+	payload := map[string]any{"user_id": ev.UserID}
+	if ev.MessageType == "group" || ev.GroupID != 0 {
+		action = "group_poke"
+		payload["group_id"] = ev.GroupID
+	}
+	return b.callAction(action, payload)
+}
+
+// sendImage 发一张图（本地文件路径或 URL，NapCat 都接受）。
+func (b *Bridge) sendImage(ev *Event, ref string) error {
+	action := "send_private_msg"
+	payload := map[string]any{"message": []map[string]any{
+		{"type": "image", "data": map[string]string{"file": ref}},
+	}}
+	if ev.MessageType == "group" {
+		action = "send_group_msg"
+		payload["group_id"] = ev.GroupID
+	} else {
+		payload["user_id"] = ev.UserID
+	}
+	return b.callAction(action, payload)
+}
+
+// callAction 通用 OneBot 动作调用（send/poke 共用）。
+func (b *Bridge) callAction(action string, payload map[string]any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	url := b.cfg().OneBotAPI + "/" + action
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tok := b.cfg().OneBotToken; tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var r struct {
+		RetCode int    `json:"retcode"`
+		Msg     string `json:"message"`
+	}
+	if json.Unmarshal(body, &r) == nil && r.RetCode != 0 {
+		return fmt.Errorf("onebot %s retcode=%d msg=%s", action, r.RetCode, r.Msg)
+	}
+	return nil
+}
+
+// pickSticker 从表情包目录随机挑一张（目录为空返回空串）。
+func (b *Bridge) pickSticker() string {
+	dir := strings.TrimSpace(b.cfg().StickerDir)
+	if dir == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var files []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+			files = append(files, filepath.Join(dir, e.Name()))
+		}
+	}
+	if len(files) == 0 {
+		return ""
+	}
+	return files[int(time.Now().UnixNano())%len(files)]
+}
+
+// matchesSticker 判断文本是否在要表情包。
+func (b *Bridge) matchesSticker(text string) bool {
+	t := strings.ToLower(strings.TrimSpace(text))
+	if t == "" {
+		return false
+	}
+	for _, kw := range b.cfg().StickerCommand {
+		kw = strings.ToLower(strings.TrimSpace(kw))
+		if kw != "" && strings.Contains(t, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// sendSticker 发一张随机表情包（目录空则用文字兜底）。
+func (b *Bridge) sendSticker(ev *Event) {
+	ref := b.pickSticker()
+	if ref == "" {
+		if err := b.send(ev, "本王没有表情包可发。"); err != nil {
+			log.Printf("[qqbot] sticker fallback failed: %v", err)
+		}
+		return
+	}
+	if err := b.sendImage(ev, ref); err != nil {
+		log.Printf("[qqbot] sticker send failed: %v", err)
+	}
 }
