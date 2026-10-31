@@ -3310,6 +3310,92 @@ function flowAnimStart(box, agg) {
     }
   }
 
+  // ── 星空图层：预渲染一次（静态星 + 银河带 + 亮星十字芒），逐帧只做位移贴图 ──
+  // 为什么预渲染：每帧画 1000 颗星太贵；星点位置本来就不需要变，只有"闪烁"需要动态，
+  // 所以静态层一次画好，动态闪烁星单独少量绘制。
+  const starLayer = document.createElement('canvas');
+  starLayer.width = Math.round(w * dpr);
+  starLayer.height = Math.round(h * dpr);
+  {
+    const sx = starLayer.getContext('2d');
+    sx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    sx.clearRect(0, 0, w, h);
+
+    // 银河带：沿一条斜带撒密星，并用极淡的雾把带子"糊"出来
+    const bandA = -0.32, bandB = h * 0.62;
+    const bandGlow = sx.createLinearGradient(0, bandB - h * 0.22, w, bandB + h * 0.22);
+    bandGlow.addColorStop(0, 'rgba(120,150,255,0)');
+    bandGlow.addColorStop(0.45, 'rgba(140,165,255,0.055)');
+    bandGlow.addColorStop(0.55, 'rgba(170,150,255,0.05)');
+    bandGlow.addColorStop(1, 'rgba(120,150,255,0)');
+    sx.fillStyle = bandGlow;
+    sx.save();
+    sx.translate(w / 2, bandB);
+    sx.rotate(bandA);
+    sx.fillRect(-w, -h * 0.16, w * 2, h * 0.32);
+    sx.restore();
+
+    const rnd = (a2, b2) => a2 + Math.random() * (b2 - a2);
+    // 银河带内的密集微星
+    for (let i = 0; i < 620; i++) {
+      const u = Math.random() * w * 1.4 - w * 0.2;
+      const v = (Math.random() + Math.random() - 1) * h * 0.16;   // 近似正态，向带中心聚
+      const x = u;
+      const y = bandB + Math.tan(bandA) * (u - w / 2) + v;
+      if (y < -4 || y > h + 4) continue;
+      const r = rnd(0.25, 0.85);
+      const al = rnd(0.10, 0.45);
+      sx.beginPath();
+      sx.arc(x, y, r, 0, Math.PI * 2);
+      sx.fillStyle = 'rgba(' + (200 + (Math.random() * 55 | 0)) + ',' + (210 + (Math.random() * 45 | 0)) + ',255,' + al.toFixed(3) + ')';
+      sx.fill();
+    }
+
+    // 全场散星（含少量偏暖/偏青的，避免一片死蓝）
+    for (let i = 0; i < 260; i++) {
+      const x = Math.random() * w, y = Math.random() * h;
+      const r = rnd(0.3, 1.15);
+      const al = rnd(0.12, 0.6);
+      const hue = Math.random();
+      const col = hue < 0.12 ? '255,225,190' : hue < 0.28 ? '190,235,255' : '225,235,255';
+      sx.beginPath();
+      sx.arc(x, y, r, 0, Math.PI * 2);
+      sx.fillStyle = 'rgba(' + col + ',' + al.toFixed(3) + ')';
+      sx.fill();
+    }
+
+    // 亮星 + 十字星芒（数量少、半径大，作为视觉锚点）
+    for (let i = 0; i < 7; i++) {
+      const x = rnd(w * 0.06, w * 0.94), y = rnd(h * 0.08, h * 0.92);
+      const r = rnd(1.0, 1.9);
+      const halo = sx.createRadialGradient(x, y, 0, x, y, r * 9);
+      halo.addColorStop(0, 'rgba(255,255,255,0.55)');
+      halo.addColorStop(0.25, 'rgba(190,215,255,0.20)');
+      halo.addColorStop(1, 'rgba(150,180,255,0)');
+      sx.fillStyle = halo;
+      sx.beginPath(); sx.arc(x, y, r * 9, 0, Math.PI * 2); sx.fill();
+
+      sx.beginPath(); sx.arc(x, y, r, 0, Math.PI * 2);
+      sx.fillStyle = 'rgba(255,255,255,0.95)'; sx.fill();
+
+      const gl = r * 7;
+      sx.strokeStyle = 'rgba(230,240,255,0.30)';
+      sx.lineWidth = 0.9;
+      sx.beginPath();
+      sx.moveTo(x - gl, y); sx.lineTo(x + gl, y);
+      sx.moveTo(x, y - gl); sx.lineTo(x, y + gl);
+      sx.stroke();
+    }
+  }
+
+  // 动态闪烁星（少量，逐帧改 alpha）
+  const twinkles = [];
+  for (let i = 0; i < 46; i++) {
+    twinkles.push({ x: Math.random() * w, y: Math.random() * h, r: 0.5 + Math.random() * 1.0,
+                    base: 0.25 + Math.random() * 0.45, sp: 0.6 + Math.random() * 2.2,
+                    ph: Math.random() * Math.PI * 2 });
+  }
+
   // ── 胶片颗粒：预生成一次噪点瓦片，逐帧随机偏移贴上去（比每帧生成噪点便宜得多）──
   const grainTiles = [];
   for (let k = 0; k < 3; k++) {
@@ -3331,7 +3417,8 @@ function flowAnimStart(box, agg) {
     raf: 0, cv, ctx, w, h, dpr, nodes, edges, parts: [], pulses: [], dust,
     hover: null, last: performance.now(), reduceMotion, box, S,
     sig: agg.accs.map(x => x[0]).join('|') + '//' + agg.mods.map(x => x[0]).join('|'),
-    byId, grainPatterns,
+    byId, grainPatterns, starLayer, twinkles,
+    meteor: { x: 0, y: 0, vx: 0, vy: 0, life: 0, next: 2.5 },
   };
 
   const onMove = (ev) => {
@@ -3362,25 +3449,54 @@ function flowAnimStart(box, agg) {
     st.last = now;
     const t = now / 1000;
 
-    // ── 背景：竖直渐变 + 极光团 + 视差浮尘 + 暗角 + 颗粒 ──
+    // ── 背景：深空渐变 → 星云 → 星场（视差）→ 闪烁星 → 浮尘 → 流星 → 暗角 ──
     const bgg = ctx.createLinearGradient(0, 0, w * 0.35, h);
     bgg.addColorStop(0, S.bgTop);
     bgg.addColorStop(1, S.bgBot);
     ctx.fillStyle = bgg;
     ctx.fillRect(0, 0, w, h);
 
+    // 星云：四团不同色相、不同漂移速度的软团 + 中心核光（营造纵深）
     ctx.globalCompositeOperation = 'lighter';
-    const blobs = [
-      { x: w * (0.32 + 0.05 * Math.sin(t * 0.11)), y: h * (0.42 + 0.06 * Math.cos(t * 0.09)), r: Math.max(w, h) * 0.55, c: S.aurora[0] },
-      { x: w * (0.72 + 0.06 * Math.cos(t * 0.08)), y: h * (0.58 + 0.05 * Math.sin(t * 0.12)), r: Math.max(w, h) * 0.48, c: S.aurora[1] },
-      { x: w * 0.5, y: h * (0.5 + 0.1 * Math.sin(t * 0.05)), r: Math.max(w, h) * 0.62, c: S.aurora[2] },
+    const nebulas = [
+      { x: w * (0.30 + 0.05 * Math.sin(t * 0.09)), y: h * (0.40 + 0.06 * Math.cos(t * 0.07)), r: Math.max(w, h) * 0.60, c: S.aurora[0] },
+      { x: w * (0.74 + 0.06 * Math.cos(t * 0.06)), y: h * (0.60 + 0.05 * Math.sin(t * 0.10)), r: Math.max(w, h) * 0.52, c: S.aurora[1] },
+      { x: w * (0.50 + 0.10 * Math.sin(t * 0.04)), y: h * (0.34 + 0.08 * Math.cos(t * 0.05)), r: Math.max(w, h) * 0.42, c: S.aurora[2] },
+      { x: w * (0.20 + 0.04 * Math.cos(t * 0.11)), y: h * (0.72 + 0.05 * Math.sin(t * 0.08)), r: Math.max(w, h) * 0.34, c: S.aurora[0] },
     ];
-    for (const b of blobs) {
+    for (const b of nebulas) {
       const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
       g.addColorStop(0, b.c);
+      g.addColorStop(0.55, b.c.replace(/[\d.]+\)$/, '0.05)'));
       g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
+    }
+    // 中心核光：极淡的一团，让画面有"深处有光"的方向感
+    const core = ctx.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.30);
+    core.addColorStop(0, 'rgba(180,205,255,0.05)');
+    core.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = core;
+    ctx.fillRect(0, 0, w, h);
+
+    // 星场：整层预渲染图做慢速视差（比逐颗画便宜一个数量级）
+    if (st.starLayer) {
+      const px = Math.sin(t * 0.035) * 7;
+      const py = Math.cos(t * 0.028) * 5;
+      ctx.globalAlpha = 0.92 + 0.08 * Math.sin(t * 0.6);   // 极缓慢的整体呼吸
+      ctx.drawImage(st.starLayer, px, py, w, h);
+      ctx.globalAlpha = 1;
+    }
+
+    // 闪烁星：数量少，逐帧改 alpha
+    if (!reduceMotion) {
+      for (const tw of st.twinkles) {
+        const al = tw.base * (0.45 + 0.55 * Math.abs(Math.sin(t * tw.sp + tw.ph)));
+        ctx.beginPath();
+        ctx.arc(tw.x, tw.y, tw.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(235,242,255,' + al.toFixed(3) + ')';
+        ctx.fill();
+      }
     }
 
     if (!reduceMotion) {
@@ -3388,16 +3504,49 @@ function flowAnimStart(box, agg) {
         d.x += d.vx * dt; d.y += d.vy * dt;
         if (d.y < -6) { d.y = h + 6; d.x = Math.random() * w; }
         if (d.x < -6) d.x = w + 6; else if (d.x > w + 6) d.x = -6;
-        const tw = 0.65 + 0.35 * Math.sin(t * 2 + d.tw);   // 闪烁
+        const tw = 0.65 + 0.35 * Math.sin(t * 2 + d.tw);
         ctx.beginPath();
         ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(' + S.part[0] + ',' + S.part[1] + ',' + S.part[2] + ',' + (d.a * tw).toFixed(3) + ')';
         ctx.fill();
       }
     }
+
+    // 流星：每隔几秒斜穿一次，带渐隐尾迹
+    if (!reduceMotion && st.meteor) {
+      const m = st.meteor;
+      m.next -= rawDt;
+      if (m.life <= 0 && m.next <= 0) {
+        m.x = w * (0.15 + Math.random() * 0.55);
+        m.y = h * (0.05 + Math.random() * 0.3);
+        const ang = 0.35 + Math.random() * 0.25;
+        const sp = 260 + Math.random() * 160;
+        m.vx = Math.cos(ang) * sp; m.vy = Math.sin(ang) * sp;
+        m.life = 1.0;
+        m.next = 4 + Math.random() * 6;
+      }
+      if (m.life > 0) {
+        m.x += m.vx * rawDt; m.y += m.vy * rawDt;
+        m.life -= rawDt * 1.5;
+        const tailX = m.x - m.vx * 0.10, tailY = m.y - m.vy * 0.10;
+        const lg = ctx.createLinearGradient(m.x, m.y, tailX, tailY);
+        lg.addColorStop(0, 'rgba(255,255,255,' + (0.75 * Math.max(0, m.life)).toFixed(3) + ')');
+        lg.addColorStop(1, 'rgba(160,200,255,0)');
+        ctx.strokeStyle = lg;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(m.x, m.y);
+        ctx.lineTo(tailX, tailY);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, 1.6, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.9 * Math.max(0, m.life)).toFixed(3) + ')';
+        ctx.fill();
+      }
+    }
     ctx.globalCompositeOperation = 'source-over';
 
-    // 暗角
+    // 暗角（压在星场之上，保证四角沉下去、视线集中到中间）
     const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.25, w / 2, h / 2, Math.max(w, h) * 0.78);
     vg.addColorStop(0, 'rgba(0,0,0,0)');
     vg.addColorStop(1, 'rgba(0,0,0,' + S.vignette + ')');
@@ -3422,6 +3571,23 @@ function flowAnimStart(box, agg) {
       n.y += (n.ay + bob - n.y) * Math.min(1, dt * 3.2);
       n.feed = Math.max(0, n.feed - pdt * 1.6);
     }
+
+    // 文字区遮罩：左右两列标签下面压一层暗色渐隐。
+    // 加了星云/星场后背景变亮，白字对比从 6.19 掉到 4.04（probe_region 实测），
+    // 这层把两列重新压暗，同时让画面边缘更"深空"。
+    const scrimW = w * 0.30;
+    const scrimL = ctx.createLinearGradient(0, 0, scrimW, 0);
+    scrimL.addColorStop(0, 'rgba(4,6,14,0.62)');
+    scrimL.addColorStop(0.62, 'rgba(4,6,14,0.30)');
+    scrimL.addColorStop(1, 'rgba(4,6,14,0)');
+    ctx.fillStyle = scrimL;
+    ctx.fillRect(0, 0, scrimW, h);
+    const scrimR = ctx.createLinearGradient(w - scrimW, 0, w, 0);
+    scrimR.addColorStop(0, 'rgba(4,6,14,0)');
+    scrimR.addColorStop(0.38, 'rgba(4,6,14,0.30)');
+    scrimR.addColorStop(1, 'rgba(4,6,14,0.62)');
+    ctx.fillStyle = scrimR;
+    ctx.fillRect(w - scrimW, 0, scrimW, h);
 
     // ── 连线：沿路径渐变 + 宽度随权重 + 电流虚线 ──
     for (const e of st.edges) {
