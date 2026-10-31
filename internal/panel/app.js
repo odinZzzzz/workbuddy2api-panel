@@ -3062,17 +3062,21 @@ if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
    这是唯一能反映"此刻正在烧多少积分"的数据源（usage 只按小时聚合）。 */
 
 
-// ── 积分流向：悬浮球 + 连线 + 流动粒子 ─────────────────────────────────────
+// ── 积分流向：悬浮球 + 粒子流 + 汇聚吸收 ─────────────────────────────────────
 //
-// 想表达的是"钱正在往哪流"：左边一串球是账号，右边一串球是模型，
-// 连线粗细 = 该组合近 5 分钟烧掉的积分，线上跑的琥珀色粒子 = 积分正在流出。
-// 纯 canvas 手写，不引图表库（echarts 按需加载，这里连它都不用）。
+// 四个效果一次画全：
+//   悬浮：球按弹簧回到锚点，再叠一层极慢正弦漂移，整场轻微呼吸；
+//   粒子：沿贝塞尔曲线从账号飞向模型，带解析式拖尾（不靠半透明擦除，透明背景才干净）；
+//   流动：吐粒子速率 ∝ 该组合的积分消耗，越快越密；最近一分钟活跃的粒子是琥珀色；
+//   汇聚：粒子在 t>0.82 加速并缩向球心，抵达时触发一圈扩散光环（吸收脉冲），
+//         目标球同时被"喂亮"一下——这就是"钱被模型吃掉"的视觉。
+// 纯 canvas，单 RAF；离开视图或页面隐藏即停。
 const FLOW_WINDOW_MS = 5 * 60 * 1000;
 const FLOW_MAX_ACCS = 6;
 const FLOW_MAX_MODELS = 5;
-const FLOW_MAX_PARTICLES = 220;
+const FLOW_MAX_PARTICLES = 420;
 
-let flowAnim = null; // { raf, cv, ctx, w, h, dpr, nodes, edges, parts, last }
+let flowAnim = null; // { raf, cv, ctx, w, h, dpr, nodes, edges, parts, pulses, dust, hover, last }
 
 function flowModelLabel(m) {
   return String(m || '未知').replace(/^(cn|global):/, '');
@@ -3092,7 +3096,7 @@ function flowAggregate(ov, logs) {
     accMeta.set(s.uid, { name: s.nickname || (s.uid || '').slice(0, 8), inFlight: Number(s.in_flight) || 0 });
   }
 
-  const cell = new Map(); // `${acc}\u0000${model}` → {credit, reqs, last}
+  const cell = new Map();
   const accSum = new Map();
   const modSum = new Map();
   let total = 0;
@@ -3117,9 +3121,12 @@ function flowAggregate(ov, logs) {
 
 function flowStop() {
   if (flowAnim && flowAnim.raf) cancelAnimationFrame(flowAnim.raf);
+  if (flowAnim && flowAnim.onMove && flowAnim.cv) {
+    flowAnim.cv.removeEventListener('mousemove', flowAnim.onMove);
+    flowAnim.cv.removeEventListener('mouseleave', flowAnim.onLeave);
+  }
   flowAnim = null;
 }
-
 
 function renderFlowMatrix(ov, logs) {
   const box = $('flowMatrix');
@@ -3133,105 +3140,57 @@ function renderFlowMatrix(ov, logs) {
 
   if (!agg.win.length || !agg.accs.length || !agg.mods.length) {
     flowStop();
-    box.innerHTML = '<div class="fm-empty">近 5 分钟没有请求，球还没浮起来——等有流量了这里会亮。</div>';
+    box.innerHTML = '<div class="fm-empty">近 5 分钟没有请求，粒子还没起飞——等有流量了这里会亮。</div>';
     return;
   }
-
-  // 工作流式节点图：echarts 现成的 graph（节点）+ lines（连线带 effect 粒子流）
-  renderFlowGraph(box, agg).catch(() => flowCanvasFallback(box, agg));
+  // 关键：仪表盘每 5 秒刷新一次。若每次都重建状态，粒子会被反复清空，
+  // 永远走不到 t=1 —— 也就看不到"汇聚吸收"。拓扑不变时只更新数值。
+  if (flowAnim && flowAnim.box === box && flowAnim.sig === flowSignature(agg)) {
+    flowAnimApplyData(agg);
+    return;
+  }
+  flowAnimStart(box, agg);
 }
 
+function flowSignature(agg) {
+  return agg.accs.map(x => x[0]).join('|') + '//' + agg.mods.map(x => x[0]).join('|');
+}
 
-// ── 工作流式节点图（echarts graph + lines）──────────────────────────────────
-//
-// 用现成图表能力，不手搓动画：
-//   - graph 系列画节点（圆角矩形，账号蓝/模型绿，标签两行：名字 + 消耗）
-//   - lines 系列的 effect 自带"粒子沿线流动"，正好表达积分持续流出
-// 布局用隐藏的笛卡尔坐标系：账号一列在左、模型一列在右，纵向按消耗排开。
-let flowChart = null;
-
-async function renderFlowGraph(box, agg) {
-  const ok = await ensureECharts();
-  if (!ok) throw new Error('echarts unavailable');
-  const echarts = window.echarts;
-  // echarts 按容器尺寸自适应：容器没有高度就会渲染成 0 高（踩过一次，canvas 高度为 0）
-  const boxH = Math.max(260, Math.min(380, Math.round((box.clientWidth || 640) * 0.45)));
-  if (!box.style.height) box.style.height = boxH + 'px';
-  if (!flowChart || flowChart.getDom() !== box) {
-    box.innerHTML = '';
-    if (flowChart) { try { flowChart.dispose(); } catch (e) {} }
-    flowChart = echarts.init(box, null, { renderer: 'canvas' });
-    window.addEventListener('resize', () => { try { flowChart && flowChart.resize(); } catch (e) {} });
-  }
-
+// flowAnimApplyData 只刷新数值/边权重，保留在飞的粒子与脉冲。
+function flowAnimApplyData(agg) {
+  const st = flowAnim;
+  if (!st) return;
   const maxAcc = Math.max(...agg.accs.map(x => x[1]), 0.0001);
   const maxMod = Math.max(...agg.mods.map(x => x[1]), 0.0001);
-  const pos = new Map(); // key → [x, y]
-  const nodes = [];
-  const yFor = (n, i) => 10 - ((i + 1) * 10) / (n + 1);
-
-  agg.accs.forEach(([uid, sum], i) => {
-    const meta = agg.accMeta.get(uid) || {};
-    const running = (meta.inFlight || 0) > 0;
-    const name = meta.name || String(uid).slice(0, 6);
-    const x = 2, y = yFor(agg.accs.length, i);
-    pos.set('acc:' + uid, [x, y]);
-    nodes.push({
-      value: [x, y],
-      symbol: 'roundRect', symbolSize: [Math.max(96, name.length * 13 + 26), 46],
-      itemStyle: { color: running ? 'rgba(70,105,235,.95)' : 'rgba(70,105,235,.55)', borderColor: running ? '#3ddc97' : 'transparent', borderWidth: running ? 1.6 : 0, borderRadius: 6 },
-      label: { show: true, position: 'inside', formatter: name + '\n' + sum.toFixed(2) + ' 分', color: '#e8ebf2', fontSize: 11, lineHeight: 14, overflow: 'break' },
-    });
-  });
-  agg.mods.forEach(([mod, sum], i) => {
-    const x = 8, y = yFor(agg.mods.length, i);
-    pos.set('model:' + mod, [x, y]);
-    nodes.push({
-      value: [x, y],
-      symbol: 'roundRect', symbolSize: [Math.max(96, mod.length * 8 + 26), 46],
-      itemStyle: { color: 'rgba(40,170,140,.78)', borderRadius: 6 },
-      label: { show: true, position: 'inside', formatter: mod + '\n' + sum.toFixed(2) + ' 分', color: '#e8ebf2', fontSize: 11, lineHeight: 14, overflow: 'break' },
-    });
-  });
-
-  const maxEdge = Math.max(...[...agg.cell.values()].map(v => v.credit), 0.0001);
+  for (const [uid, sum] of agg.accs) {
+    const n = st.byId.get('acc:' + uid);
+    if (n) { n.value = sum; n.r = 10 + 20 * Math.sqrt(sum / maxAcc); }
+  }
+  for (const [mod, sum] of agg.mods) {
+    const n = st.byId.get('model:' + mod);
+    if (n) { n.value = sum; n.r = 9 + 17 * Math.sqrt(sum / maxMod); }
+  }
   const edges = [];
-  const flows = [];
   for (const [k, v] of agg.cell.entries()) {
     const [acc, mod] = k.split('\u0000');
-    const a = pos.get('acc:' + acc), b = pos.get('model:' + mod);
-    if (!a || !b || v.credit <= 0) continue;
-    const w = v.credit / maxEdge;
-    edges.push({ coords: [a, b], lineStyle: { width: 0.8 + 2.4 * w, opacity: 0.25 + 0.45 * w, curveness: 0.12 } });
-    const hot = Date.now() - v.last < 60e3;
-    flows.push({
-      coords: [a, b],
-      lineStyle: { width: 0, opacity: 0, curveness: 0.12 },
-      effect: { show: true, period: 3 + 5 * (1 - w), trailLength: 0.35, symbol: 'circle',
-        symbolSize: hot ? 5 : 3.5, color: hot ? '#ffba5e' : '#8cc8ff' },
-    });
+    const an = st.byId.get('acc:' + acc);
+    const mn = st.byId.get('model:' + mod);
+    if (!an || !mn || v.credit <= 0) continue;
+    edges.push({ a: an, m: mn, credit: v.credit, reqs: v.reqs, last: v.last, acc: 0 });
   }
-
-  const axisCommon = {
-    type: 'value', min: 0, max: 10, show: false,
-    axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false },
-  };
-  flowChart.setOption({
-    animationDuration: 500,
-    grid: { left: 8, right: 8, top: 10, bottom: 10, containLabel: false },
-    xAxis: axisCommon,
-    yAxis: axisCommon,
-    series: [
-      { type: 'lines', coordinateSystem: 'cartesian2d', polyline: false, zlevel: 1, data: flows, silent: true },
-      { type: 'lines', coordinateSystem: 'cartesian2d', polyline: false, zlevel: 2, data: edges, silent: true },
-      { type: 'scatter', coordinateSystem: 'cartesian2d', zlevel: 3, data: nodes, silent: true },
-    ],
-  }, true);
-  try { flowChart.resize(); } catch (e) {}
+  const maxEdge = Math.max(...edges.map(e => e.credit), 0.0001);
+  for (const e of edges) e.w = e.credit / maxEdge;
+  st.edges = edges;
+  // 在飞的粒子还引用旧 edge 对象，把目标换成同 id 的新边，避免它们飞到已废弃的引用上
+  for (const pt of st.parts) {
+    const ne = edges.find(x => x.a.id === pt.e.a.id && x.m.id === pt.e.m.id);
+    if (ne) pt.e = ne;
+  }
+  if (st.start) st.start(); // 停摆过（切后台/隐藏）就借这次刷新把循环拉起来
 }
 
-function flowCanvasFallback(box, agg) {
-  flowStop(); // 同一 canvas 上绝不允许两条 RAF 并行（会变双倍速）
+function flowAnimStart(box, agg) {
+  flowStop();
   let cv = box.querySelector('canvas');
   if (!cv) {
     box.innerHTML = '';
@@ -3239,45 +3198,50 @@ function flowCanvasFallback(box, agg) {
     cv.className = 'flow-canvas';
     box.appendChild(cv);
   }
+
   const ctx = cv.getContext('2d');
   const dpr = Math.min(2, window.devicePixelRatio || 1);
-  const w = cv.clientWidth || 600;
-  const h = Math.max(240, Math.min(360, Math.round(w * 0.42)));
+  const w = cv.clientWidth || 640;
+  const h = Math.max(300, Math.min(420, Math.round(w * 0.5)));
   cv.width = Math.round(w * dpr);
   cv.height = Math.round(h * dpr);
   cv.style.height = h + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // 注意：Windows 上「关闭动画效果」会让 prefers-reduced-motion 命中，而本机就是这种环境。
+  // 所以 reduce 不等于"完全静止"——降成 lite 模式：粒子照流（密度 1/3、速度减半），
+  // 去掉浮尘和漂浮漂移，避免整块图变成一张静态图。
+  const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
-  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  // 节点：账号在左、模型在右，按消耗占比定球径
+  // ── 节点 ──
   const maxAcc = Math.max(...agg.accs.map(x => x[1]), 0.0001);
   const maxMod = Math.max(...agg.mods.map(x => x[1]), 0.0001);
   const nodes = [];
-  const ySlots = (n, i) => (h * (i + 1)) / (n + 1);
+  const slot = (n, i) => (h * (i + 1)) / (n + 1);
   agg.accs.forEach(([uid, sum], i) => {
     const meta = agg.accMeta.get(uid) || {};
+    const name = meta.name || String(uid).slice(0, 8);
     nodes.push({
-      kind: 'acc', id: uid, label: meta.name || String(uid).slice(0, 6),
-      value: sum, running: (meta.inFlight || 0) > 0,
-      x: w * 0.22, y: ySlots(agg.accs.length, i),
-      tx: w * 0.22, ty: ySlots(agg.accs.length, i),
-      r: 9 + 17 * Math.sqrt(sum / maxAcc),
+      kind: 'acc', id: uid, label: name, value: sum,
+      running: (meta.inFlight || 0) > 0,
+      ax: w * 0.23, ay: slot(agg.accs.length, i),
+      x: w * 0.23, y: slot(agg.accs.length, i),
+      r: 10 + 20 * Math.sqrt(sum / maxAcc),
       phase: Math.random() * Math.PI * 2,
+      feed: 0, // 被"喂亮"的强度
     });
   });
   agg.mods.forEach(([mod, sum], i) => {
     nodes.push({
-      kind: 'model', id: mod, label: mod,
-      value: sum, running: false,
-      x: w * 0.78, y: ySlots(agg.mods.length, i),
-      tx: w * 0.78, ty: ySlots(agg.mods.length, i),
-      r: 8 + 15 * Math.sqrt(sum / maxMod),
+      kind: 'model', id: mod, label: mod, value: sum, running: false,
+      ax: w * 0.77, ay: slot(agg.mods.length, i),
+      x: w * 0.77, y: slot(agg.mods.length, i),
+      r: 9 + 17 * Math.sqrt(sum / maxMod),
       phase: Math.random() * Math.PI * 2,
+      feed: 0,
     });
   });
-
   const byId = new Map(nodes.map(n => [n.kind + ':' + n.id, n]));
+
   const edges = [];
   for (const [k, v] of agg.cell.entries()) {
     const [acc, mod] = k.split('\u0000');
@@ -3287,114 +3251,240 @@ function flowCanvasFallback(box, agg) {
     edges.push({ a, m, credit: v.credit, reqs: v.reqs, last: v.last });
   }
   const maxEdge = Math.max(...edges.map(e => e.credit), 0.0001);
+  for (const e of edges) e.w = e.credit / maxEdge;
 
-  flowAnim = { raf: 0, cv, ctx, w, h, dpr, nodes, edges, parts: [], last: performance.now(), maxEdge, reduceMotion };
+  // ── 背景浮尘（景深）──
+  const dust = [];
+  for (let i = 0; i < 46; i++) {
+    dust.push({ x: Math.random() * w, y: Math.random() * h, r: 0.6 + Math.random() * 1.1,
+      vx: (Math.random() - 0.5) * 6, vy: -3 - Math.random() * 6, a: 0.06 + Math.random() * 0.12 });
+  }
+
+  flowAnim = {
+    raf: 0, cv, ctx, w, h, dpr, nodes, edges, parts: [], pulses: [], dust,
+    hover: null, last: performance.now(), reduceMotion, box,
+    sig: agg.accs.map(x => x[0]).join('|') + '//' + agg.mods.map(x => x[0]).join('|'),
+    byId,
+  };
+
+  // 悬停：球放大 + 高亮该账号的所有出边
+  const onMove = (ev) => {
+    const st = flowAnim; if (!st) return;
+    const rect = cv.getBoundingClientRect();
+    const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+    let hit = null;
+    for (const n of st.nodes) {
+      if ((mx - n.x) ** 2 + (my - n.y) ** 2 <= (n.r + 10) ** 2) { hit = n; break; }
+    }
+    st.hover = hit;
+  };
+  const onLeave = () => { if (flowAnim) flowAnim.hover = null; };
+  cv.addEventListener('mousemove', onMove);
+  cv.addEventListener('mouseleave', onLeave);
+  flowAnim.onMove = onMove; flowAnim.onLeave = onLeave;
 
   const draw = (now) => {
-    if (!flowAnim || flowAnim.cv !== cv) return;
-    // 离开仪表盘就停：省 CPU，也避免后台标签页空转
-    const view = document.querySelector('#view-dashboard');
-    if (!view || view.hidden || document.hidden) { flowAnim.raf = 0; return; }
     const st = flowAnim;
-    const dt = Math.min(64, now - st.last) / 1000;
+    if (!st || st.cv !== cv) return;
+    const view = document.querySelector('#view-dashboard');
+    if (!view || view.hidden || document.hidden) { st.raf = 0; return; }
+
+    // rawDt 是真实经过时间（后台/低帧率时可能是 1 秒），物理用钳制后的 dt 防止跳变，
+    // 但**吐粒子必须用 rawDt**——否则 1fps 环境下每秒只按 0.05 秒算，密度会少 20 倍。
+    const rawDt = Math.min(1.5, Math.max(0.001, (now - st.last) / 1000));
+    const dt = Math.min(0.05, rawDt);   // 只给"平滑/漂移"用
+    const pdt = Math.min(0.5, rawDt);   // 粒子推进：按真实时间，否则低帧率下是慢动作
     st.last = now;
     const t = now / 1000;
 
     ctx.clearRect(0, 0, w, h);
 
-    // 背景微光
-    const bg = ctx.createRadialGradient(w / 2, h / 2, 10, w / 2, h / 2, Math.max(w, h) * 0.7);
-    bg.addColorStop(0, 'rgba(91,124,250,0.07)');
+    // 背景：中心微光 + 浮尘
+    const bg = ctx.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, Math.max(w, h) * 0.72);
+    bg.addColorStop(0, 'rgba(91,124,250,0.10)');
+    bg.addColorStop(0.55, 'rgba(60,90,200,0.04)');
     bg.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
 
-    // 节点漂移（很轻，像悬浮）
-    for (const n of st.nodes) {
-      if (!st.reduceMotion) {
-        n.x += (n.tx - n.x) * Math.min(1, dt * 3);
-        n.y += (n.ty - n.y) * Math.min(1, dt * 3) + Math.sin(t * 0.9 + n.phase) * 0.25;
-      } else {
-        n.x = n.tx; n.y = n.ty;
+    ctx.globalCompositeOperation = 'lighter';
+    for (const d of (reduceMotion ? [] : st.dust)) {
+      if (!reduceMotion) {
+        d.x += d.vx * dt; d.y += d.vy * dt;
+        if (d.y < -4) { d.y = h + 4; d.x = Math.random() * w; }
+        if (d.x < -4) d.x = w + 4; else if (d.x > w + 4) d.x = -4;
       }
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(150,180,255,' + d.a.toFixed(3) + ')';
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    // 悬浮：弹簧回锚点 + 慢漂移
+    for (const n of st.nodes) {
+      // lite 模式下也留一点悬浮（幅度 1.4px），否则"悬浮"在关闭动画的系统上等于没有
+      const bob = Math.sin(t * 0.8 + n.phase) * (reduceMotion ? 1.4 : 3.2);
+      n.x += (n.ax - n.x) * Math.min(1, dt * 3.2);
+      n.y += (n.ay + bob - n.y) * Math.min(1, dt * 3.2);
+      n.feed = Math.max(0, n.feed - pdt * 1.6);
     }
 
-    // 连线
+    // 连线（底纹）
     for (const e of st.edges) {
-      const wgt = e.credit / st.maxEdge;
-      const mx = (e.a.x + e.m.x) / 2;
+      const hot = st.hover && (st.hover === e.a || st.hover === e.m);
+      const alpha = (0.10 + 0.26 * e.w) * (hot ? 2.2 : 1);
       ctx.beginPath();
       ctx.moveTo(e.a.x, e.a.y);
+      const mx = (e.a.x + e.m.x) / 2;
       ctx.bezierCurveTo(mx, e.a.y, mx, e.m.y, e.m.x, e.m.y);
-      ctx.strokeStyle = 'rgba(120,150,255,' + (0.10 + 0.30 * wgt).toFixed(3) + ')';
-      ctx.lineWidth = 0.7 + 2.2 * wgt;
+      ctx.strokeStyle = 'rgba(120,150,255,' + Math.min(0.85, alpha).toFixed(3) + ')';
+      ctx.lineWidth = 0.7 + 2.4 * e.w;
       ctx.stroke();
     }
 
-    // 粒子：按边的权重持续吐，沿贝塞尔飞向模型
-    if (!st.reduceMotion) {
+    // 吐粒子：速率 ∝ 权重；最近一分钟活跃 → 琥珀色
+    {
+      const cap = reduceMotion ? 160 : FLOW_MAX_PARTICLES;
+      const rate = reduceMotion ? 16 : 34; // 每秒每条满权重边吐多少粒子
       for (const e of st.edges) {
-        const wgt = e.credit / st.maxEdge;
-        if (Math.random() < wgt * dt * 9 && st.parts.length < FLOW_MAX_PARTICLES) {
-          st.parts.push({ e, p: 0, speed: 0.35 + Math.random() * 0.35, hot: now - e.last < 60e3 });
+        // 累加器：把小数份额存到边上，低帧率也不会漏发
+        e.acc = (e.acc || 0) + e.w * rate * rawDt;
+        let n = Math.floor(e.acc);
+        e.acc -= n;
+        for (let i = 0; i < n && st.parts.length < cap; i++) {
+          st.parts.push({
+            e, t: 0, sp: (0.22 + Math.random() * 0.20 + e.w * 0.18) * (reduceMotion ? 0.6 : 1),
+            size: 1.4 + Math.random() * 1.6 + e.w * 1.2,
+            hot: now - e.last < 60e3, wob: (Math.random() - 0.5) * 0.5,
+          });
         }
       }
     }
+
+    // 粒子推进 + 汇聚吸收
     const alive = [];
     for (const pt of st.parts) {
-      pt.p += pt.speed * dt;
-      if (pt.p >= 1) continue;
+      // t>0.82 加速并缩向球心（汇聚感）
+      const rush = pt.t > 0.82 ? 1 + (pt.t - 0.82) * 6 : 1;
+      pt.t += pt.sp * rush * pdt;
+      if (pt.t >= 1) {
+        // 抵达 → 吸收脉冲 + 目标球被喂亮
+        pt.e.m.feed = Math.min(1, pt.e.m.feed + 0.5);
+        st.pulses.push({ x: pt.e.m.x, y: pt.e.m.y, r: pt.e.m.r, a: 0.75, hot: pt.hot });
+        continue;
+      }
       alive.push(pt);
       const e = pt.e;
       const mx = (e.a.x + e.m.x) / 2;
-      const x = bez(e.a.x, mx, mx, e.m.x, pt.p);
-      const y = bez(e.a.y, e.a.y, e.m.y, e.m.y, pt.p);
-      const alpha = pt.hot ? 0.95 : 0.55;
+      const p = pt.t;
+      const x = bez(e.a.x, mx, mx, e.m.x, p);
+      const y = bez(e.a.y, e.a.y, e.m.y, e.m.y, p) + Math.sin(p * Math.PI) * pt.wob * 12;
+      const shrink = p > 0.82 ? 1 - (p - 0.82) / 0.18 : 1;
+
+      // 拖尾：沿路径回看 3 个采样点
+      ctx.globalCompositeOperation = 'lighter';
+      for (let k = 3; k >= 1; k--) {
+        const tp = Math.max(0, p - k * 0.018);
+        const tx = bez(e.a.x, mx, mx, e.m.x, tp);
+        const ty = bez(e.a.y, e.a.y, e.m.y, e.m.y, tp) + Math.sin(tp * Math.PI) * pt.wob * 12;
+        ctx.beginPath();
+        ctx.arc(tx, ty, pt.size * shrink * (1 - k * 0.22), 0, Math.PI * 2);
+        ctx.fillStyle = pt.hot
+          ? 'rgba(255,186,94,' + (0.30 - k * 0.08).toFixed(3) + ')'
+          : 'rgba(140,200,255,' + (0.26 - k * 0.07).toFixed(3) + ')';
+        ctx.fill();
+      }
+      // 粒子本体
       ctx.beginPath();
-      ctx.arc(x, y, pt.hot ? 2.4 : 1.8, 0, Math.PI * 2);
-      ctx.fillStyle = pt.hot ? 'rgba(255,186,94,' + alpha + ')' : 'rgba(140,200,255,' + alpha + ')';
+      ctx.arc(x, y, pt.size * shrink, 0, Math.PI * 2);
+      ctx.fillStyle = pt.hot ? 'rgba(255,205,130,0.98)' : 'rgba(160,215,255,0.9)';
       ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
     }
     st.parts = alive;
 
-    // 球
+    // 吸收脉冲：扩散光环
+    const pulses = [];
+    for (const pu of st.pulses) {
+      pu.r += Math.min(pdt, 0.1) * 46;
+      pu.a -= Math.min(pdt, 0.1) * 1.9; // 用 min(pdt,0.1)：低帧率下也让脉冲活够几帧，肉眼可见
+      if (pu.a <= 0) continue;
+      pulses.push(pu);
+      ctx.beginPath();
+      ctx.arc(pu.x, pu.y, pu.r, 0, Math.PI * 2);
+      ctx.strokeStyle = pu.hot
+        ? 'rgba(255,186,94,' + pu.a.toFixed(3) + ')'
+        : 'rgba(140,200,255,' + pu.a.toFixed(3) + ')';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+    st.pulses = pulses;
+
+    // 球（悬浮 + 呼吸 + 被喂亮 + 悬停放大）
     for (const n of st.nodes) {
       const isAcc = n.kind === 'acc';
-      const g = ctx.createRadialGradient(n.x - n.r * 0.35, n.y - n.r * 0.35, n.r * 0.15, n.x, n.y, n.r);
+      const hovered = st.hover === n;
+      const r = n.r * (hovered ? 1.14 : 1) * (1 + n.feed * 0.10);
+      const glowR = r * (2.6 + n.feed * 1.4) * (n.running ? 1.12 : 1);
+
+      const halo = ctx.createRadialGradient(n.x, n.y, r * 0.2, n.x, n.y, glowR);
+      halo.addColorStop(0, isAcc ? 'rgba(120,155,255,0.34)' : 'rgba(80,230,180,0.30)');
+      halo.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
+      ctx.fill();
+
+      const g = ctx.createRadialGradient(n.x - r * 0.35, n.y - r * 0.4, r * 0.12, n.x, n.y, r);
       if (isAcc) {
-        g.addColorStop(0, 'rgba(150,180,255,0.95)');
-        g.addColorStop(1, 'rgba(70,105,235,0.55)');
+        g.addColorStop(0, 'rgba(190,210,255,0.98)');
+        g.addColorStop(0.6, 'rgba(95,130,245,0.9)');
+        g.addColorStop(1, 'rgba(50,80,200,0.55)');
       } else {
-        g.addColorStop(0, 'rgba(160,255,225,0.9)');
-        g.addColorStop(1, 'rgba(40,170,140,0.5)');
+        g.addColorStop(0, 'rgba(190,255,235,0.98)');
+        g.addColorStop(0.6, 'rgba(60,210,170,0.9)');
+        g.addColorStop(1, 'rgba(20,140,115,0.55)');
       }
       ctx.beginPath();
-      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
       ctx.fillStyle = g;
       ctx.fill();
+
+      // 运行中：外圈脉冲环
       if (n.running) {
+        const pr = r + 4 + Math.sin(t * 3 + n.phase) * 2.4;
         ctx.beginPath();
-        ctx.arc(n.x, n.y, n.r + 3 + Math.sin(t * 3) * 1.6, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(61,220,151,' + (0.35 + 0.35 * Math.abs(Math.sin(t * 2))).toFixed(2) + ')';
-        ctx.lineWidth = 1.4;
+        ctx.arc(n.x, n.y, pr, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(61,220,151,' + (0.30 + 0.40 * Math.abs(Math.sin(t * 2.2))).toFixed(2) + ')';
+        ctx.lineWidth = 1.5;
         ctx.stroke();
       }
-      // 标签 + 数值
-      ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+
+      // 标签
+      ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
       ctx.textAlign = isAcc ? 'right' : 'left';
       ctx.textBaseline = 'middle';
-      const lx = isAcc ? n.x - n.r - 7 : n.x + n.r + 7;
-      ctx.fillStyle = 'rgba(200,210,235,0.92)';
-      ctx.fillText(n.label.length > 8 ? n.label.slice(0, 8) + '…' : n.label, lx, n.y - 6);
-      ctx.fillStyle = 'rgba(150,165,195,0.75)';
-      ctx.font = '10px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillText(n.value.toFixed(2) + ' 分', lx, n.y + 7);
+      const lx = isAcc ? n.x - r - 9 : n.x + r + 9;
+      ctx.fillStyle = hovered ? 'rgba(235,242,255,0.98)' : 'rgba(200,212,238,0.92)';
+      ctx.fillText(n.label.length > 10 ? n.label.slice(0, 10) + '…' : n.label, lx, n.y - 7);
+      ctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillStyle = 'rgba(150,168,200,0.85)';
+      ctx.fillText(n.value.toFixed(2) + ' 分', lx, n.y + 8);
     }
 
-    if (!st.reduceMotion) st.raf = requestAnimationFrame(draw);
-    else st.raf = 0;
+    st.raf = requestAnimationFrame(draw);
   };
-  flowAnim.raf = requestAnimationFrame(draw);
+
+  // 可重入启动：视图隐藏时循环会主动停（省 CPU），切回来必须能接着跑——
+  // 之前没有恢复路径，一旦停摆就只能等拓扑变化，表现为"图卡死"。
+  flowAnim.start = () => {
+    const st = flowAnim;
+    if (!st || st.cv !== cv || st.raf) return;
+    st.last = performance.now();
+    st.raf = requestAnimationFrame(draw);
+  };
+  flowAnim.start();
 }
 
 function bez(p0, p1, p2, p3, t) {
