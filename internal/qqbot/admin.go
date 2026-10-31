@@ -119,6 +119,46 @@ func (b *Bridge) adminAuth(next http.Handler) http.Handler {
 	})
 }
 
+// adminStickerStats /admin/api/state 的 stickers 字段。
+type adminStickerStats struct {
+	Library   int   `json:"library"`   // sticker_dir 根目录图片数（不递归）
+	Collected int   `json:"collected"` // sticker_dir/collected 里的图片数
+	Bytes     int64 `json:"bytes"`     // 两者合计字节数
+}
+
+// adminKBStats /admin/api/state 的 kb 字段。
+type adminKBStats struct {
+	Cards    int `json:"cards"`    // kb_dir 下解析成功的 *.md 卡片数
+	Gunsmith int `json:"gunsmith"` // 其中「改枪码-*」卡片数
+}
+
+// adminStats 汇总三类只读统计（表情库 / 知识库 / 工具）。
+//
+// 容错原则：这些数字只是给面板和运维看的，任何一步失败都退化成 0——
+// /admin/api/state 是配置页的唯一数据源，绝不能因为磁盘问题 500。
+func (b *Bridge) adminStats() (adminStickerStats, adminKBStats, int) {
+	cfg := b.cfg()
+
+	library, collected, bytes := stickerStats(cfg.StickerDir)
+	stickers := adminStickerStats{Library: library, Collected: collected, Bytes: bytes}
+
+	// loadKBDir 带目录 mtime 缓存，这里直接复用它的解析结果（顺带省掉一次扫盘）。
+	entries := loadKBDir(strings.TrimSpace(cfg.KBDir))
+	gunsmith := 0
+	for _, e := range entries {
+		// 与 gunsmithCard 同一判据：正文以「改枪码」开头的就是改枪码卡。
+		if strings.HasPrefix(strings.TrimSpace(e.Text), "改枪码") {
+			gunsmith++
+		}
+	}
+
+	tools := 0
+	if cfg.ToolsEnabled {
+		tools = len(b.buildTools().defs)
+	}
+	return stickers, adminKBStats{Cards: len(entries), Gunsmith: gunsmith}, tools
+}
+
 // adminState GET /admin/api/state —— 配置（key 打码）+ 统计 + 记忆 + 最近事件。
 func (b *Bridge) adminState(w http.ResponseWriter, r *http.Request) {
 	recent, events, replied, skipped, started := b.state.snapshot()
@@ -166,11 +206,15 @@ func (b *Bridge) adminState(w http.ResponseWriter, r *http.Request) {
 		sort.Slice(mems, func(i, j int) bool { return mems[i].LastSeen > mems[j].LastSeen })
 	}
 	sessions, limiters := b.Stats()
+	stickerView, kbView, toolCount := b.adminStats()
 
 	resp := map[string]any{
 		"ok":        true,
 		"config":    cfg,
 		"stats":     map[string]any{"events": events, "replied": replied, "skipped": skipped, "sessions": sessions, "limiters": limiters, "memory_users": len(mems), "uptime_sec": int(time.Since(started).Seconds())},
+		"stickers":  stickerView,
+		"kb":        kbView,
+		"tools":     toolCount,
 		"recent":    recent,
 		"memory":    mems,
 		"gate":      b.gateSnapshot(),
