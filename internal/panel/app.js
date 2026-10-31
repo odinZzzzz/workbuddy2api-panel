@@ -3607,7 +3607,12 @@ if ($('tokBody')) $('tokBody').addEventListener('click', async ev => {
 
 /* ── QQ bot 视图（数据来自 /panel/api/qqbot/*，由面板代理到桥的本地后台）── */
 function qbNums(v) { return String(v || '').split(',').map(x => parseInt(x.trim(), 10)).filter(x => !isNaN(x)); }
+function qbStrs(v) { return String(v || '').split(',').map(x => x.trim()).filter(x => x); }
 function qbStr(v) { return (v || []).join(','); }
+// 加载兜底：字段缺失（旧后端 / 未 normalize 的默认配置）时回落到后端默认值；
+// 但 [] 和 0 都是用户可能显式设定的值，不能被兜底吃掉（否则清空后一刷新又变回来）。
+function qbStrDef(v, def) { return Array.isArray(v) ? v.join(',') : def.join(','); }
+function qbNumDef(v, def) { return Number.isFinite(v) ? v : def; }
 
 async function loadQQBot() {
   let d;
@@ -3637,6 +3642,11 @@ async function loadQQBot() {
   $('qbIgnored').value = qbStr(c.ignored_users);
   $('qbActKw').value = qbStr(c.activation_keywords);
   $('qbIntKw').value = qbStr(c.interrupt_keywords);
+  $('qbCalmKw').value = qbStrDef(c.calm_keywords, ['冷静', '安静点', '别吵']);
+  $('qbCalmSec').value = qbNumDef(c.calm_seconds, 300);
+  $('qbBotPat').value = qbStrDef(c.bot_patterns, ['bot', '机器人', '助手', 'gpt', 'ai']);
+  $('qbBotRounds').value = qbNumDef(c.bot_round_limit, 3);
+  $('qbBotCool').value = qbNumDef(c.bot_cooldown_seconds, 600);
   $('qbEnabled').checked = !!c.enabled;
   $('qbRequireAt').checked = !!c.require_at_in_group;
 
@@ -3673,6 +3683,15 @@ async function saveQQBot() {
       rate_per_minute: Number($('qbRate').value || 0),
       max_reply_runes: Number($('qbMaxRunes').value || 0),
       max_history_pairs: Number($('qbHist').value || 0),
+      activation_window_seconds: Number($('qbActWin').value || 0),
+      silence_seconds: Number($('qbSilence').value || 0),
+      activation_keywords: qbStrs($('qbActKw').value),
+      interrupt_keywords: qbStrs($('qbIntKw').value),
+      calm_keywords: qbStrs($('qbCalmKw').value),
+      calm_seconds: Number($('qbCalmSec').value || 0),
+      bot_patterns: qbStrs($('qbBotPat').value),
+      bot_round_limit: Number($('qbBotRounds').value || 0),
+      bot_cooldown_seconds: Number($('qbBotCool').value || 0),
       allowed_groups: qbNums($('qbGroups').value),
       no_at_groups: qbNums($('qbNoAt').value),
       allowed_users: qbNums($('qbUsers').value),
