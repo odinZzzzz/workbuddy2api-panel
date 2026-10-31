@@ -28,21 +28,22 @@ import (
 type ErrKind int
 
 const (
-	ErrNone           ErrKind = iota // 成功
-	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                      // 429 软限流 → 短冷却
-	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
-	ErrServer                        // 5xx 上游故障
-	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
-	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
-	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
-	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
-	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
-	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
-	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrChannelInvalid                // 渠道校验拦截（400 + 渠道校验业务码 + 渠道校验文案 / "conversation id missing"）→ 请求级错误：不罚号、不轮转，末端透传原文
-	ErrClient                        // 其他 4xx / 业务错误
+	ErrNone            ErrKind = iota // 成功
+	ErrHardCredit                     // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate                       // 429 软限流 → 短冷却
+	ErrSessionDead                    // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound                       // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
+	ErrServer                         // 5xx 上游故障
+	ErrContentBlocked                 // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrBadParams                      // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
+	ErrAccountFault                   // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrModelBlocked                   // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
+	ErrModelNotAllowed                // 11158「model [x] is not allowed for user type [y]」→ 模型级权限：不罚号、不换号，拉黑该模型
+	ErrWafBlock                       // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
+	ErrPromptTooLong                  // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
+	ErrImageInvalid                   // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrChannelInvalid                 // 渠道校验拦截（400 + 渠道校验业务码 + 渠道校验文案 / "conversation id missing"）→ 请求级错误：不罚号、不轮转，末端透传原文
+	ErrClient                         // 其他 4xx / 业务错误
 )
 
 func (k ErrKind) String() string {
@@ -63,6 +64,8 @@ func (k ErrKind) String() string {
 		return "bad_params"
 	case ErrModelBlocked:
 		return "model_blocked"
+	case ErrModelNotAllowed:
+		return "model_not_allowed"
 	case ErrWafBlock:
 		return "waf_block"
 	case ErrPromptTooLong:
@@ -571,6 +574,15 @@ func Classify(status int, body string) ErrKind {
 	// 计费/限流都更具体——若不先判，msg 里的 "service info not found" 会被更宽的
 	// 4xx 兜底归为 ErrClient（只换号不避让），该坏号会留在池内反复被选中。
 	// 只认 400/404（见 IsModelBlocked），429+11102 落下方 status==429 层走限流语义。
+	// 模型级权限先判：11158 与 11102 都可能承载「账号类型不支持」这类权限拒绝
+	// （实测 gemini-3.5-flash：`is not allowed for user type` / `only available for
+	// authorized users`）。权限问题换号无解，副作用是**所有同类型账号都没权限**，
+	// 因此必须比 11102「模型不存在」和 accountFaultMarkers「账号故障」都先判，
+	// 否则会把好号一个个罚掉、跑空池子后报 503 no_healthy_account。
+	if IsModelNotAllowed(status, body) {
+		return ErrModelNotAllowed
+	}
+	// 11102「该后端无此模型」：模型级但可能换后端/换域可解 → (账号,模型) 负缓存避让。
 	if IsModelBlocked(status, body) {
 		return ErrModelBlocked
 	}
@@ -2365,4 +2377,52 @@ func IsAlreadyCheckin(err error) bool {
 
 func truncate(s string, n int) string {
 	return logfmt.Truncate(s, n)
+}
+
+// modelNotAllowedCode 上游「模型对当前账号类型不可用」的业务码。
+// 真机报文形如：
+//
+//	{"code":11158,"msg":"model [gemini-3.5-flash] is not allowed for user type [personal_free_user]",
+//	 "displayMsg":{"zh":"当前账号类型暂不支持该模型。"}}
+//
+// 语义上它既不是账号故障（码是好的、额度也在），也不是临时限流（重试不会变），
+// 而是「这个模型 + 这类账号」的**权限**问题：换号、冷却、重试全部无意义。
+const modelNotAllowedCode = "11158"
+
+// modelNotAllowedMarkers 文案特征（大小写不敏感子串）。多语言都收：
+// 上游 zh / zh-hant / en 三种 displayMsg 都出现过。
+var modelNotAllowedMarkers = []string{
+	"is not allowed for user type",
+	"not allowed for user type",
+	"does not support this model",
+	"当前账号类型暂不支持该模型",
+	"目前帳號類型暫不支援該模型",
+	"your account type does not support this model",
+	// 11102 也常用「权限」措辞而非「不存在」：实测 gemini-3.5-flash 返回
+	// `model [x] is only available for authorized users` —— 这是账号类型的权限问题，
+	// 不是"这个后端没这个模型"，换号同样无解。
+	"only available for authorized users",
+	"is only available for",
+	"insufficient model permission",
+	"no permission to use this model",
+}
+
+// IsModelNotAllowed 判断「模型对当前账号类型不可用」。
+//
+// 与 IsModelBlocked 的区别：11102 是「这个后端没有这个模型」（(账号,模型) 负缓存，
+// 换个号/换个后端可能有），11158 是「有模型但你的账号类型没权限」（所有同类型账号
+// 全都没有，换号只会把整个池子跑空 → 最终 503 no_healthy_account）。
+func IsModelNotAllowed(_ int, body string) bool {
+	if body == "" {
+		return false
+	}
+	lower := strings.ToLower(body)
+	for _, m := range modelNotAllowedMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	// 没有文案时靠业务码兜底（11158 语义唯一，不像 11140 那样复用）。
+	return strings.Contains(body, `"code":`+modelNotAllowedCode) ||
+		strings.Contains(body, `"code": `+modelNotAllowedCode)
 }

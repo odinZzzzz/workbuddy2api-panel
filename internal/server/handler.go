@@ -137,6 +137,9 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// modelDeny 模型级黑名单（model_deny.go）：上游 11158「模型对当前账号类型不可用」
+	// 时拉黑该模型，既不再列进 /v1/models，也直接 400 拒绝——不罚号、不换号。
+	modelDeny *modelDenyList
 }
 
 // NewHandler 构建 handler。
@@ -153,7 +156,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), modelDeny: newModelDenyList(modelDenyTTL)}
 	// 降级窗口：0 保留旧语义（到次日 00:00 CST），>0 为自愈窗口（见 degrade.go）。
 	h.degrade.SetTTL(cfg.PromptDegradeTTL)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -517,6 +520,11 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
+		// 上游明确说"当前账号类型不支持"的模型不再列出：客户端据此选型，
+		// 列了只会让用户选到一个必然失败的模型。
+		if h.modelDeny != nil && h.modelDeny.Denied(mi.ID) {
+			continue
+		}
 		entry := map[string]any{
 			"id":       "cn:" + mi.ID,
 			"object":   "model",
@@ -560,6 +568,10 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
+			// 与 CN 分支同口径：上游说"账号类型不支持"的模型，列出来只会误导选型。
+			if h.modelDeny != nil && h.modelDeny.Denied(id) {
+				continue
+			}
 			entry := map[string]any{
 				"id":       "global:" + id,
 				"object":   "model",
@@ -681,6 +693,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// 模型级黑名单：该模型对当前账号类型整体不可用（上游 11158）。直接 400 说明原因，
+	// 不选号、不打上游——否则会把每个号都试一遍、跑空池子后报 503 no_healthy_account，
+	// 让客户端以为是"服务挂了"（issue：gemini-3.5-flash 在 personal_free_user 上）。
+	if peek.Model != "" && h.modelDeny != nil && h.modelDeny.Denied(peek.Model) {
+		writeOpenAIError(w, http.StatusBadRequest, "model_not_allowed",
+			"模型 "+peek.Model+" 对当前账号类型不可用（上游拒绝：model is not allowed for user type / "+
+				"only available for authorized users）。它已从 /v1/models 移除；"+
+				"如需使用请换模型，或升级账号类型后等待黑名单过期（1 小时）。")
+		return
+	}
 
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」
@@ -1142,6 +1165,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				writeOpenAIErrorHint(w, http.StatusBadRequest, code, msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
+			// 模型级权限拒绝（11158 / 11102 权限变体）：立即 400 终止轮转。
+			// 与 11115 同一哲学——同类型账号**全部**没有该模型权限，换号只会把每个号
+			// 都试一遍（实测 9 个号全试完 → 503 no_healthy_account，客户端误以为服务挂了）。
+			// applyErrorPolicy 会把它拉进 modelDeny 黑名单，后续请求在入口就 400，
+			// /v1/models 也不再列出。
+			if kind == upstream.ErrModelNotAllowed {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "model is not allowed for current account type"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "model_not_allowed",
+					"模型 "+bareModel+" 对当前账号类型不可用，已从 /v1/models 移除（上游："+clipRunes(msg, 240)+"）",
 					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				st.outcome = reqlog.OutcomeHTTPError
@@ -1661,6 +1703,16 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// （与 6004 同域），选号侧 healthyForModel 对该账号自动避开该模型。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
 		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
+	case upstream.ErrModelNotAllowed:
+		// 11158「模型对当前账号类型不可用」：账号本身没问题（码是好的、额度也在），
+		// 换号没有意义——同类型账号全都没有这个模型的权限。所以：
+		//   1) 拉进进程内黑名单（/v1/models 立即不再列出，后续请求入口直接 400）；
+		//   2) 仍然给当前 (账号,模型) 打一个负缓存，避免本轮继续撞；
+		//   3) 不 NoteError / 不冷却该账号。
+		if h.modelDeny != nil {
+			h.modelDeny.Deny(model)
+		}
+		h.cfg.Pool.BlockModelBackoff(uid, model, "11158 model not allowed for user type")
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →
@@ -1784,4 +1836,17 @@ func rateLimitReason(err error) (string, string) {
 		return "token_concurrency_limited", "this API key has reached its concurrency limit"
 	}
 	return "token_rate_limited", "this API key has exceeded its requests-per-minute limit"
+}
+
+// clipRunes 按 rune 截断（避免把多字节字符截成半个），超出加省略号。
+// 用于把上游原文塞进给客户端看的短消息里——完整原文仍在 message 字段外的日志中。
+func clipRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }

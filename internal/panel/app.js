@@ -3178,16 +3178,19 @@ function renderFlowMatrix(ov, logs) {
   const rate = $('flowRate');
   const note = $('flowNote');
   if (rate) rate.textContent = agg.total > 0 ? '流出 ' + agg.total.toFixed(2) + ' 分 / 5 分钟' : '窗口内无消耗';
-  if (note) note.textContent = agg.win.length ? agg.win.length + ' 条请求 · 每 5 秒刷新' : '近 5 分钟没有请求';
+  if (note) note.textContent = agg.win.length ? agg.win.length + ' 条请求 · 动画持续，数据手动刷新' : '近 5 分钟没有请求';
 
   if (!agg.win.length || !agg.accs.length || !agg.mods.length) {
     flowStop();
-    box.innerHTML = '<div class="fm-empty">近 5 分钟没有请求，粒子还没起飞——等有流量了这里会亮。</div>';
+    box.innerHTML = '<div class="fm-empty">近 5 分钟没有请求，粒子还没起飞。有流量后点右上角「刷新」即可点亮（不再自动轮询）。</div>';
     return;
   }
-  // 关键：仪表盘每 5 秒刷新一次。若每次都重建状态，粒子会被反复清空，
-  // 永远走不到 t=1 —— 也就看不到"汇聚吸收"。拓扑不变时只更新数值。
-  if (flowAnim && flowAnim.box === box && flowAnim.sig === flowSignature(agg)) {
+  // 拓扑不变时只更新数值、不重建状态：重建会把在飞的粒子清空，
+  // 永远走不到 t=1（看不到"汇聚吸收"），画面也会闪一下。
+  // 窗口尺寸变了就重建：canvas 的 backing store 只在创建时设定，拉伸窗口后
+  // 不重建会变模糊/裁切（原来没处理，是"切换分辨率后图糊掉"的根因）。
+  const widthChanged = flowAnim && flowAnim.cv && Math.abs((flowAnim.cv.clientWidth || 0) - flowAnim.w) > 8;
+  if (flowAnim && flowAnim.box === box && !widthChanged && flowAnim.sig === flowSignature(agg)) {
     flowAnimApplyData(agg);
     return;
   }
@@ -3269,6 +3272,18 @@ function flowAnimStart(box, agg) {
       x: w * 0.23, y: slot(agg.accs.length, i),
       r: 10 + 20 * Math.sqrt(sum / maxAcc),
       phase: Math.random() * Math.PI * 2, feed: 0,
+      // 待机动画：每个球一套独立节奏，避免整屏同步呼吸（那样像幻灯片）
+      idle: {
+        bobAmp: 2.2 + Math.random() * 2.6,      // 上下浮动幅度
+        bobSp: 0.55 + Math.random() * 0.55,     // 浮动速度
+        breathAmp: 0.03 + Math.random() * 0.035, // 呼吸缩放幅度
+        breathSp: 0.45 + Math.random() * 0.5,
+        orbitR: 1.5 + Math.random() * 0.7,      // 卫星轨道半径（×球半径）
+        orbitSp: 0.35 + Math.random() * 0.5,    // 卫星公转速度
+        orbitTilt: Math.random() * Math.PI,     // 轨道倾角
+        sweepSp: 0.22 + Math.random() * 0.3,    // 高光扫过速度
+        sweepPh: Math.random() * Math.PI * 2,
+      },
     });
   });
   agg.mods.forEach(([mod, sum], i) => {
@@ -3278,6 +3293,17 @@ function flowAnimStart(box, agg) {
       x: w * 0.77, y: slot(agg.mods.length, i),
       r: 9 + 17 * Math.sqrt(sum / maxMod),
       phase: Math.random() * Math.PI * 2, feed: 0,
+      idle: {
+        bobAmp: 1.8 + Math.random() * 2.2,
+        bobSp: 0.5 + Math.random() * 0.6,
+        breathAmp: 0.025 + Math.random() * 0.04,
+        breathSp: 0.4 + Math.random() * 0.55,
+        orbitR: 1.45 + Math.random() * 0.65,
+        orbitSp: -0.3 - Math.random() * 0.5,    // 模型侧反向公转，左右有对位差
+        orbitTilt: Math.random() * Math.PI,
+        sweepSp: 0.2 + Math.random() * 0.28,
+        sweepPh: Math.random() * Math.PI * 2,
+      },
     });
   });
   const byId = new Map(nodes.map(n => [n.kind + ':' + n.id, n]));
@@ -3388,6 +3414,27 @@ function flowAnimStart(box, agg) {
     }
   }
 
+  // 近层星：更亮更大、视差更快。和远层叠在一起，缓慢移动时能看出层次差。
+  const starNear = document.createElement('canvas');
+  starNear.width = Math.round(w * dpr);
+  starNear.height = Math.round(h * dpr);
+  {
+    const nx = starNear.getContext('2d');
+    nx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    for (let i = 0; i < 64; i++) {
+      const x = Math.random() * w, y = Math.random() * h;
+      const r = 0.8 + Math.random() * 1.5;
+      const halo = nx.createRadialGradient(x, y, 0, x, y, r * 4.5);
+      halo.addColorStop(0, 'rgba(255,255,255,0.42)');
+      halo.addColorStop(1, 'rgba(200,220,255,0)');
+      nx.fillStyle = halo;
+      nx.beginPath(); nx.arc(x, y, r * 4.5, 0, Math.PI * 2); nx.fill();
+      nx.beginPath(); nx.arc(x, y, r, 0, Math.PI * 2);
+      nx.fillStyle = 'rgba(255,255,255,' + (0.55 + Math.random() * 0.4).toFixed(2) + ')';
+      nx.fill();
+    }
+  }
+
   // 动态闪烁星（少量，逐帧改 alpha）
   const twinkles = [];
   for (let i = 0; i < 46; i++) {
@@ -3413,11 +3460,119 @@ function flowAnimStart(box, agg) {
   }
   const grainPatterns = grainTiles.map(g => ctx.createPattern(g, 'repeat'));
 
+  // ── 预渲染：静态背景 / 星云层 / 球体与光晕精灵 ──────────────────────────
+  // 性能要点：原来每帧要创建 5 个全屏径向渐变（星云）+ 每个球 3~4 个渐变 + clip 扫光，
+  // 60fps 下每帧几十次渐变分配 = 明显掉帧与 GC 抖动。改成"一次画好、逐帧贴图"：
+  //   bgBase   = 底色渐变 + 两层星场 + 暗角 + 颗粒（完全静态）
+  //   bgNebula = 四团星云（逐帧只改 globalAlpha 做呼吸，不再重画渐变）
+  //   halo* / orb* = 光晕与球体精灵（按半径缩放贴图，替代逐帧 createRadialGradient）
+  const makeLayer = () => {
+    const c = document.createElement('canvas');
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(h * dpr);
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { c, g };
+  };
+
+  const bgBase = makeLayer();
+  {
+    const g = bgBase.g;
+    const bgg = g.createLinearGradient(0, 0, w * 0.35, h);
+    bgg.addColorStop(0, S.bgTop);
+    bgg.addColorStop(1, S.bgBot);
+    g.fillStyle = bgg;
+    g.fillRect(0, 0, w, h);
+    const vg = g.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.25, w / 2, h / 2, Math.max(w, h) * 0.78);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,' + S.vignette + ')');
+    g.fillStyle = vg;
+    g.fillRect(0, 0, w, h);
+    if (grainPatterns && grainPatterns[0]) {
+      g.save();
+      g.globalAlpha = S.grain;
+      g.fillStyle = grainPatterns[0];
+      g.fillRect(0, 0, w, h);
+      g.restore();
+    }
+  }
+
+  const bgNebula = makeLayer();
+  {
+    const g = bgNebula.g;
+    g.globalCompositeOperation = 'lighter';
+    const blobs = [
+      { x: w * 0.30, y: h * 0.40, r: Math.max(w, h) * 0.60, c: S.aurora[0] },
+      { x: w * 0.74, y: h * 0.60, r: Math.max(w, h) * 0.52, c: S.aurora[1] },
+      { x: w * 0.50, y: h * 0.34, r: Math.max(w, h) * 0.42, c: S.aurora[2] },
+      { x: w * 0.20, y: h * 0.72, r: Math.max(w, h) * 0.34, c: S.aurora[0] },
+    ];
+    for (const b of blobs) {
+      const rg = g.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+      rg.addColorStop(0, b.c);
+      rg.addColorStop(0.55, b.c.replace(/[\d.]+\)$/, '0.05)'));
+      rg.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = rg;
+      g.fillRect(0, 0, w, h);
+    }
+    // 中心核光
+    const core = g.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.30);
+    core.addColorStop(0, 'rgba(180,205,255,0.06)');
+    core.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = core;
+    g.fillRect(0, 0, w, h);
+  }
+
+  // 光晕精灵（256px，贴图缩放）：替代每帧 createRadialGradient
+  const makeHaloSprite = (rgb) => {
+    const size = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d');
+    const rg = g.createRadialGradient(size / 2, size / 2, size * 0.10, size / 2, size / 2, size / 2);
+    rg.addColorStop(0, 'rgba(' + rgb + ',0.30)');
+    rg.addColorStop(0.5, 'rgba(' + rgb + ',0.10)');
+    rg.addColorStop(1, 'rgba(' + rgb + ',0)');
+    g.fillStyle = rg;
+    g.fillRect(0, 0, size, size);
+    return c;
+  };
+  // 球体精灵（含高光与描边）：贴图缩放替代每帧 3 个渐变
+  const makeOrbSprite = (pal) => {
+    const size = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d');
+    const r = size * 0.44, cx = size / 2, cy = size / 2;
+    const rg = g.createRadialGradient(cx - r * 0.36, cy - r * 0.42, r * 0.10, cx, cy, r);
+    rg.addColorStop(0, pal.core);
+    rg.addColorStop(0.45, pal.mid);
+    rg.addColorStop(1, pal.edge);
+    g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.fillStyle = rg; g.fill();
+    // 顶部高光弧
+    g.beginPath();
+    g.arc(cx, cy, r * 0.82, -Math.PI * 0.78, -Math.PI * 0.24);
+    g.strokeStyle = 'rgba(255,255,255,0.30)';
+    g.lineWidth = Math.max(1.5, r * 0.09);
+    g.stroke();
+    // 描边
+    g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2);
+    g.strokeStyle = 'rgba(' + hexRGB(pal.core) + ',0.38)';
+    g.lineWidth = 1.4;
+    g.stroke();
+    return c;
+  };
+  const spriteHaloAcc = makeHaloSprite(hexRGB(S.acc.mid));
+  const spriteHaloMod = makeHaloSprite(hexRGB(S.mod.mid));
+  const spriteOrbAcc = makeOrbSprite(S.acc);
+  const spriteOrbMod = makeOrbSprite(S.mod);
+
   flowAnim = {
     raf: 0, cv, ctx, w, h, dpr, nodes, edges, parts: [], pulses: [], dust,
     hover: null, last: performance.now(), reduceMotion, box, S,
     sig: agg.accs.map(x => x[0]).join('|') + '//' + agg.mods.map(x => x[0]).join('|'),
-    byId, grainPatterns, starLayer, twinkles,
+    byId, grainPatterns, starLayer, starNear, twinkles,
+    bgBase: bgBase.c, bgNebula: bgNebula.c, spriteHaloAcc, spriteHaloMod, spriteOrbAcc, spriteOrbMod,
     meteor: { x: 0, y: 0, vx: 0, vy: 0, life: 0, next: 2.5 },
   };
 
@@ -3449,49 +3604,40 @@ function flowAnimStart(box, agg) {
     st.last = now;
     const t = now / 1000;
 
-    // ── 背景：深空渐变 → 星云 → 星场（视差）→ 闪烁星 → 浮尘 → 流星 → 暗角 ──
-    const bgg = ctx.createLinearGradient(0, 0, w * 0.35, h);
-    bgg.addColorStop(0, S.bgTop);
-    bgg.addColorStop(1, S.bgBot);
-    ctx.fillStyle = bgg;
-    ctx.fillRect(0, 0, w, h);
+    // ── 背景：一次贴图（底色+暗角+颗粒）→ 星云层（只改 alpha 做呼吸）→ 星场视差 ──
+    // 这三步都是 drawImage，不再每帧创建全屏渐变（原来星云 5 次全屏 fillRect 是最大开销）。
+    if (st.bgBase) ctx.drawImage(st.bgBase, 0, 0, w, h);
 
-    // 星云：四团不同色相、不同漂移速度的软团 + 中心核光（营造纵深）
-    ctx.globalCompositeOperation = 'lighter';
-    const nebulas = [
-      { x: w * (0.30 + 0.05 * Math.sin(t * 0.09)), y: h * (0.40 + 0.06 * Math.cos(t * 0.07)), r: Math.max(w, h) * 0.60, c: S.aurora[0] },
-      { x: w * (0.74 + 0.06 * Math.cos(t * 0.06)), y: h * (0.60 + 0.05 * Math.sin(t * 0.10)), r: Math.max(w, h) * 0.52, c: S.aurora[1] },
-      { x: w * (0.50 + 0.10 * Math.sin(t * 0.04)), y: h * (0.34 + 0.08 * Math.cos(t * 0.05)), r: Math.max(w, h) * 0.42, c: S.aurora[2] },
-      { x: w * (0.20 + 0.04 * Math.cos(t * 0.11)), y: h * (0.72 + 0.05 * Math.sin(t * 0.08)), r: Math.max(w, h) * 0.34, c: S.aurora[0] },
-    ];
-    for (const b of nebulas) {
-      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
-      g.addColorStop(0, b.c);
-      g.addColorStop(0.55, b.c.replace(/[\d.]+\)$/, '0.05)'));
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
+    if (st.bgNebula) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.70 + 0.30 * (0.5 + 0.5 * Math.sin(t * 0.08));
+      ctx.drawImage(st.bgNebula, 0, 0, w, h);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
     }
-    // 中心核光：极淡的一团，让画面有"深处有光"的方向感
-    const core = ctx.createRadialGradient(w * 0.5, h * 0.5, 0, w * 0.5, h * 0.5, Math.max(w, h) * 0.30);
-    core.addColorStop(0, 'rgba(180,205,255,0.05)');
-    core.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = core;
-    ctx.fillRect(0, 0, w, h);
 
-    // 星场：整层预渲染图做慢速视差（比逐颗画便宜一个数量级）
+    // 星场双层视差（远层慢、近层快）
     if (st.starLayer) {
-      const px = Math.sin(t * 0.035) * 7;
-      const py = Math.cos(t * 0.028) * 5;
-      ctx.globalAlpha = 0.92 + 0.08 * Math.sin(t * 0.6);   // 极缓慢的整体呼吸
-      ctx.drawImage(st.starLayer, px, py, w, h);
+      const fx = Math.sin(t * 0.032) * 6;
+      const fy = Math.cos(t * 0.026) * 4;
+      ctx.globalAlpha = 0.90 + 0.10 * Math.sin(t * 0.45);
+      ctx.drawImage(st.starLayer, fx, fy, w, h);
+      ctx.globalAlpha = 1;
+    }
+    if (st.starNear) {
+      const nx2 = Math.sin(t * 0.075) * 15;
+      const ny2 = Math.cos(t * 0.061) * 10;
+      ctx.globalAlpha = 0.85 + 0.15 * Math.sin(t * 0.9 + 1.2);
+      ctx.drawImage(st.starNear, nx2, ny2, w, h);
       ctx.globalAlpha = 1;
     }
 
-    // 闪烁星：数量少，逐帧改 alpha
-    if (!reduceMotion) {
-      for (const tw of st.twinkles) {
-        const al = tw.base * (0.45 + 0.55 * Math.abs(Math.sin(t * tw.sp + tw.ph)));
+    ctx.globalCompositeOperation = 'lighter';
+    {
+      // lite 模式只留 1/3 的闪烁星：背景仍然是"活的"，但不至于晃眼
+      const list = reduceMotion ? st.twinkles.slice(0, 16) : st.twinkles;
+      for (const tw of list) {
+        const al = tw.base * (0.45 + 0.55 * Math.abs(Math.sin(t * tw.sp + tw.ph))) * (reduceMotion ? 0.7 : 1);
         ctx.beginPath();
         ctx.arc(tw.x, tw.y, tw.r, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(235,242,255,' + al.toFixed(3) + ')';
@@ -3504,15 +3650,15 @@ function flowAnimStart(box, agg) {
         d.x += d.vx * dt; d.y += d.vy * dt;
         if (d.y < -6) { d.y = h + 6; d.x = Math.random() * w; }
         if (d.x < -6) d.x = w + 6; else if (d.x > w + 6) d.x = -6;
-        const tw = 0.65 + 0.35 * Math.sin(t * 2 + d.tw);
+        const tw2 = 0.65 + 0.35 * Math.sin(t * 2 + d.tw);
         ctx.beginPath();
         ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + S.part[0] + ',' + S.part[1] + ',' + S.part[2] + ',' + (d.a * tw).toFixed(3) + ')';
+        ctx.fillStyle = 'rgba(' + S.part[0] + ',' + S.part[1] + ',' + S.part[2] + ',' + (d.a * tw2).toFixed(3) + ')';
         ctx.fill();
       }
     }
 
-    // 流星：每隔几秒斜穿一次，带渐隐尾迹
+    // 流星
     if (!reduceMotion && st.meteor) {
       const m = st.meteor;
       m.next -= rawDt;
@@ -3534,43 +3680,13 @@ function flowAnimStart(box, agg) {
         lg.addColorStop(1, 'rgba(160,200,255,0)');
         ctx.strokeStyle = lg;
         ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        ctx.moveTo(m.x, m.y);
-        ctx.lineTo(tailX, tailY);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(m.x, m.y, 1.6, 0, Math.PI * 2);
+        ctx.beginPath(); ctx.moveTo(m.x, m.y); ctx.lineTo(tailX, tailY); ctx.stroke();
+        ctx.beginPath(); ctx.arc(m.x, m.y, 1.6, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(255,255,255,' + (0.9 * Math.max(0, m.life)).toFixed(3) + ')';
         ctx.fill();
       }
     }
     ctx.globalCompositeOperation = 'source-over';
-
-    // 暗角（压在星场之上，保证四角沉下去、视线集中到中间）
-    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.25, w / 2, h / 2, Math.max(w, h) * 0.78);
-    vg.addColorStop(0, 'rgba(0,0,0,0)');
-    vg.addColorStop(1, 'rgba(0,0,0,' + S.vignette + ')');
-    ctx.fillStyle = vg;
-    ctx.fillRect(0, 0, w, h);
-
-    // 颗粒（三张瓦片轮换，逐帧位移）
-    if (!reduceMotion && st.grainPatterns) {
-      const pat = st.grainPatterns[Math.floor(t * 24) % st.grainPatterns.length];
-      ctx.save();
-      ctx.globalAlpha = S.grain;
-      ctx.translate((Math.random() * 96) | 0, (Math.random() * 96) | 0);
-      ctx.fillStyle = pat;
-      ctx.fillRect(-96, -96, w + 192, h + 192);
-      ctx.restore();
-    }
-
-    // ── 悬浮：弹簧回锚点 + 慢漂移 ──
-    for (const n of st.nodes) {
-      const bob = Math.sin(t * 0.8 + n.phase) * (reduceMotion ? 1.4 : 3.4);
-      n.x += (n.ax - n.x) * Math.min(1, dt * 3.2);
-      n.y += (n.ay + bob - n.y) * Math.min(1, dt * 3.2);
-      n.feed = Math.max(0, n.feed - pdt * 1.6);
-    }
 
     // 文字区遮罩：左右两列标签下面压一层暗色渐隐。
     // 加了星云/星场后背景变亮，白字对比从 6.19 掉到 4.04（probe_region 实测），
@@ -3639,7 +3755,10 @@ function flowAnimStart(box, agg) {
       }
     }
 
-    // ── 粒子推进 + 汇聚 ──
+    // ── 粒子推进 + 汇聚（批量绘制）──
+    // 性能要点：原来每个粒子要画 5 个拖尾圆 + 本体 = 最多 2000+ 次 arc/fill。
+    // 现在先算好位置，再按「热/冷」两组各用**一条路径**画完拖尾与本体，
+    // 每帧的绘图调用从 O(粒子数) 降到 O(1)（这条是 60fps 下的主要瓶颈）。
     const alive = [];
     for (const pt of st.parts) {
       const rush = pt.t > 0.82 ? 1 + (pt.t - 0.82) * 6 : 1;
@@ -3649,46 +3768,64 @@ function flowAnimStart(box, agg) {
         st.pulses.push({ x: pt.e.m.x, y: pt.e.m.y, r: pt.e.m.r * 0.9, a: 0.7, hot: pt.hot, life: 0 });
         continue;
       }
-      alive.push(pt);
       const e = pt.e;
       const mx = (e.a.x + e.m.x) / 2;
       const p = pt.t;
-      const x = bez(e.a.x, mx, mx, e.m.x, p);
-      const y = bez(e.a.y, e.a.y, e.m.y, e.m.y, p) + Math.sin(p * Math.PI) * pt.wob * 12;
-      const shrink = p > 0.82 ? 1 - (p - 0.82) / 0.18 : 1;
-      const col = pt.hot ? S.hot : S.part;
-
-      ctx.globalCompositeOperation = 'lighter';
-      // 彗尾：沿路径回看 5 个采样点，越远越淡越小
-      for (let k = 5; k >= 1; k--) {
-        const tp = Math.max(0, p - k * 0.014);
-        const tx = bez(e.a.x, mx, mx, e.m.x, tp);
-        const ty = bez(e.a.y, e.a.y, e.m.y, e.m.y, tp) + Math.sin(tp * Math.PI) * pt.wob * 12;
-        const a = (0.30 - k * 0.05) * shrink;
-        if (a <= 0) continue;
-        ctx.beginPath();
-        ctx.arc(tx, ty, Math.max(0.4, pt.size * shrink * (1 - k * 0.16)), 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + a.toFixed(3) + ')';
-        ctx.fill();
-      }
-      // 粒子核心
-      ctx.beginPath();
-      ctx.arc(x, y, pt.size * shrink, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0.95)';
-      ctx.fill();
-      // 少量粒子带十字星芒（高光点缀）
-      if (pt.glint && shrink > 0.6) {
-        const gl = pt.size * 3.2 * shrink;
-        ctx.strokeStyle = 'rgba(255,255,255,' + (0.22 * shrink).toFixed(3) + ')';
-        ctx.lineWidth = 0.8;
-        ctx.beginPath();
-        ctx.moveTo(x - gl, y); ctx.lineTo(x + gl, y);
-        ctx.moveTo(x, y - gl); ctx.lineTo(x, y + gl);
-        ctx.stroke();
-      }
-      ctx.globalCompositeOperation = 'source-over';
+      pt.cx = bez(e.a.x, mx, mx, e.m.x, p);
+      pt.cy = bez(e.a.y, e.a.y, e.m.y, e.m.y, p) + Math.sin(p * Math.PI) * pt.wob * 12;
+      pt.shrink = p > 0.82 ? 1 - (p - 0.82) / 0.18 : 1;
+      pt.mx = mx;
+      alive.push(pt);
     }
     st.parts = alive;
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (const hot of [false, true]) {
+      const col = hot ? S.hot : S.part;
+      // 拖尾：一条路径画完该组所有粒子的尾迹
+      ctx.beginPath();
+      for (const pt of st.parts) {
+        if (pt.hot !== hot) continue;
+        const e = pt.e;
+        const p0 = pt.t;
+        for (let k = 1; k <= 3; k++) {
+          const tp = Math.max(0, p0 - k * 0.02);
+          const tx = bez(e.a.x, pt.mx, pt.mx, e.m.x, tp);
+          const ty = bez(e.a.y, e.a.y, e.m.y, e.m.y, tp) + Math.sin(tp * Math.PI) * pt.wob * 12;
+          if (k === 1) ctx.moveTo(pt.cx, pt.cy);
+          ctx.lineTo(tx, ty);
+        }
+      }
+      ctx.strokeStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0.26)';
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+      // 本体：一条路径画完该组所有粒子
+      ctx.beginPath();
+      for (const pt of st.parts) {
+        if (pt.hot !== hot) continue;
+        const rr2 = Math.max(0.6, pt.size * pt.shrink);
+        ctx.moveTo(pt.cx + rr2, pt.cy);
+        ctx.arc(pt.cx, pt.cy, rr2, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0.95)';
+      ctx.fill();
+    }
+    // 星芒点缀（少量粒子）
+    ctx.beginPath();
+    let glintCount = 0;
+    for (const pt of st.parts) {
+      if (!pt.glint || pt.shrink <= 0.6) continue;
+      const gl = pt.size * 3.2 * pt.shrink;
+      ctx.moveTo(pt.cx - gl, pt.cy); ctx.lineTo(pt.cx + gl, pt.cy);
+      ctx.moveTo(pt.cx, pt.cy - gl); ctx.lineTo(pt.cx, pt.cy + gl);
+      glintCount++;
+    }
+    if (glintCount) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.20)';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+    }
+    ctx.globalCompositeOperation = 'source-over';
 
     // ── 汇聚涟漪：双环（亮细环 + 宽淡环）──
     const pulses = [];
@@ -3716,44 +3853,65 @@ function flowAnimStart(box, agg) {
       const isAcc = n.kind === 'acc';
       const pal = isAcc ? S.acc : S.mod;
       const hovered = st.hover === n;
-      const r = n.r * (hovered ? 1.14 : 1) * (1 + n.feed * 0.10);
+      const id = n.idle || {};
+      const breath = 1 + (id.breathAmp || 0.03) * Math.sin(t * (id.breathSp || 0.5) + n.phase);
+      const r = n.r * (hovered ? 1.14 : 1) * (1 + n.feed * 0.10) * breath;
       const glowR = r * (3.0 + n.feed * 1.6) * S.glow;
 
-      // 外晕（两层）
-      let g1 = ctx.createRadialGradient(n.x, n.y, r * 0.3, n.x, n.y, glowR);
-      g1.addColorStop(0, 'rgba(' + hexRGB(pal.mid) + ',0.26)');
-      g1.addColorStop(0.55, 'rgba(' + hexRGB(pal.mid) + ',0.09)');
-      g1.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g1;
-      ctx.beginPath(); ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2); ctx.fill();
+      // 外晕 + 球体：全部用预渲染精灵贴图（原来这里是 3 个 createRadialGradient / 帧）
+      const halo = isAcc ? st.spriteHaloAcc : st.spriteHaloMod;
+      const orb = isAcc ? st.spriteOrbAcc : st.spriteOrbMod;
+      if (halo) {
+        const gsz = glowR;
+        ctx.globalAlpha = (hovered ? 1.0 : 0.85);
+        ctx.drawImage(halo, n.x - gsz, n.y - gsz, gsz * 2, gsz * 2);
+        ctx.globalAlpha = 1;
+      }
+      if (orb) {
+        const osz = r / 0.44;   // 精灵里球半径占 44%
+        ctx.drawImage(orb, n.x - osz / 2, n.y - osz / 2, osz, osz);
+      }
 
-      let g2 = ctx.createRadialGradient(n.x, n.y, r * 0.5, n.x, n.y, r * 1.9);
-      g2.addColorStop(0, 'rgba(' + hexRGB(pal.core) + ',0.30)');
-      g2.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g2;
-      ctx.beginPath(); ctx.arc(n.x, n.y, r * 1.9, 0, Math.PI * 2); ctx.fill();
-
-      // 球体（带高光的径向渐变）
-      const g3 = ctx.createRadialGradient(n.x - r * 0.36, n.y - r * 0.42, r * 0.1, n.x, n.y, r);
-      g3.addColorStop(0, pal.core);
-      g3.addColorStop(0.45, pal.mid);
-      g3.addColorStop(1, pal.edge);
-      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = g3; ctx.fill();
-
-      // 顶部高光弧（湿润感）
+      // ── 待机动作一：一颗小卫星沿倾斜轨道绕行 ──
+      // 每个球的公转速度/方向/轨道倾角都不同，所以整屏不会同步成"呼吸灯"。
+      const oa = t * (id.orbitSp || 0.4) + n.phase;
+      const orx = r * (id.orbitR || 1.6);
+      // 短轴取绝对值：cos(tilt) 在 (π/2, π) 区间为负，直接传给 ellipse 会抛
+      // IndexSizeError（实测踩到，整个绘制循环被异常打断 → 画面卡住）。
+      const flatten = 0.30 + 0.55 * Math.abs(Math.cos(id.orbitTilt || 0.5));
+      const ory = orx * flatten;
+      // 轨道线：极淡，只提示"这个球在转"
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r * 0.82, -Math.PI * 0.78, -Math.PI * 0.24);
-      ctx.strokeStyle = 'rgba(255,255,255,' + (hovered ? 0.5 : 0.28).toFixed(2) + ')';
-      ctx.lineWidth = Math.max(1, r * 0.09);
+      ctx.ellipse(n.x, n.y, orx, ory, 0, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(' + hexRGB(pal.core) + ',' + (hovered ? 0.30 : 0.14).toFixed(2) + ')';
+      ctx.lineWidth = 0.8;
       ctx.stroke();
-
-      // 描边
+      // 卫星本体（前面时更亮，绕到后面时压暗 → 有穿插感）
+      const depth = Math.sin(oa);
+      const ox = n.x + Math.cos(oa) * orx;
+      const oy = n.y + Math.sin(oa) * ory;
+      const sAlpha = 0.35 + 0.5 * (0.5 + 0.5 * depth);
+      const sR = Math.max(1.1, r * 0.13);
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(' + hexRGB(pal.core) + ',' + (hovered ? 0.75 : 0.35).toFixed(2) + ')';
-      ctx.lineWidth = 1;
+      ctx.arc(ox, oy, sR * 2.6, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(' + hexRGB(pal.core) + ',' + (sAlpha * 0.16).toFixed(3) + ')';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(ox, oy, sR, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,' + (sAlpha * 0.95).toFixed(3) + ')';
+      ctx.fill();
+
+      // ── 待机动作二：高光沿球面缓慢扫过 ──
+      // 原来用 clip + 逐帧 createLinearGradient（每个球每帧一次），改成一条旋转弧线，
+      // 视觉上等价（一道亮痕绕着球转），成本降到一次 arc+stroke。
+      const sa = t * (id.sweepSp || 0.25) + (id.sweepPh || 0);
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, r * 0.92, sa, sa + 0.55);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (hovered ? 0.34 : 0.20).toFixed(2) + ')';
+      ctx.lineWidth = Math.max(1.2, r * 0.14);
+      ctx.lineCap = 'round';
       ctx.stroke();
+      ctx.lineCap = 'butt';
 
       // 被喂亮时的一圈额外光
       if (n.feed > 0.05) {
@@ -3805,6 +3963,9 @@ function flowAnimStart(box, agg) {
     st.last = performance.now();
     st.raf = requestAnimationFrame(draw);
   };
+  // 手动泵帧入口：离屏/后台标签页里 rAF 会被浏览器挂起（实测 ego 离屏窗口完全不触发），
+  // 自动化验证时靠它按合成时间戳推进，避免"看起来没动画"的误判。
+  flowAnim.frame = (ts) => draw(typeof ts === 'number' ? ts : performance.now());
   flowAnim.start();
 }
 
@@ -3830,7 +3991,7 @@ async function loadDashboard() {
     ]);
     renderDashboard(ov || {}, mt || {}, us || {}, bal || {}).catch(() => {});
     renderFlowMatrix(ov || {}, logs || {});
-    if (note) note.textContent = '更新于 ' + new Date().toLocaleTimeString() + ' · 每 5 秒自动刷新';
+    if (note) note.textContent = '更新于 ' + new Date().toLocaleTimeString() + ' · 动画持续，数据手动刷新';
   } catch (e) {
     if (note) note.textContent = '读取失败：' + e.message;
   }
@@ -4194,9 +4355,12 @@ function renderInFlightRows(ov, inFlightTotal) {
   }
 }
 
-$('btnDash').onclick = () => loadDashboard();
-// 仪表盘打开时每 5 秒自动刷新（切走就停，避免后台空转）
-setInterval(() => { if (typeof view === 'string' && view === 'dashboard' && !document.hidden) loadDashboard(); }, 5000);
+$('btnDash').onclick = () => loadDashboard();   // 唯一的数据刷新入口（不再有自动轮询）
+// 仪表盘**不再定时整页刷新**：每 5 秒重拉一次会把 KPI、柱状图、余额趋势、
+// 积分流向全部重排一遍，视觉上一直在跳（用户明确要求"不要每五秒刷新整体"）。
+// 现在：数据只在进视图时拉一次 + 手动点「刷新」；画面本身的动态由 canvas 动画提供，
+// 它在拿到数据后一直跑，不依赖刷新。
+
 
 
 /* ── 令牌（多 API Key）─────────────────────────────────────────────
