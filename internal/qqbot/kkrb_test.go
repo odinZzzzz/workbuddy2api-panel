@@ -103,3 +103,39 @@ func TestLoadKBDir(t *testing.T) {
 		t.Errorf("不存在的目录应返回 nil，得到 %d 条", len(e))
 	}
 }
+
+// 改枪方案解析：枪名/码/价格/推荐语，码取最后一段。
+func TestParseGunsmithData(t *testing.T) {
+	fixture := `{"code":1,"msg":"success","data":{"2":{"1":[
+		{"weaponName":"K416突击步枪","gunsmithCode":"K416突击步枪-烽火地带-6JOTK7G00B39LBELGJ9Q9",
+		 "modifyPrice":400000,"recommendation":"好用无需多言","provider":"Rxx若晞"},
+		{"weaponName":"M249轻机枪","gunsmithCode":"M249轻机枪-烽火地带-6JO362C0FF6C07RDN2TH6",
+		 "modifyPrice":520000,"recommendation":"","provider":""}
+	]}}}`
+	list, err := parseGunsmithData([]byte(fixture))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("条数=%d want 2", len(list))
+	}
+	if list[0].Weapon != "K416突击步枪" || list[0].Code != "6JOTK7G00B39LBELGJ9Q9" {
+		t.Errorf("解析不对: %+v", list[0])
+	}
+	if list[0].Price != 400000 || list[0].Note != "好用无需多言" || list[0].Author != "Rxx若晞" {
+		t.Errorf("字段不全: %+v", list[0])
+	}
+	if list[1].Code != "6JO362C0FF6C07RDN2TH6" {
+		t.Errorf("第二条码不对: %+v", list[1])
+	}
+}
+
+// 接口报错要变成 error。
+func TestParseGunsmithDataError(t *testing.T) {
+	if _, err := parseGunsmithData([]byte(`{"code":-101,"msg":"系统繁忙"}`)); err == nil {
+		t.Fatal("code!=1 应报错")
+	}
+	if _, err := parseGunsmithData([]byte(`not json`)); err == nil {
+		t.Fatal("非 JSON 应报错")
+	}
+}

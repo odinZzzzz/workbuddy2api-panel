@@ -467,3 +467,36 @@ func TestGateIsRoomScoped(t *testing.T) {
 		t.Fatalf("房间激活后，另一个用户的消息也应触发回复，实际只调用 %d 次", calls)
 	}
 }
+
+// QQ 不支持富文本：发送前必须把 Markdown 记号剥干净，且不能丢信息。
+func TestStripMarkdown(t *testing.T) {
+	cases := map[string]string{
+		"**7353**":                "7353",
+		"- 零号大坝：**7353**":         "- 零号大坝：7353",
+		"`6JOTK7G00B39LBELGJ9Q9`": "6JOTK7G00B39LBELGJ9Q9",
+		"# 标题":                    "标题",
+		"> 引用":                    "引用",
+		"[官网](https://df.qq.com)": "官网 (https://df.qq.com)",
+		"| --- | --- |":           "",
+		"~~删除线~~":                 "删除线",
+		"普通文字":                    "普通文字",
+		"*斜体*":                    "斜体",
+	}
+	for in, want := range cases {
+		if got := strings.TrimSpace(stripMarkdown(in)); got != want {
+			t.Errorf("stripMarkdown(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+// 表格行在 QQ 里就是一堆竖线，要转成纯文本行。
+func TestStripMarkdownTable(t *testing.T) {
+	in := "| 地图 | 密码 |\n| --- | --- |\n| 零号大坝 | 7353 |"
+	want := "地图：密码\n\n零号大坝：7353"
+	got := strings.TrimSpace(stripMarkdown(in))
+	got = strings.ReplaceAll(got, "\n\n\n", "\n")
+	if !strings.Contains(got, "零号大坝：7353") || strings.Contains(got, "|") {
+		t.Errorf("表格未转成纯文本:\n%s", got)
+	}
+	_ = want
+}

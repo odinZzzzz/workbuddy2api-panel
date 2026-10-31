@@ -92,6 +92,16 @@ type KkrbActivity struct {
 	Item string `json:"item,omitempty"`
 }
 
+// KkrbGunsmith 一条改枪方案（枪名 + 码 + 价格 + 推荐语）。
+type KkrbGunsmith struct {
+	Weapon  string `json:"weapon"`
+	Code    string `json:"code"`
+	Display string `json:"display,omitempty"` // 原始串（枪名-模式-码）
+	Price   int    `json:"price,omitempty"`
+	Note    string `json:"note,omitempty"`
+	Author  string `json:"author,omitempty"`
+}
+
 // KkrbOverview 一次拉取的全部概览数据。
 type KkrbOverview struct {
 	FetchedAt  time.Time        `json:"fetched_at"`
@@ -101,6 +111,7 @@ type KkrbOverview struct {
 	AmmoHot    []KkrbAmmo       `json:"ammo_hot"`
 	AmmoProfit []KkrbAmmoProfit `json:"ammo_profit"`
 	Activities []KkrbActivity   `json:"activities"`
+	Gunsmith   []KkrbGunsmith   `json:"gunsmith"`
 }
 
 // kkrbClient 带 cookie 与缓存的客户端。
@@ -109,6 +120,9 @@ type kkrbClient struct {
 	http    *http.Client
 	cached  *KkrbOverview
 	fetched time.Time
+
+	gunsmith   []KkrbGunsmith
+	gunFetched time.Time
 }
 
 func newKkrbClient() *kkrbClient {
@@ -149,6 +163,58 @@ func (k *kkrbClient) Overview(ttl time.Duration) (*KkrbOverview, error) {
 	k.cached = ov
 	k.fetched = time.Now()
 	return ov, nil
+}
+
+// Gunsmith 取改枪方案（带 TTL 缓存；失败回退旧数据）。
+func (k *kkrbClient) Gunsmith(ttl time.Duration) ([]KkrbGunsmith, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if ttl > 0 && len(k.gunsmith) > 0 && time.Since(k.gunFetched) < ttl {
+		return k.gunsmith, nil
+	}
+	if err := k.warm(); err != nil {
+		if len(k.gunsmith) > 0 {
+			return k.gunsmith, nil
+		}
+		return nil, fmt.Errorf("访问 kkrb 页面失败: %w", err)
+	}
+	raw, err := k.postForm("getGunsmithData", nil)
+	if err != nil {
+		if len(k.gunsmith) > 0 {
+			return k.gunsmith, nil
+		}
+		return nil, err
+	}
+	list, err := parseGunsmithData(raw)
+	if err != nil {
+		if len(k.gunsmith) > 0 {
+			return k.gunsmith, nil
+		}
+		return nil, err
+	}
+	k.gunsmith = list
+	k.gunFetched = time.Now()
+	return list, nil
+}
+
+func (k *kkrbClient) postForm(path string, form url.Values) ([]byte, error) {
+	if form == nil {
+		form = url.Values{}
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://www.kkrb.net/"+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", kkrbUA)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Referer", kkrbHome)
+	resp, err := k.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("请求 %s 失败: %w", path, err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 }
 
 func (k *kkrbClient) fetch() (*KkrbOverview, error) {
@@ -277,6 +343,58 @@ func formatKkrbUpdated(s string) string {
 		return ""
 	}
 	return s[:4] + "-" + s[4:6] + "-" + s[6:8]
+}
+
+// parseGunsmithData 解析「改枪方案」接口（pages/battle/gunsmith.html → POST getGunsmithData）。
+//
+// 结构：data["<type>"]["<idx>"] = [ {weaponName, gunsmithCode, modifyPrice, recommendation, provider} ]
+// gunsmithCode 形如 "K416突击步枪-烽火地带-6JOTK7G00B39LBELGJ9Q9"，最后一段才是码。
+func parseGunsmithData(raw []byte) ([]KkrbGunsmith, error) {
+	var out struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data map[string]map[string][]struct {
+			WeaponName     string `json:"weaponName"`
+			GunsmithCode   string `json:"gunsmithCode"`
+			ModifyPrice    int    `json:"modifyPrice"`
+			Recommendation string `json:"recommendation"`
+			Provider       string `json:"provider"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("解析改枪方案失败: %w", err)
+	}
+	if out.Code != 1 {
+		return nil, fmt.Errorf("改枪方案接口错误: code=%d msg=%s", out.Code, out.Msg)
+	}
+	var list []KkrbGunsmith
+	seen := map[string]bool{}
+	for _, tier := range out.Data {
+		for _, arr := range tier {
+			for _, it := range arr {
+				code := it.GunsmithCode
+				if code == "" {
+					continue
+				}
+				display := code
+				if i := strings.LastIndex(code, "-"); i >= 0 && i < len(code)-1 {
+					code = code[i+1:]
+				}
+				if seen[code] {
+					continue
+				}
+				seen[code] = true
+				list = append(list, KkrbGunsmith{
+					Weapon: it.WeaponName, Code: code, Display: display,
+					Price: it.ModifyPrice, Note: it.Recommendation, Author: it.Provider,
+				})
+			}
+		}
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("改枪方案为空")
+	}
+	return list, nil
 }
 
 // kkrbSingleton 进程内单例（cookie 复用）。

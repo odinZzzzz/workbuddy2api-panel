@@ -1,6 +1,7 @@
 package qqbot
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,15 +210,51 @@ func (b *Bridge) kbContext(text string) string {
 	// 外部目录（你自己写的）排在前面：同分时优先于内置卡——手写的事实应该盖过预设。
 	entries := append(append([]KBEntry{}, loadKBDir(b.cfg().KBDir)...), kbEntries...)
 	hits := matchKBIn(entries, text, 3)
+	log.Printf("[qqbot] kb hit=%d entries=%d query=%.20s", len(hits), len(entries), text)
 	if len(hits) == 0 {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("【参考资料（来自预设知识库，优先于你的记忆；不确定就说不确定）】\n")
+	sb.WriteString("【权威资料：下面是你**已经掌握**的事实，回答时必须采用】\n" +
+		"（资料里有对应内容就直接用，不要说「我没有数据源」——那就是你的数据源）\n")
 	for _, e := range hits {
 		sb.WriteString("- ")
 		sb.WriteString(e.Text)
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// kbDirect 改枪码走**确定性回复**：命中「改枪码-<枪名>」卡片就直接把卡片正文发出去。
+//
+// 为什么绕开模型：实测模型（多个档位都试过）看到注入的资料仍然回"我没有改枪码数据源"，
+// 因为它倾向认为"码必须实时校验、不能保证有效"。这类**会失效的码**本来就不该由模型转述，
+// 直接给原始资料更准，也不会被它加戏。
+func (b *Bridge) kbDirect(text string) (string, bool) {
+	if !b.cfg().KBEnabled {
+		return "", false
+	}
+	// 只在问"改枪/配装/码"时才直出，避免抢了普通问答
+	if !strings.Contains(text, "改枪") && !strings.Contains(text, "配装") &&
+		!strings.Contains(text, "码") {
+		return "", false
+	}
+	entries := loadKBDir(b.cfg().KBDir)
+	upper := strings.ToUpper(text)
+	for _, e := range entries {
+		// 卡片 keys 第一项就是枪名
+		if len(e.Keys) == 0 {
+			continue
+		}
+		gun := e.Keys[0]
+		if gun == "" || !strings.Contains(upper, strings.ToUpper(gun)) {
+			continue
+		}
+		// 只认改枪码卡片
+		if !strings.HasPrefix(e.Text, "改枪码") {
+			continue
+		}
+		return e.Text, true
+	}
+	return "", false
 }

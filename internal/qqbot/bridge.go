@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -308,6 +309,18 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// 顺手刷新画像（昵称/等级/签名/号位数）：异步、一天一次，失败静默。
 	b.refreshProfileAsync(ev.UserID)
+	// 改枪码这类"会失效的码"直接发知识卡原文，不经过模型（模型会加戏/拒答）
+	if card, ok := b.kbDirect(text); ok {
+		out := stripMarkdown(card)
+		b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+			User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "kb_direct"})
+		log.Printf("[qqbot] kb_direct → %s: %s", key, truncateRunes(strings.ReplaceAll(out, "\n", " / "), 160))
+		if err := b.send(&ev, truncateRunes(out, 600)); err != nil {
+			log.Printf("[qqbot] kb_direct send failed: %v", err)
+		}
+		return
+	}
+
 	// 双人格：默认善良好青年，被攻击才切龙王（按房间，到期自动回落）
 	prompt := b.cfg().PersonaDefaultPrompt
 	if b.persona != nil {
@@ -358,6 +371,7 @@ func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64, pro
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
 	}
+	answer = stripMarkdown(answer)
 	answer = truncateRunes(answer, b.cfg().MaxReplyRunes)
 	if strings.TrimSpace(answer) == "" {
 		return
@@ -538,14 +552,14 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 			}
 		}
 	}
-	// 预设知识库：命中相关条目就附在 system 末尾（事实卡，优先于模型记忆）
+	// 排版规则：知识类回答要分行，别把列表压成一句话（QQ 不渲染 Markdown，但换行有效）
+	system += "\n\n" + layoutGuide
+	// 预设知识库放**最后**（近因效应：模型对末尾内容依从性最高；之前放前面它当耳旁风）
 	if b.cfg().KBEnabled {
 		if kb := b.kbContext(userText); kb != "" {
 			system += "\n\n" + kb
 		}
 	}
-	// 排版规则：知识类回答要分行，别把列表压成一句话（QQ 不渲染 Markdown，但换行有效）
-	system += "\n\n" + layoutGuide
 	if system != "" {
 		out = append(out, chatMsg{Role: "system", Content: system})
 	}
@@ -634,6 +648,51 @@ func (b *Bridge) send(ev *Event, text string) error {
 		return fmt.Errorf("onebot retcode=%d msg=%s", r.RetCode, r.Msg)
 	}
 	return nil
+}
+
+// mdBold 之类：把常见的 Markdown 记号剥掉。
+//
+// 为什么在代码里做：人设里写了"禁止 Markdown"，模型大多数时候遵守，但偶尔还是冒出
+// **加粗**、反引号、# 标题 —— QQ 不支持富文本，这些会原样显示成噪音。与其指望模型
+// 每次都记得，不如发送前硬剥一层（只剥记号，不动正文内容）。
+var (
+	mdBold         = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+	mdItalic       = regexp.MustCompile(`(?m)(^|[^*])\*([^*\n]+)\*`)
+	mdCode         = regexp.MustCompile("`([^`\n]+)`")
+	mdHeading      = regexp.MustCompile(`(?m)^\s*#{1,6}\s*`)
+	mdQuote        = regexp.MustCompile(`(?m)^\s*>\s?`)
+	mdLink         = regexp.MustCompile(`\[([^\]\n]+)\]\(([^)\n]+)\)`)
+	mdTableSep     = regexp.MustCompile(`(?m)^\s*\|?[\s:|-]{5,}\|?\s*$`)
+	mdTableRow     = regexp.MustCompile(`(?m)^\s*\|.+\|\s*$`)
+	mdTableSepOnly = regexp.MustCompile(`^[\s:|-]+$`)
+	mdStrike       = regexp.MustCompile(`~~([^~\n]+)~~`)
+)
+
+// stripMarkdown 剥掉 Markdown 记号；链接保留"文字 (url)"的形式，信息不丢。
+func stripMarkdown(s string) string {
+	s = mdLink.ReplaceAllString(s, "$1 ($2)")
+	s = mdBold.ReplaceAllString(s, "$1")
+	s = mdStrike.ReplaceAllString(s, "$1")
+	s = mdCode.ReplaceAllString(s, "$1")
+	s = mdItalic.ReplaceAllString(s, "${1}$2")
+	s = mdHeading.ReplaceAllString(s, "")
+	s = mdQuote.ReplaceAllString(s, "")
+	s = mdTableSep.ReplaceAllString(s, "")
+	// 表格行：| 地图 | 密码 | → 地图 密码（多行仍是多行，只是去掉管道符）
+	s = mdTableRow.ReplaceAllStringFunc(s, func(line string) string {
+		cells := []string{}
+		for _, c := range strings.Split(strings.TrimSpace(strings.Trim(line, "|")), "|") {
+			c = strings.TrimSpace(c)
+			if c != "" && !regexp.MustCompile(`^[:\- ]+$`).MatchString(c) {
+				cells = append(cells, c)
+			}
+		}
+		if len(cells) == 0 {
+			return ""
+		}
+		return strings.Join(cells, "：")
+	})
+	return s
 }
 
 // truncateRunes 按字符截断（避免切坏 UTF-8）。
@@ -960,18 +1019,31 @@ func (b *Bridge) personaSnapshot() []PersonaView {
 //
 // 背景：QQ 不渲染 Markdown，但**换行有效**。之前把"六张图的密码"压成一句话，
 // 群友得逐字找；分行后一眼扫完。规则只针对"列表类信息"，闲聊仍保持 1~3 句。
-const layoutGuide = `【配图优先】
-- 涉及**每日密码、制造利润、材料价格、活动时间**这类"能一眼看完的数据"，除文字外要顺手画图：
+const layoutGuide = `【改枪码的来源】
+- 改枪码**只认【参考资料】里的「改枪码-<枪名>」卡片**（抖音博主 always聪聪 最新视频）。
+- 卡片里没有这把枪，就直说「聪聪最近的视频里没有 XX 的码」，别编、也别拿别的来源凑。
+
+【时效性数据必须查工具】
+- 每日密码、改枪码、制造利润、材料价格这类**会随版本/日期变化**的数据，
+  **必须调用工具取最新**，禁止凭记忆或"我觉得应该是"来回答 —— 记错了就是坑人。
+- 工具返回什么就照着说；工具失败就直说"现在取不到，稍后再试"，不要自己编一串。
+
+【配图优先】
+- 涉及**每日密码、制造利润、材料价格、活动时间、改枪码**这类"能一眼看完的数据"，除文字外要顺手画图：
   密码 → chart_password；制造/材料/子弹 → chart_market；活动 → chart_events。
 - 文字给结论和要点，图片给直观对比，两者不重复堆砌（图上有的，文字只提关键一条）。
 
 【排版规则】
+- QQ 是**纯文本**，不支持任何富文本/Markdown：
+  禁止 **加粗星号**、反引号、# 井号标题、| --- | 表格线、[]() 链接语法、> 引用、--- 分割线。
+  这些符号会**原样显示**成噪音，一个都不要用。
+- 要强调就用中文符号：「【】」「：」「·」，或者换个说法，不要靠符号。
 - 列表类信息（密码、价格、点位、材料、步骤、多个选项）**必须每行一条**，不要用顿号压成一句话。
-- 每行格式：名称：值（必要时补一句极短说明），行首用「·」或「-」都可以。
+- 每行格式：名称：值（必要时补一句极短说明），行首用「·」或「-」都可以，但整条消息要统一。
 - 第一行给一句结论/总数，列表跟在下面；末尾一句话补充（如刷新时间），不要重复列表内容。
 - 工具返回的列表要**原样保留分行**，不要自己压平或改写顺序。
 - 非列表内容仍然保持 1~3 句短句，别为了排版硬拆行。
-- 不用 Markdown 语法（加粗星号、井号标题、表格），QQ 不渲染，只会变成噪音。`
+`
 
 // kkrbOverview 取 kkrb 概览数据（统一缓存入口，供各市场工具复用）。
 func (b *Bridge) kkrbOverview() (*KkrbOverview, error) {

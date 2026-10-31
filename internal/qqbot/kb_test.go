@@ -42,7 +42,7 @@ func TestMatchKB(t *testing.T) {
 // 命中时 kbContext 要带上"参考资料"抬头，避免模型把它当用户发言。
 func TestKBContextHeader(t *testing.T) {
 	got := New(Default()).kbContext("今天密码是多少")
-	if !strings.HasPrefix(got, "【参考资料") {
+	if !strings.HasPrefix(got, "【权威资料") {
 		t.Errorf("应有参考资料抬头: %.60s", got)
 	}
 }
