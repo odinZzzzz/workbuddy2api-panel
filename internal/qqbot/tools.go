@@ -94,7 +94,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return sb.String(), nil
 		})
 
-	add("draw_chart", "把数据画成柱状图发到当前会话（图文结合）。items 传 [{label,value}]，最多 12 条。回答涉及数值对比（利润、价格、伤害）时用。",
+	add("draw_chart", "画柱状图发到会话。items=[{label,value}]，≤12 条。有数值对比时用。",
 		obj(map[string]any{
 			"title": map[string]any{"type": "string", "description": "图标题，简短"},
 			"items": map[string]any{
@@ -132,7 +132,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return fmt.Sprintf("已画出柱状图（%d 条数据）并发到当前会话", len(in.Items)), nil
 		})
 
-	add("official_news", "查三角洲行动官网（df.qq.com）最新内容流（视频/赛事/干员档案等，带标题+日期+详情链接）。注意：官网「公告/新闻」列表走的是另一套组件、接口取不到，所以问「更新公告」时用它+官网链接一起回答，别编造公告内容。",
+	add("official_news", "查官网最新内容（标题+日期+链接）。公告列表接口取不到，问到就只给链接，别编。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			ttl := time.Duration(tc.b.cfg().KkrbCacheMinutes) * time.Minute
@@ -154,7 +154,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return sb.String(), nil
 		})
 
-	add("gunsmith_code", "查改枪码（抖音博主 always聪聪 最新视频里的配置，覆盖 20+ 枪型）。weapon 传枪名或关键词，如 M700 / MK47 / M7。返回内容**原样输出**：变体名 + 码 + 视频链接，不要重排、不要改写码。",
+	add("gunsmith_code", "查改枪码（烽火地带，抖音博主配置）。weapon=枪名或关键词。返回的码原样输出，别改写。",
 		obj(map[string]any{
 			"weapon": map[string]any{"type": "string", "description": "枪名或关键词，如 M700 / MK47；不传=列出全部"},
 		}),
@@ -179,7 +179,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return text, nil
 		})
 
-	add("add_gunsmith_code", "把群友提供的改枪码加进知识库（只支持**已收录**的枪）。weapon 传枪名，code 传分享码，label 可选（说明这码什么流派）。调用成功后**只用一句话确认**（如「加上了，M700」），不要追问是谁给的、也不要复述码。",
+	add("add_gunsmith_code", "把群友给的码加进知识库（仅已收录的枪）。成功后一句话确认。",
 		obj(map[string]any{
 			"weapon": map[string]any{"type": "string", "description": "枪名，必须是已收录的，如 M700 / MK47"},
 			"code":   map[string]any{"type": "string", "description": "16~24 位分享码（大写字母数字）"},
@@ -203,7 +203,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return tc.b.AddGunsmithCode(in.Weapon, in.Code, in.Label, who)
 		})
 
-	add("chart_password", "把今日地图密码画成图片（图名 + 四位数字，方便照着抄）。有人问密码、密码门时配合 daily_password 一起发。",
+	add("chart_password", "把今日密码画成图片。问密码时配合 daily_password 发。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			ov, err := tc.b.kkrbOverview()
@@ -236,7 +236,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return fmt.Sprintf("已把 %d 张图的密码画成图片发出", len(tiles)), nil
 		})
 
-	add("chart_events", "把当前活动画成日历图片（活动名 + 时间区间 + 物品）。有人问最近有什么活动、活动到什么时候时用。",
+	add("chart_events", "把当前活动画成日历图（名称+时间+物品）。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			ov, err := tc.b.kkrbOverview()
@@ -265,7 +265,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return fmt.Sprintf("已把 %d 个活动画成日历图片发出", len(rows)), nil
 		})
 
-	add("chart_market", "把三角洲市场数据画成柱状图（一次调用：取数 + 画图 + 发送）。kind=craft（制造利润）/material（材料当前价）/ammo（子弹兑换利润）。",
+	add("chart_market", "把市场数据画成柱状图。kind=craft/material/ammo。",
 		obj(map[string]any{
 			"kind": map[string]any{"type": "string", "enum": []string{"craft", "material", "ammo"}},
 		}, "kind"),
@@ -317,79 +317,73 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return fmt.Sprintf("已把「%s」画成柱状图并发送（%d 条）", title, len(items)), nil
 		})
 
-	add("market_craft", "查三角洲特勤处制造推荐（技术中心/工作台/制药台/防具台各一条：产物、利润、材料成本、建议卖出时段）。有人问制造赚什么、特勤处做什么时调用。",
-		obj(map[string]any{}),
+	add("market", "查市场数据。kind：craft=制造推荐 / material=材料价格浮动 / ammo=子弹利润与热门。",
+		obj(map[string]any{
+			"kind": map[string]any{"type": "string", "enum": []string{"craft", "material", "ammo"},
+				"description": "要查哪类，默认 craft"},
+		}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				Kind string `json:"kind"`
+			}
+			_ = json.Unmarshal(args, &in)
+			kind := strings.ToLower(strings.TrimSpace(in.Kind))
+			if kind == "" {
+				kind = "craft"
+			}
 			ov, err := tc.b.kkrbOverview()
 			if err != nil {
 				return "", err
 			}
-			if len(ov.Crafts) == 0 {
-				return "今天没有制造推荐数据", nil
-			}
 			var sb strings.Builder
-			sb.WriteString("特勤处制造推荐：\n")
-			for _, c := range ov.Crafts {
-				fmt.Fprintf(&sb, "- %s：%s，利润 %.0f（材料 %.0f / 售价 %.0f）", c.Place, c.Item, c.Profit, c.Material, c.Price)
-				if c.SellHint != "" {
-					sb.WriteString("，最高价时段 " + c.SellHint)
+			switch kind {
+			case "material":
+				if len(ov.Materials) == 0 {
+					return "今天没有材料浮动数据", nil
 				}
-				sb.WriteString("\n")
-			}
-			return sb.String(), nil
-		})
-
-	add("market_material", "查三角洲价格浮动大的制造材料（当前价、昨日最高/最低与时段）。有人问什么材料值得囤/什么时候买时调用。",
-		obj(map[string]any{}),
-		func(tc toolContext, args json.RawMessage) (string, error) {
-			ov, err := tc.b.kkrbOverview()
-			if err != nil {
-				return "", err
-			}
-			if len(ov.Materials) == 0 {
-				return "今天没有材料浮动数据", nil
-			}
-			var sb strings.Builder
-			sb.WriteString("材料价格浮动（当前 / 昨日高 / 昨日低）：\n")
-			for _, m := range ov.Materials {
-				fmt.Fprintf(&sb, "- %s：%d / %d（%s）/ %d（%s）\n", m.Item, m.Current, m.High, m.HighTime, m.Low, m.LowTime)
-			}
-			return sb.String(), nil
-		})
-
-	add("market_ammo", "查三角洲热门子弹与子弹兑换利润榜。有人问哪种子弹好卖/兑换子弹赚不赚时调用。",
-		obj(map[string]any{}),
-		func(tc toolContext, args json.RawMessage) (string, error) {
-			ov, err := tc.b.kkrbOverview()
-			if err != nil {
-				return "", err
-			}
-			var sb strings.Builder
-			if len(ov.AmmoProfit) > 0 {
-				sb.WriteString("子弹兑换利润（前 5）：\n")
-				for i, a := range ov.AmmoProfit {
-					if i >= 5 {
-						break
+				sb.WriteString("材料价格浮动（当前 / 昨日高 / 昨日低）：\n")
+				for _, m := range ov.Materials {
+					fmt.Fprintf(&sb, "- %s：%d / %d（%s）/ %d（%s）\n", m.Item, m.Current, m.High, m.HighTime, m.Low, m.LowTime)
+				}
+			case "ammo":
+				if len(ov.AmmoProfit) > 0 {
+					sb.WriteString("子弹兑换利润（前 5）：\n")
+					for i, a := range ov.AmmoProfit {
+						if i >= 5 {
+							break
+						}
+						fmt.Fprintf(&sb, "- %s：%.0f\n", a.Item, a.Profit)
 					}
-					fmt.Fprintf(&sb, "- %s：%.0f\n", a.Item, a.Profit)
 				}
-			}
-			if len(ov.AmmoHot) > 0 {
-				sb.WriteString("热门子弹（前 5，当前价）：\n")
-				for i, a := range ov.AmmoHot {
-					if i >= 5 {
-						break
+				if len(ov.AmmoHot) > 0 {
+					sb.WriteString("热门子弹（前 5，当前价）：\n")
+					for i, a := range ov.AmmoHot {
+						if i >= 5 {
+							break
+						}
+						fmt.Fprintf(&sb, "- %s：%d\n", a.Item, a.Current)
 					}
-					fmt.Fprintf(&sb, "- %s：%d\n", a.Item, a.Current)
 				}
-			}
-			if sb.Len() == 0 {
-				return "今天没有子弹数据", nil
+				if sb.Len() == 0 {
+					return "今天没有子弹数据", nil
+				}
+			default: // craft
+				if len(ov.Crafts) == 0 {
+					return "今天没有制造推荐数据", nil
+				}
+				sb.WriteString("特勤处制造推荐：\n")
+				for _, c := range ov.Crafts {
+					fmt.Fprintf(&sb, "- %s：%s，利润 %.0f（材料 %.0f / 售价 %.0f）", c.Place, c.Item, c.Profit, c.Material, c.Price)
+					if c.SellHint != "" {
+						sb.WriteString("，最高价时段 " + c.SellHint)
+					}
+					sb.WriteString("\n")
+				}
 			}
 			return sb.String(), nil
 		})
 
-	add("list_sticker_templates", "列出可用的名画/风格 SVG 模板（神奈川冲浪里、星月夜、呐喊、珍珠耳环等）。想画「有名画感」的表情包时先看这里。",
+	add("list_sticker_templates", "列出名画/风格模板名。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			var sb strings.Builder
@@ -413,7 +407,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return tc.b.TemplateSource(in.Name)
 		})
 
-	add("send_face", "发一个 QQ 原生表情（比表情包轻，客户端原生渲染）。name 传中文名或 id，例如 白眼/发怒/调皮/微笑/抠鼻/亲亲。可用："+faceNames(),
+	add("send_face", "发 QQ 原生表情。name 传中文名或 id。常用："+faceNames(),
 		obj(map[string]any{
 			"name": map[string]any{"type": "string", "description": "表情中文名或数字 id，如 白眼 / 12"},
 		}, "name"),
