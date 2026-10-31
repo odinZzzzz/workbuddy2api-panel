@@ -890,12 +890,14 @@ func TestUserResourceDetailedWithExpirySnapshot(t *testing.T) {
 		return jsonResp(200, payload), nil
 	})
 
-	remain, total, expiring, earliestAt, earliestRemaining, err := c.UserResourceDetailedWithExpiry(
+	snap, err := c.UserResourceDetailedWithExpiry(
 		&auth.Auth{AccessToken: "at", UID: "u1"}, 48*time.Hour,
 	)
 	if err != nil {
 		t.Fatalf("resource: %v", err)
 	}
+	remain, total, expiring := snap.Remain, snap.Total, snap.Expiring
+	earliestAt, earliestRemaining := snap.EarliestAt, snap.EarliestRemaining
 	if remain != 50 || total != 50 || expiring != 25 {
 		t.Fatalf("remain/total/expiring=%d/%d/%d want 50/50/25", remain, total, expiring)
 	}

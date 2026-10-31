@@ -81,7 +81,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			errs = append(errs, fmt.Sprintf("missing required fields (id=%s)", acc.ID))
 			continue
 		}
-		if !validImportUID(uid) {
+		if !validUID(uid) {
 			skipped++
 			errs = append(errs, fmt.Sprintf("invalid uid (id=%s)", acc.ID))
 			continue
@@ -163,19 +163,4 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		"skipped":  skipped,
 		"errors":   errs,
 	})
-}
-
-// validImportUID 校验导入 uid 是否可用于拼文件名（同 login.go validUID 口径）。
-func validImportUID(uid string) bool {
-	if uid == "" || len(uid) > 64 {
-		return false
-	}
-	for _, c := range uid {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
-		default:
-			return false
-		}
-	}
-	return true
 }

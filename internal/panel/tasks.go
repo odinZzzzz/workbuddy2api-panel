@@ -5,6 +5,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -15,6 +16,23 @@ import (
 
 // acceptBatchGap 批量接受的批间节流（对齐脚本 1.05s 口径，避免上游风控）。
 var acceptBatchGap = 1050 * time.Millisecond
+
+// sleepCtx 可取消的节流等待：ctx 取消（客户端断连 / 服务停机）立即返回 false，
+// 不再傻等节流窗口。与 server.sleepCtx、scheduler 的同名实现同模式——panel 不宜
+// 反向依赖那两个包，故在消费侧保留等价物。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
 
 // accountByUID 取账号凭证；不存在时写 404 并返回 nil。
 func (p *Panel) accountByUID(w http.ResponseWriter, uid string) *auth.Auth {
@@ -129,7 +147,12 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		accepted += end - i
-		time.Sleep(acceptBatchGap) // 批间节流（对齐脚本 1.05s 口径）
+		// 批间节流（对齐脚本 1.05s 口径）。ctx 感知：客户端断开后继续打上游只会
+		// 白烧配额，且响应已无处可写——立即终止并留日志。
+		if !sleepCtx(r.Context(), acceptBatchGap) {
+			log.Printf("panel: 全部接受 uid=%s 客户端断开，提前终止（已接受=%d）", uid, accepted)
+			return
+		}
 	}
 	// 小程序口径任务单独批量接受（默认列表不含 mp 码，accept 也要求 mp 头）。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
@@ -146,7 +169,10 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, mpCodes...)
 			} else {
 				accepted += len(mpCodes)
-				time.Sleep(acceptBatchGap)
+				if !sleepCtx(r.Context(), acceptBatchGap) {
+					log.Printf("panel: 全部接受 uid=%s 客户端断开，提前终止（已接受=%d，mp 批后）", uid, accepted)
+					return
+				}
 			}
 		}
 	}

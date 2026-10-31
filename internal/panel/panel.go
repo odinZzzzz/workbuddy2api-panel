@@ -312,6 +312,34 @@ func (p *Panel) apiKey() string {
 	return p.cfg.APIKey
 }
 
+// toPoolCredits 把上游快照转成池内写入包（唯一转换点：pool 不依赖 upstream 的
+// DTO，避免状态层反向依赖 HTTP 客户端）。
+func toPoolCredits(snap upstream.ResourceSnapshot) pool.CreditsSnapshot {
+	batches := make([]pool.CreditBatch, 0, len(snap.Batches))
+	for _, b := range snap.Batches {
+		batches = append(batches, pool.CreditBatch{At: b.At, Remain: b.Remain})
+	}
+	return pool.CreditsSnapshot{
+		Remain:            snap.Remain,
+		Total:             snap.Total,
+		Expiring:          snap.Expiring,
+		EarliestAt:        snap.EarliestAt,
+		EarliestRemaining: snap.EarliestRemaining,
+		Batches:           batches,
+	}
+}
+
+// creditsSnapshotAt 余额快照时刻的可序列化形式：零值 → nil（JSON null）。
+func creditsSnapshotAt(p *pool.Pool) any {
+	if p == nil {
+		return nil
+	}
+	if t := p.CreditsSnapshotAt(); !t.IsZero() {
+		return t
+	}
+	return nil
+}
+
 // expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
 func (p *Panel) expiringSoonWindow() time.Duration {
 	if p.cfg.Scheduler == nil {
@@ -352,7 +380,12 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		// credits_snapshot_at 最近一次余额快照写入时刻：到期卡片的 badge 用它显示
+		// 「快照 · N 分钟前」，让「边界附近刷新一次就变色」有据可查。
+		// 零值必须输出 nil 而不是 time.Time 零值——后者会序列化成 0001-01-01T00:00:00Z，
+		// 前端按「N 天前」渲染，比不显示年龄更误导。
+		"credits_snapshot_at": creditsSnapshotAt(p.cfg.Pool),
+		"accounts":            p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
@@ -647,17 +680,17 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
-	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
+	snap, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
 		resp["balance_error"] = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
-	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
-	resp["credits"] = remain
-	resp["credits_total"] = total
-	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
+	p.cfg.Pool.ReenableIfCredits(uid, snap.Remain, snap.Total)
+	p.cfg.Pool.SetCreditsDetailed(uid, toPoolCredits(snap))
+	resp["credits"] = snap.Remain
+	resp["credits_total"] = snap.Total
+	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, snap.Remain, snap.Total)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -669,13 +702,13 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
+	snap, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
+	p.cfg.Pool.SetCreditsDetailed(uid, toPoolCredits(snap))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": snap.Remain, "credits_total": snap.Total})
 }
 
 // accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。

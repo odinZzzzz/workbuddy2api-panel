@@ -241,6 +241,33 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 				e.creditsEarliestRemaining -= d
 			}
 		}
+		// 展示口径批次同口径扣减（FEFO：上游按失效时刻先后扣包，从最早批次开始扣）。
+		// 不做这步，两次余额刷新之间卡片会把已消耗的积分继续算在「即将作废」里。
+		if len(e.creditsBatches) > 0 {
+			left := d
+			for i := range e.creditsBatches {
+				if left <= 0 {
+					break
+				}
+				if e.creditsBatches[i].Remain > left {
+					e.creditsBatches[i].Remain -= left
+					left = 0
+				} else {
+					left -= e.creditsBatches[i].Remain
+					e.creditsBatches[i].Remain = 0
+				}
+			}
+			kept := e.creditsBatches[:0]
+			for _, b := range e.creditsBatches {
+				if b.Remain > 0 {
+					kept = append(kept, b)
+				}
+			}
+			if len(kept) == 0 {
+				kept = nil
+			}
+			e.creditsBatches = kept
+		}
 	}
 	if e.modelCost == nil {
 		e.modelCost = make(map[string]modelCostEntry)
@@ -554,6 +581,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,
+		CreditsBatches:           e.creditsBatches,
 		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:                   e.reason,
 		Disabled:                 e.disabled,

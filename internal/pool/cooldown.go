@@ -5,6 +5,7 @@ package pool
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"time"
 )
@@ -63,40 +64,133 @@ func (p *Pool) NoteCheckinDone(uid string) {
 	}
 }
 
-// SetCreditsDetailed 更新账号余额/总额、配置窗口内的快过架子集，以及最早未来
-// 到期批次。earliestAt 为零或不在未来时清空最早批次；expiring/earliestRemaining
-// 均钳到 [0, credits]，避免上游脏数据污染选号。
-func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, earliestAt time.Time, earliestRemaining int64) {
+// CreditsSnapshot 一次余额查询的池内写入包。与 upstream.ResourceSnapshot 同构，
+// 但 pool 不依赖 upstream 的 DTO（避免状态层反向依赖 HTTP 客户端），转换由调用方
+// （scheduler / panel）完成。
+//
+// 字段分两套口径，见 upstream.ResourceSnapshot 的注释：
+//   - Remain/Total/Expiring/EarliestAt/EarliestRemaining → 路由（CycleEndTime）
+//   - Batches → 展示（DeductionEndTime 优先）
+type CreditsSnapshot struct {
+	Remain            int64
+	Total             int64
+	Expiring          int64
+	EarliestAt        time.Time
+	EarliestRemaining int64
+	Batches           []CreditBatch
+}
+
+// creditBatchHorizon / creditBatchLimit 单账号持久化的批次裁剪口径。
+// 面板只用到「最早一批 + 7 天合计 + 随后 3 批」，30 天 / 10 批已远超所需，同时
+// 避免 state.json 无界膨胀（账号多时每账号几十到几百字节）。
+const (
+	creditBatchHorizon = 30 * 24 * time.Hour
+	creditBatchLimit   = 10
+)
+
+// normalizeBatches 清洗展示口径批次：只留「未来且正余额」，按到期时刻升序合并
+// 同刻批次，裁剪为「最早一批**必留** + 未来 30 天内其余批次，上限 10 批」，最后
+// 累计钳到总余额。
+//
+// 「最早一批必留」很关键：只有 200 天后长期包的账号不能被裁成「无未来到期批次」，
+// 那是假信息。钳到总余额则防上游重复记录把同一笔积分算成两批。
+func normalizeBatches(in []CreditBatch, credits int64, now time.Time) []CreditBatch {
+	if len(in) == 0 || credits <= 0 {
+		return nil
+	}
+	kept := make([]CreditBatch, 0, len(in))
+	for _, b := range in {
+		if b.Remain <= 0 || !b.At.After(now) {
+			continue
+		}
+		kept = append(kept, b)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].At.Before(kept[j].At) })
+	merged := kept[:0]
+	for _, b := range kept {
+		if n := len(merged); n > 0 && merged[n-1].At.Equal(b.At) {
+			merged[n-1].Remain += b.Remain
+			continue
+		}
+		merged = append(merged, b)
+	}
+	horizon := now.Add(creditBatchHorizon)
+	out := make([]CreditBatch, 0, creditBatchLimit)
+	for i, b := range merged {
+		if i > 0 && (b.At.After(horizon) || len(out) >= creditBatchLimit) {
+			break
+		}
+		out = append(out, b)
+	}
+	var sum int64
+	trimmed := out[:0]
+	for _, b := range out {
+		if sum >= credits {
+			break
+		}
+		if b.Remain > credits-sum {
+			b.Remain = credits - sum
+		}
+		sum += b.Remain
+		trimmed = append(trimmed, b)
+	}
+	if len(trimmed) == 0 {
+		return nil
+	}
+	return trimmed
+}
+
+// SetCreditsDetailed 用一次余额查询的结果覆盖账号的余额与两套到期快照。
+// earliestAt 为零或不在未来时清空最早批次；expiring/earliestRemaining 均钳到
+// [0, credits]，避免上游脏数据污染选号。batches 是展示口径，写入前经
+// normalizeBatches 过滤/合并/裁剪。
+func (p *Pool) SetCreditsDetailed(uid string, snap CreditsSnapshot) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
-		if credits < 0 {
-			credits = 0
-		}
-		if expiring < 0 {
-			expiring = 0
-		}
-		if expiring > credits {
-			expiring = credits
-		}
-		now := time.Now()
-		if earliestRemaining < 0 {
-			earliestRemaining = 0
-		}
-		if earliestRemaining > credits {
-			earliestRemaining = credits
-		}
-		if earliestAt.IsZero() || !earliestAt.After(now) || earliestRemaining == 0 {
-			earliestAt = time.Time{}
-			earliestRemaining = 0
-		}
-		e.credits = credits
-		e.creditsTotal = total
-		e.creditsExpiring = expiring
-		e.creditsEarliestExpiry = earliestAt
-		e.creditsEarliestRemaining = earliestRemaining
-		p.dirty.Store(true)
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
 	}
+	credits, total, expiring := snap.Remain, snap.Total, snap.Expiring
+	earliestAt, earliestRemaining := snap.EarliestAt, snap.EarliestRemaining
+	if credits < 0 {
+		credits = 0
+	}
+	if expiring < 0 {
+		expiring = 0
+	}
+	if expiring > credits {
+		expiring = credits
+	}
+	now := time.Now()
+	if earliestRemaining < 0 {
+		earliestRemaining = 0
+	}
+	if earliestRemaining > credits {
+		earliestRemaining = credits
+	}
+	if earliestAt.IsZero() || !earliestAt.After(now) || earliestRemaining == 0 {
+		earliestAt = time.Time{}
+		earliestRemaining = 0
+	}
+	e.credits = credits
+	e.creditsTotal = total
+	e.creditsExpiring = expiring
+	e.creditsEarliestExpiry = earliestAt
+	e.creditsEarliestRemaining = earliestRemaining
+	e.creditsBatches = normalizeBatches(snap.Batches, credits, now)
+	p.creditsAt = now
+	p.dirty.Store(true)
+}
+
+// CreditsSnapshotAt 返回最近一次余额快照的写入时刻（零值 = 本进程尚无快照）。
+func (p *Pool) CreditsSnapshotAt() time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.creditsAt
 }
 
 // ClearExpiringSnapshots 清空所有账号的快过期/最早到期缓存。配置窗口改变时调用，

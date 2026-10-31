@@ -71,6 +71,10 @@ type Pool struct {
 	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
 	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
 	persistFails int
+	// creditsAt 最近一次余额快照写入时刻（SetCreditsDetailed 在持锁下更新）。
+	// 供面板到期卡片标注「快照 · N 分钟前」——颜色按真实小时算，边界附近刷新一次
+	// 就会变色，用户需要知道这是估算而不是随机跳。零值 = 本次进程尚无快照。
+	creditsAt time.Time
 	// pickSeq 单调递增的选号序号：每次 pick 选中账号时自增并记到 entry.usedSeq，
 	// 为 LRU 兜底/防惊群提供与 time.Now() 精度无关的严格全序（Windows ~0.5ms 精度下
 	// lastUsed 墙钟会全等）。仅 pick 写锁路径读写，无需 atomic。

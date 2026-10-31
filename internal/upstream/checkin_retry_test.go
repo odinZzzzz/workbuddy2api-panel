@@ -104,8 +104,8 @@ func TestUserResourceDetailedRetriesTransient500(t *testing.T) {
 			{"PackageName":"p","CapacitySize":100,"CapacityRemain":60}
 		]}}}}`), nil
 	})
-	remain, _, _, _, _, err := c.UserResourceDetailedWithExpiry(&auth.Auth{AccessToken: "at"}, 0)
-	if err != nil || remain != 60 {
+	snap, err := c.UserResourceDetailedWithExpiry(&auth.Auth{AccessToken: "at"}, 0)
+	if remain := snap.Remain; err != nil || remain != 60 {
 		t.Fatalf("remain=%d err=%v, want 60 nil", remain, err)
 	}
 	if n := atomic.LoadInt32(&calls); n != 2 {

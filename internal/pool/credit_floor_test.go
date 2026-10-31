@@ -117,7 +117,7 @@ func TestCreditFloorRecoversAfterCheckin(t *testing.T) {
 		t.Fatalf("触底期应被拦，got %v", a.UID)
 	}
 	// 签到回血：权威余额刷新到 floor 之上。
-	p.SetCreditsDetailed("only", 500, 0, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("only", CreditsSnapshot{Remain: 500})
 	a := p.PickExcludingForRealm(nil, "hy4-preview", "")
 	if a == nil {
 		t.Fatal("回血后（credits=500 ≥ floor=100）应恢复可选，got nil")

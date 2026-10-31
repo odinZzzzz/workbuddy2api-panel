@@ -62,6 +62,30 @@ func TestIndexHTMLNoInlineScript(t *testing.T) {
 	}
 }
 
+// TestIndexHTMLNoInlineEventHandlers index.html 不得含内联事件处理器（on*=）：
+// 严格 CSP（script-src 'self'，无 unsafe-inline）会把它们静默拦掉——代码在、
+// 行为不在，是最难排查的一类回归。实例：密钥框的 onsubmit="return false" 被拦，
+// 回车触发的隐式提交无人拦截（现已改为 app.js 里 addEventListener('submit')）。
+func TestIndexHTMLNoInlineEventHandlers(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+
+	re := regexp.MustCompile(`(?i)\son[a-z]+\s*=\s*["']`)
+	if loc := re.FindStringIndex(body); loc != nil {
+		start := loc[0] - 60
+		if start < 0 {
+			start = 0
+		}
+		end := loc[1] + 40
+		if end > len(body) {
+			end = len(body)
+		}
+		t.Fatalf("index.html contains inline event handler (blocked by CSP): ...%s...", body[start:end])
+	}
+}
+
 // TestAppJSTopLevelSmoke app.js 顶层求值冒烟（v1.11.3/1.11.4 两连炸后补的运行时闸门）：
 // node + DOM 桩执行 app.js（含按 hash 落到各视图的 go() 顶层调用），抓 TDZ/
 // ReferenceError 类运行时错误——Go 侧 frontend_test 不执行 JS，语法层检查对此全盲。
@@ -788,19 +812,23 @@ func TestAppJSExpirySortedByExpiry(t *testing.T) {
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('function expBatches');
-const end = src.indexOf('async function loadExpiry');
-if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
-const sink = { innerHTML: '', textContent: '', hidden: true };
+const a1 = src.indexOf('const PK_DAY_MS');
+const a2 = src.indexOf('function renderPackages');
+const b1 = src.indexOf('const EXP_WEEK_MS');
+const b2 = src.indexOf('async function loadExpiry');
+if (a1 < 0 || a2 < 0 || b1 < 0 || b2 < 0 || b2 < b1) throw new Error('expiry region not found');
+const sink = { innerHTML: '', textContent: '', hidden: true, title: '', addEventListener: () => {} };
 const ctx = {
   esc: s => String(s == null ? '' : s),
   fmtTok: v => String(v == null ? 0 : v),
   $: () => sink,
+  parseAPITime: s => { const t = Date.parse(s || ''); return Number.isFinite(t) ? t : 0; },
   Date, Math, Number, String, Map, Array, Object, isNaN,
   lastPackages: null, lastPackagesAt: 0,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
+vm.runInContext(src.slice(a1, a2), ctx);
+vm.runInContext(src.slice(b1, b2) + '\nthis.renderExpiry = renderExpiry; this.renderExpirySnapshot = renderExpirySnapshot;', ctx);
 const iso = n => {
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
   const p = x => String(x).padStart(2, '0');
@@ -843,11 +871,13 @@ process.stdout.write(JSON.stringify(names));`
 // renderExpiry() 末尾——该函数只有点「检查」才被调用。按钮本身就在隐藏卡片里，
 // 用户看不见也点不到，于是"积分到期提醒"这个功能等于不存在。
 //
-// 修复引入 renderExpirySnapshot()：吃 /overview 响应里的 credits_earliest_expiry /
-// credits_earliest_remaining（state.json 现成数据，零上游请求），并显式设
-// expBox.hidden = false。本用例钉住两件事：
+// 修复引入 renderExpirySnapshot()：吃 /overview 响应里的 credits_batches
+// （state.json 现成数据，零上游请求），并显式设 expBox.hidden = false。
+// 本用例钉住四件事：
 //  1. 只给 overview 形态的输入（没有 packages 字段）也能出内容；
-//  2. 渲染后 expBox.hidden 必须为 false——把这句删掉（还原 bug）测试就必须 FAIL。
+//  2. 渲染后 expBox.hidden 必须为 false——把这句删掉（还原 bug）测试就必须 FAIL；
+//  3. 颜色按真实小时算（48h → 2 天 → 红）且 7 天内合计可取；
+//  4. badge 报出快照年龄（3 分钟前），而不是让用户猜数据新鲜度。
 func TestAppJSExpirySnapshotRenders(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -856,44 +886,43 @@ func TestAppJSExpirySnapshotRenders(t *testing.T) {
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('function renderExpirySnapshot');
-const end = src.indexOf('async function loadExpiry');
-if (start < 0 || end < 0 || end < start) throw new Error('expiry snapshot region not found');
+const a1 = src.indexOf('const PK_DAY_MS');
+const a2 = src.indexOf('function renderPackages');
+const b1 = src.indexOf('const EXP_WEEK_MS');
+const b2 = src.indexOf('async function loadExpiry');
+if (a1 < 0 || a2 < 0 || b1 < 0 || b2 < 0 || b2 < b1) throw new Error('expiry snapshot region not found');
 const sinks = {};
-const mk = id => (sinks[id] = { innerHTML: '', textContent: '', hidden: true });
+const mk = id => (sinks[id] = { innerHTML: '', textContent: '', hidden: true, title: '', addEventListener: () => {} });
 const ctx = {
   esc: s => String(s == null ? '' : s),
   fmtTok: v => String(v == null ? 0 : v),
   $: id => (sinks[id] || mk(id)),
+  parseAPITime: s => { const t = Date.parse(s || ''); return Number.isFinite(t) ? t : 0; },
   Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
-const day = n => {
-  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
-  return d.toISOString();
-};
-// overview 形态：没有 packages 数组，只有到期快照字段。
-const d = { accounts: [
-  { uid: 'aaaaaaaa-1', nickname: '秋',     credits: 4099,
-    credits_earliest_expiry: day(2),  credits_earliest_remaining: 499 },
+vm.runInContext(src.slice(a1, a2), ctx);
+vm.runInContext(src.slice(b1, b2) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const at = h => new Date(Date.now() + h * 3600000).toISOString();
+// overview 形态：没有 packages 数组，只有逐批到期快照 credits_batches。
+const d = { credits_snapshot_at: new Date(Date.now() - 180000).toISOString(), accounts: [
+  { uid: 'aaaaaaaa-1', nickname: '秋', credits: 4099,
+    credits_batches: [{ at: at(48), remain: 400 }, { at: at(120), remain: 99 }] },
   { uid: 'bbbbbbbb-2', nickname: '秋千易', credits: 3243,
-    credits_earliest_expiry: day(30), credits_earliest_remaining: 43 },
-  { uid: 'cccccccc-3', nickname: '长期包', credits: 900,
-    credits_earliest_expiry: null,    credits_earliest_remaining: 0 },
+    credits_batches: [{ at: at(720), remain: 43 }] },
+  { uid: 'cccccccc-3', nickname: '长期包', credits: 900, credits_batches: [] },
 ] };
 ctx.renderExpirySnapshot(d);
 const html = sinks['expList'] ? sinks['expList'].innerHTML : '';
 const names = [...html.matchAll(/<span class="exp-nm">([^<]*)<\/span>/g)].map(m => m[1]);
-// 2 天到期的应排最前（红），30 天其次，无到期信息的排最后。
-const wantNames = JSON.stringify(['秋', '秋千易', '长期包']);
-const gotNames = JSON.stringify(names);
 process.stdout.write(JSON.stringify({
   visible: sinks['expBox'] ? sinks['expBox'].hidden === false : false,
-  rows: names.length,
-  order: gotNames === wantNames,
-  got: gotNames,
-  want: wantNames,
+  order: names,
+  badge: sinks['expBadge'] ? sinks['expBadge'].textContent : '',
+  week: html.indexOf('7 天内合计 499') >= 0,
+  red: html.indexOf('background:var(--bad)') >= 0,
+  empty: html.indexOf('无未来到期批次') >= 0,
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "expsnap-*.cjs")
 	if err != nil {
@@ -907,10 +936,110 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
 	}
-	const want = `{"visible":true,"rows":3,"order":true,"got":"[\"秋\",\"秋千易\",\"长期包\"]","want":"[\"秋\",\"秋千易\",\"长期包\"]"}`
+	// 48h 到期 → days=ceil(48/24)=2 → 红；720h → 30 天 → 绿；空批次 → 统一缺失文案。
+	const want = `{"visible":true,"order":["秋","秋千易","长期包"],"badge":"快照 · 3 分钟前","week":true,"red":true,"empty":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("expiry snapshot=%s\nwant %s（visible 必须为 true，否则卡片仍隐藏）",
 			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSExpiryParity 两条通路对同一批积分必须给出**逐字相同**的渲染结果。
+//
+// 这是本次修复的核心护栏：此前快照通路与明细通路各自实现颜色/天数/文案，结果同一批
+// 积分在快照里是绿的、在明细里是红的（快照按 ceil(时刻差/1天)，明细按日历日差）。
+// 现在两者共用 expModel/expRowHtml，本用例把同一组包分别喂给两条通路，断言
+// expList.innerHTML 完全相等——任何一侧偷偷改阈值、改取整、改时区都会立刻 FAIL。
+//
+// 同时钉住颜色边界（真实小时口径，含边界）：
+//
+//	71.9h → 3 天 红；72.1h → 4 天 琥珀；168h → 7 天 琥珀；168.1h → 8 天 绿
+//
+// 以及后端未升级时的回落：只有 credits_earliest_expiry 的账号必须渲染出「仅最早一批」
+// 的 badge，而不是假装信息是全的。
+func TestAppJSExpiryParity(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry parity test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const a1 = src.indexOf('const PK_DAY_MS');
+const a2 = src.indexOf('function renderPackages');
+const b1 = src.indexOf('const EXP_WEEK_MS');
+const b2 = src.indexOf('async function loadExpiry');
+if (a1 < 0 || a2 < 0 || b1 < 0 || b2 < 0 || b2 < b1) throw new Error('expiry region not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', textContent: '', hidden: true, title: '', addEventListener: () => {} });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  parseAPITime: s => { const t = Date.parse(s || ''); return Number.isFinite(t) ? t : 0; },
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(a1, a2), ctx);
+vm.runInContext(src.slice(b1, b2) +
+  '\nthis.renderExpiry = renderExpiry; this.renderExpirySnapshot = renderExpirySnapshot; this.expModel = expModel;', ctx);
+
+const now = Date.now();
+const ms = h => now + h * 3600000;
+// 同一组包：跨红/琥珀/绿三档，且 7 天内合计 ≠ 最早一批（验证 week 计算也同源）。
+const packs = [
+  { name: 'red',   remain: 400, expires_at: ms(71.9) },
+  { name: 'amber', remain: 99,  expires_at: ms(120) },
+  { name: 'green', remain: 43,  expires_at: ms(169) },
+];
+ctx.renderExpiry({ accounts: [
+  { uid: 'u1', nickname: 'A', remain: 542, packages: packs },
+  { uid: 'u2', nickname: 'B', remain: 0, packages: [] },
+] });
+const detail = sinks['expList'].innerHTML;
+
+ctx.renderExpirySnapshot({ accounts: [
+  { uid: 'u1', nickname: 'A', credits_batches: packs.map(p => ({ at: new Date(p.expires_at).toISOString(), remain: p.remain })) },
+  { uid: 'u2', nickname: 'B', credits_batches: [] },
+] });
+const snapshot = sinks['expList'].innerHTML;
+
+// 后端未升级的回落形态。
+ctx.renderExpirySnapshot({ accounts: [
+  { uid: 'u1', nickname: 'A', credits_earliest_expiry: new Date(ms(48)).toISOString(), credits_earliest_remaining: 400 },
+] });
+const legacyBadge = sinks['expBadge'].textContent;
+
+const boundary = h => {
+  const m = ctx.expModel(now + h * 3600000, 100, now);
+  return m.days + '|' + m.color;
+};
+process.stdout.write(JSON.stringify({
+  equal: detail === snapshot,
+  detail: detail === snapshot ? '' : detail,
+  snapshot: detail === snapshot ? '' : snapshot,
+  b71_9: boundary(71.9),
+  b72_1: boundary(72.1),
+  b168: boundary(168),
+  b168_1: boundary(168.1),
+  legacyBadge: legacyBadge,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expparity-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry parity node test failed: %v\n%s", err, out)
+	}
+	const want = `{"equal":true,"detail":"","snapshot":"","b71_9":"3|var(--bad)","b72_1":"4|var(--warn)","b168":"7|var(--warn)","b168_1":"8|var(--ok)","legacyBadge":"快照 · 仅最早一批"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry parity=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }
 

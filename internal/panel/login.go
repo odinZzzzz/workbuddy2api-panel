@@ -60,7 +60,8 @@ func commonHeaders(req *http.Request, origin string) {
 	req.Header.Set("User-Agent", clientUA)
 }
 
-// validUID 校验上游返回的 uid 是否可安全用于拼文件名。
+// validUID 校验 uid 是否可安全用于拼文件名（**唯一实现**，login.go 与 import.go
+// 两条落盘路径共用；此前各有一份副本，改一处漏一处即留穿越口子）。
 // 只放行字母、数字、下划线、连字符（腾讯侧 uid 实测为 UUID 形态），
 // 长度上限 64 兜底异常超长串；拒绝 . / \ 等路径字符与空串。
 func validUID(uid string) bool {

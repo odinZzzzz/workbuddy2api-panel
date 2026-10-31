@@ -59,6 +59,14 @@ type TokenUsageDelta struct {
 	TokensPerSecond     float64
 }
 
+// CreditBatch 单个到期批次的**展示口径**快照：某时刻会作废的剩余积分。
+// 与 entry.creditsEarliestExpiry（路由口径，CycleEndTime）**不是**同一套数据，
+// 两者由同一次上游响应写入但允许不相等——面板「积分到期提醒」只认本类型。
+type CreditBatch struct {
+	At     time.Time `json:"at"`
+	Remain int64     `json:"remain"`
+}
+
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
 	UID          string `json:"uid"`
@@ -68,41 +76,46 @@ type Status struct {
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
 	// 的到期压力。CreditsExpiring 是配置窗口内的剩余积分；后两者是全部未来到期批次中
 	// 最早的一批及其剩余量，供 WorkDaddy 同口径的“最早到期优先”路由使用。
+	// 注意：以上三者是**路由口径**（CycleEndTime），供 pickEarliestExpiry /
+	// prefer_expiring 使用，**不得**用于展示。展示请用 CreditsBatches。
 	CreditsExpiring          int64     `json:"credits_expiring,omitempty"`
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
-	Cooling                  bool      `json:"cooling"`
-	CoolKind                 string    `json:"cool_kind,omitempty"`
-	CoolRemaining            int64     `json:"cool_remaining_sec,omitempty"`
-	Until                    time.Time `json:"until,omitempty"`
-	Reason                   string    `json:"reason,omitempty"`
-	SoftStreak               int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
+	// CreditsBatches 逐批到期快照（**展示口径**，DeductionEndTime 优先），按到期
+	// 时刻升序。面板「积分到期提醒」用它渲染：最早一批 + 7 天合计 + 随后几批。
+	CreditsBatches []CreditBatch `json:"credits_batches,omitempty"`
+	Cooling        bool          `json:"cooling"`
+	CoolKind       string        `json:"cool_kind,omitempty"`
+	CoolRemaining  int64         `json:"cool_remaining_sec,omitempty"`
+	Until          time.Time     `json:"until,omitempty"`
+	Reason         string        `json:"reason,omitempty"`
+	SoftStreak     int           `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
 	// RateLimitedModels 当前仍在限额的模型列表（issue #36 限额台账）。
 	// 仅「带解析时间 6004」触发的模型级独立冷却（modelCooldowns 未到期条目）时非空，
 	// 每模型一行；运维据此看到"账号 A 的模型 X 还在限额中，预计 Z 时间恢复"。到期即消失（零回归）。
 	RateLimitedModels []RateLimitedModel `json:"rate_limited_models,omitempty"`
 	// Realm 账号域（cn/global，auth.Realm() 计算值；含 global.enabled 开关闸）。
 	// 供面板/状态接口按域分组展示。
-	Realm           string     `json:"realm,omitempty"`
+	Realm string `json:"realm,omitempty"`
 	// Enterprise 企业版账号（auth.EnterpriseID 非空，计算值不落盘）。
 	// 企业版无个人成长体系（签到/成长任务/连登/旅行/夜猫子 上游均拒），
 	// 面板据此隐藏对应按钮；选号、保活、额度展示不受影响。
-	Enterprise      bool       `json:"enterprise,omitempty"`
-	Disabled        bool       `json:"disabled"`
-	DisabledReason  string     `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	Enterprise     bool   `json:"enterprise,omitempty"`
+	Disabled       bool   `json:"disabled"`
+	DisabledReason string `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	// Paused 暂停选号：退出选号候选（与 disabled 一样不参与选号），但**照常参与**
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。
-	Paused          bool       `json:"paused,omitempty"`
-	SuccessCount    int64      `json:"success_count,omitempty"`
-	ErrTotal        int64      `json:"err_total,omitempty"`
-	LastSuccessTime time.Time  `json:"last_success,omitempty"`
-	LastErrTime     time.Time  `json:"last_err,omitempty"`
+	Paused          bool      `json:"paused,omitempty"`
+	SuccessCount    int64     `json:"success_count,omitempty"`
+	ErrTotal        int64     `json:"err_total,omitempty"`
+	LastSuccessTime time.Time `json:"last_success,omitempty"`
+	LastErrTime     time.Time `json:"last_err,omitempty"`
 	// CheckinDone 本地今日已签到（签到成功或上游"今天已签到"幂等拒绝均算）。
 	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
-	CheckinDone bool        `json:"checkin_done,omitempty"`
-	TokenUsage  TokenUsage  `json:"token_usage,omitempty"`
+	CheckinDone bool       `json:"checkin_done,omitempty"`
+	TokenUsage  TokenUsage `json:"token_usage,omitempty"`
 	// ModelCosts 每模型实测成本台账（P1-anti-monopoly 可观测性）：运维据此自查
 	//「为什么总选它」——tier 0（免费）垄断 / tier 2 单价排序一眼可见。
 	// 仅 modelCostTTL 内的有效观测，每模型一行（cost_per_1k + last_seen +
@@ -189,11 +202,15 @@ type entry struct {
 	creditsExpiring          int64
 	creditsEarliestExpiry    time.Time
 	creditsEarliestRemaining int64
-	successCount             int64      // 累计成功
-	errTotal                 int64      // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
-	lastErr                  time.Time  // 最近一次错误时间
-	lastSuccess              time.Time  // 最近一次成功时间
-	tokenUsage               TokenUsage // 聊天请求 token 用量摘要（持久化）
+	// creditsBatches 逐批到期快照（展示口径，DeductionEndTime 优先），升序。
+	// 与上面三个标量并存：标量供路由（CycleEndTime），本字段供面板展示，两者
+	// 由同一次上游响应写入但**允许不相等**，不要合并（合并会改变选号行为）。
+	creditsBatches []CreditBatch
+	successCount   int64      // 累计成功
+	errTotal       int64      // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
+	lastErr        time.Time  // 最近一次错误时间
+	lastSuccess    time.Time  // 最近一次成功时间
+	tokenUsage     TokenUsage // 聊天请求 token 用量摘要（持久化）
 	// lastCheckinDay 最近一次签到成功的本地日期（"2006-01-02"）。签到成功与上游
 	// 幂等拒绝（"今天已签到"）都算；statusOf 据此输出 CheckinDone 供面板按钮显示
 	// 签到/已签。持久化：跨重启不丢当日状态。
@@ -204,9 +221,9 @@ type entry struct {
 	// paused 暂停选号：与 disabled 正交。置位后退出选号候选（healthy 判否），
 	// 但保号任务遍历只按 Disabled 过滤，故 paused 号天然继续参与签到 / 活跃上报 /
 	// 保活 / 余额刷新。持久化（state.json），跨重启不丢。
-	paused         bool
-	reason         string
-	lastUsed       time.Time // 最近被选中时刻（防并发撞号）
+	paused   bool
+	reason   string
+	lastUsed time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效。
@@ -428,10 +445,10 @@ type stateAccount struct {
 	SuccessCount int64     `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
-	ErrTotal    int64      `json:"err_total,omitempty"`
-	ErrCount       int        `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
-	LastSuccess    time.Time  `json:"last_success,omitempty"`
-	LastErr        time.Time  `json:"last_err,omitempty"`
+	ErrTotal    int64     `json:"err_total,omitempty"`
+	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
+	LastSuccess time.Time `json:"last_success,omitempty"`
+	LastErr     time.Time `json:"last_err,omitempty"`
 	// LastCheckinDay 最近一次签到成功的本地日期（entry.lastCheckinDay 同源）。
 	// 持久化以保留「当日已签」状态：签到后重启，面板按钮不回退成「签到」。
 	LastCheckinDay string     `json:"last_checkin_day,omitempty"`
@@ -463,6 +480,10 @@ type stateAccount struct {
 	// 与 CreditsExpiring 一并持久化，重启后首次请求仍可沿用最近一次余额快照。
 	CreditsEarliestExpiry    time.Time `json:"credits_earliest_expiry,omitempty"`
 	CreditsEarliestRemaining int64     `json:"credits_earliest_remaining,omitempty"`
+	// CreditsBatches 逐批到期快照（展示口径）。仅 expiry_schema>=2 时可信：
+	// 旧版本的 credits_earliest_* 是 CycleEndTime 口径，与展示口径混用会让卡片与
+	// 明细互相矛盾，故加载时按 schema 版本整体丢弃（见 applyAccountsLocked）。
+	CreditsBatches []CreditBatch `json:"credits_batches,omitempty"`
 	// ModelCooldowns 模型级独立冷却表（model → 冷却记录：6004 重置墙钟 / 11102
 	// 负缓存退避）。持久化：6004 对齐上游重置墙钟后单模型冷却可长达数小时，
 	// 跨重启是常态；不持久化会导致 healthyForModel 重启失忆、重新踩雷区。
@@ -493,9 +514,20 @@ type stateModelCost struct {
 	Samples   int       `json:"samples,omitempty"`
 }
 
+// expirySchemaCurrent 到期快照的当前 schema 版本。
+//
+// 版本 2 起「展示口径」改为 DeductionEndTime（packageExpiry），而 version<2 的
+// state.json 里 credits_earliest_* 是 CycleEndTime 口径。两者混用会让卡片说
+// 「3 天后到期」而明细说「30 天后」——正是本版本要消灭的矛盾，故加载时整体丢弃
+// 旧快照，等下一轮余额刷新（默认 5 分钟）重建。空窗期显示「无未来到期批次」，
+// 比显示错的好。
+const expirySchemaCurrent = 2
+
 // stateFile 持久化格式。
 type stateFile struct {
-	Accounts map[string]stateAccount `json:"accounts"`
+	// ExpirySchema 到期快照口径版本（见 expirySchemaCurrent）。缺省 0 = 旧版本。
+	ExpirySchema int                     `json:"expiry_schema,omitempty"`
+	Accounts     map[string]stateAccount `json:"accounts"`
 }
 
 // flushInterval 后台落盘周期。
