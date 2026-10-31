@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // 收藏群聊表情：能下载、去重、识别格式，并且能被 pickSticker 挑到。
@@ -96,5 +98,46 @@ func TestStickerExt(t *testing.T) {
 	}
 	if got := stickerExt([]byte("nope"), ""); got != "" {
 		t.Errorf("认不出应返回空: %q", got)
+	}
+}
+
+// 收藏目录超总容量时按「最旧优先」淘汰，且不会把目录清空到一张不剩。
+func TestEnforceStickerQuota(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, collectSubdir)
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 三张 100KB 的图，修改时间依次变新
+	now := time.Now()
+	for i, name := range []string{"old.png", "mid.png", "new.png"} {
+		p := filepath.Join(sub, name)
+		if err := os.WriteFile(p, make([]byte, 100*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mod := now.Add(time.Duration(i-2) * time.Hour)
+		if err := os.Chtimes(p, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 上限 250KB → 必须删掉最旧那张
+	enforceStickerQuota(sub, 250*1024)
+	left, _ := os.ReadDir(sub)
+	if len(left) != 2 {
+		t.Fatalf("应剩 2 张，实际 %d 张", len(left))
+	}
+	if _, err := os.Stat(filepath.Join(sub, "old.png")); err == nil {
+		t.Error("最旧的 old.png 应该被删掉")
+	}
+	if _, err := os.Stat(filepath.Join(sub, "new.png")); err != nil {
+		t.Error("最新的 new.png 不该被删")
+	}
+
+	// 上限很大时不删任何东西
+	enforceStickerQuota(sub, 100*1024*1024)
+	left2, _ := os.ReadDir(sub)
+	if len(left2) != 2 {
+		t.Errorf("未超限不该删，实际剩 %d 张", len(left2))
 	}
 }

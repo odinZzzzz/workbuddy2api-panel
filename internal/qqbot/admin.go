@@ -211,7 +211,7 @@ func (b *Bridge) adminState(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"ok":        true,
 		"config":    cfg,
-		"stats":     map[string]any{"events": events, "replied": replied, "skipped": skipped, "sessions": sessions, "limiters": limiters, "memory_users": len(mems), "uptime_sec": int(time.Since(started).Seconds())},
+		"stats":     map[string]any{"events": events, "replied": replied, "skipped": skipped, "sessions": sessions, "limiters": limiters, "memory_users": len(mems), "uptime_sec": int(time.Since(started).Seconds()), "chat_failures": b.chatFailures.Load(), "send_failures": b.sendFailures.Load()},
 		"stickers":  stickerView,
 		"kb":        kbView,
 		"tools":     toolCount,

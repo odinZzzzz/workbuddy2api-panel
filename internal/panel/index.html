@@ -351,6 +351,18 @@
 
       <div class="box">
         <header>
+          <h3>积分流向矩阵 <span class="hint">行=账号，列=模型，格子=近 5 分钟烧掉的积分；正在跑的账号带脉冲</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="flowNote">—</span>
+          <span class="tag warn" id="flowRate">—</span>
+        </header>
+        <div class="pad">
+          <div id="flowMatrix" class="flow-matrix"></div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
           <h3>积分余额趋势</h3>
           <span class="grow"></span>
           <span class="note" id="dashBalNote">—</span>

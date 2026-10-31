@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -81,6 +82,7 @@ func (b *Bridge) collectStickers(urls []string) {
 			continue
 		}
 		log.Printf("[qqbot] 收藏表情 %s（%d KB）", name, len(body)/1024)
+		enforceStickerQuota(out, int64(cfg.StickerCollectTotalMB)*1024*1024)
 		b.state.note(RecentEvent{Time: time.Now(), Type: "sticker", Action: "sticker_collected"})
 	}
 }
@@ -175,3 +177,57 @@ func stickerStats(dir string) (library, collected int, bytes int64) {
 }
 
 var _ = fmt.Sprintf
+
+// enforceStickerQuota 收藏目录超过总容量上限时，按修改时间从旧到新删。
+//
+// 为什么只删 collected：库目录（sticker_dir 根下）是用户自己放的素材，不该被自动清理。
+// 淘汰后仍超限（比如单张就比上限还大）就停手，避免一条大图把整库删光。
+func enforceStickerQuota(dir string, capBytes int64) {
+	if capBytes <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type fileInfo struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	files := make([]fileInfo, 0, len(entries))
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileInfo{
+			path: filepath.Join(dir, e.Name()),
+			size: info.Size(),
+			mod:  info.ModTime(),
+		})
+		total += info.Size()
+	}
+	if total <= capBytes {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
+	removed := 0
+	for _, f := range files {
+		if total <= capBytes {
+			break
+		}
+		if err := os.Remove(f.path); err != nil {
+			continue
+		}
+		total -= f.size
+		removed++
+	}
+	if removed > 0 {
+		log.Printf("[qqbot] 收藏超限，按最旧淘汰 %d 张，当前 %.1f MB", removed, float64(total)/1048576)
+	}
+}

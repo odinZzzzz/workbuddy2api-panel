@@ -69,6 +69,16 @@ func (g *Gate) Decide(cfg Config, key, text string, atBot bool) Decision {
 	now := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// 房间状态表只在 Reset 时删 → 换群/改名会留垃圾。
+	// 超过阈值时清掉「窗口已过期」的状态（mode 回到 idle，等价于新房间）。
+	if len(g.states) > 256 {
+		now := time.Now()
+		for k, st := range g.states {
+			if !st.until.IsZero() && st.until.Before(now) {
+				delete(g.states, k)
+			}
+		}
+	}
 
 	st := g.states[key]
 	if st == nil {

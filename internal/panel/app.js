@@ -3060,14 +3060,105 @@ if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
      usage?hours=24    → 今日累计积分与请求量
    recent[] 里带 credit 与 time，按分钟分桶就能画出「每分钟消耗多少积分」，
    这是唯一能反映"此刻正在烧多少积分"的数据源（usage 只按小时聚合）。 */
+
+// ── 积分流向矩阵 ────────────────────────────────────────────────────────────
+//
+// 想看的是"钱正在往哪流"：哪几个账号在跑、烧给哪个模型、流速多快。
+// 数据源用 request_logs（每条带 account/model/credit/time），纯前端聚合，
+// 不新增后端接口；窗口固定近 5 分钟，每 5 秒随仪表盘一起刷新。
+const FLOW_WINDOW_MS = 5 * 60 * 1000;
+const FLOW_MAX_ROWS = 8;
+const FLOW_MAX_COLS = 6;
+
+function flowModelLabel(m) {
+  return String(m || '未知').replace(/^(cn|global):/, '');
+}
+
+function renderFlowMatrix(ov, logs) {
+  const box = $('flowMatrix');
+  if (!box) return;
+  const entries = Array.isArray(logs.entries) ? logs.entries : (Array.isArray(logs) ? logs : []);
+  const now = Date.now();
+  const win = entries.filter(e => {
+    const t = Date.parse(e.time);
+    return Number.isFinite(t) && now - t <= FLOW_WINDOW_MS;
+  });
+
+  // 账号昵称表 + 在途数（谁正在跑）
+  const accMeta = new Map();
+  for (const s of (ov.accounts || [])) {
+    accMeta.set(s.uid, { name: s.nickname || (s.uid || '').slice(0, 8), inFlight: Number(s.in_flight) || 0 });
+  }
+
+  const cell = new Map();   // `${acc}\u0000${model}` → { credit, reqs, last }
+  const accSum = new Map();
+  const modSum = new Map();
+  let total = 0;
+  for (const e of win) {
+    const acc = e.account || '(未知)';
+    const mod = flowModelLabel(e.model);
+    const credit = Number(e.credit) || 0;
+    const t = Date.parse(e.time) || 0;
+    const k = acc + '\u0000' + mod;
+    const cur = cell.get(k) || { credit: 0, reqs: 0, last: 0 };
+    cur.credit += credit;
+    cur.reqs += 1;
+    cur.last = Math.max(cur.last, t);
+    cell.set(k, cur);
+    accSum.set(acc, (accSum.get(acc) || 0) + credit);
+    modSum.set(mod, (modSum.get(mod) || 0) + credit);
+    total += credit;
+  }
+
+  const rate = $('flowRate');
+  const note = $('flowNote');
+  if (rate) rate.textContent = total > 0 ? '流出 ' + total.toFixed(2) + ' 分 / 5 分钟' : '窗口内无消耗';
+  if (note) note.textContent = win.length ? win.length + ' 条请求 · 每 5 秒刷新' : '近 5 分钟没有请求';
+
+  if (!win.length) {
+    box.innerHTML = '<div class="fm-empty">近 5 分钟没有请求，矩阵空着——等有流量了这里会亮起来。</div>';
+    return;
+  }
+
+  const rows = [...accSum.entries()].sort((x, y) => y[1] - x[1]).slice(0, FLOW_MAX_ROWS).map(r => r[0]);
+  const cols = [...modSum.entries()].sort((x, y) => y[1] - x[1]).slice(0, FLOW_MAX_COLS).map(r => r[0]);
+  const max = Math.max(0.0001, ...rows.map(a => Math.max(0, ...[...cell.entries()]
+    .filter(([k]) => k.startsWith(a + '\u0000')).map(([, v]) => v.credit))));
+
+  let html = '<table><thead><tr><th class="row-hd">账号 \\ 模型</th>';
+  for (const m of cols) html += '<th>' + esc(m) + '</th>';
+  html += '<th>合计</th></tr></thead><tbody>';
+  for (const acc of rows) {
+    const meta = accMeta.get(acc) || {};
+    const running = (meta.inFlight || 0) > 0;
+    const label = (running ? '<span class="fm-run"></span>' : '') + esc(meta.name || String(acc).slice(0, 8));
+    html += '<tr><th class="row-hd" title="' + esc(String(acc)) + (running ? ' · 在途 ' + meta.inFlight : '') + '">' + label + '</th>';
+    for (const m of cols) {
+      const v = cell.get(acc + '\u0000' + m);
+      if (!v) { html += '<td><div class="fm-cell zero">·</div></td>'; continue; }
+      const i = Math.min(1, v.credit / max);
+      const hot = now - v.last <= 60 * 1000 ? ' hot' : '';
+      html += '<td><div class="fm-cell' + hot + '" style="--i:' + i.toFixed(3) + '" title="' +
+        esc(acc + ' → ' + m + '：' + v.credit.toFixed(3) + ' 分 / ' + v.reqs + ' 次') + '">' +
+        (v.credit > 0 ? v.credit.toFixed(2) : '0') + '</div></td>';
+    }
+    const sum = accSum.get(acc) || 0;
+    html += '<td><div class="fm-cell zero" title="该账号窗口内合计">' + sum.toFixed(2) + '</div></td></tr>';
+  }
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
 async function loadDashboard() {
   const note = $('dashNote');
   if (note) note.textContent = '读取中…';
   try {
-    const [ov, mt, us, bal] = await Promise.all([
+    const [ov, mt, us, bal, logs] = await Promise.all([
       api('overview'), api('request_metrics'), api('usage?hours=24'), api('balance_history?hours=24'),
+      api('request_logs?limit=600').catch(() => ({ entries: [] })),
     ]);
     renderDashboard(ov || {}, mt || {}, us || {}, bal || {}).catch(() => {});
+    renderFlowMatrix(ov || {}, logs || {});
     if (note) note.textContent = '更新于 ' + new Date().toLocaleTimeString() + ' · 每 5 秒自动刷新';
   } catch (e) {
     if (note) note.textContent = '读取失败：' + e.message;

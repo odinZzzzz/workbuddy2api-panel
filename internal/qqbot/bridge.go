@@ -30,11 +30,16 @@ type Bridge struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	limits   map[int64]*bucket
-	mem      *Memory // 按 QQ 号持久化的记忆（人设连续性）
-	state    *adminState
-	gate     *Gate
-	botGuard *BotGuard
-	cfgPath  string
+
+	// 失败计数（原子）：模型调用失败 / 发送失败。
+	// 之前只在日志里，出了问题只能翻文件；现在 /admin/api/state 直接能看。
+	chatFailures atomic.Int64
+	sendFailures atomic.Int64
+	mem          *Memory // 按 QQ 号持久化的记忆（人设连续性）
+	state        *adminState
+	gate         *Gate
+	botGuard     *BotGuard
+	cfgPath      string
 }
 
 type chatMsg struct {
@@ -378,6 +383,7 @@ func (b *Bridge) allow(userID int64) bool {
 func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64, prompt string, images []string) {
 	answer, err := b.chat(key, ev, text, atTargets, prompt, images)
 	if err != nil {
+		b.chatFailures.Add(1)
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
 	}
@@ -394,6 +400,7 @@ func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64, pro
 	}
 	log.Printf("[qqbot] reply → %s: %s", key, truncateRunes(strings.ReplaceAll(answer, "\n", " / "), 120))
 	if err := b.send(ev, answer); err != nil {
+		b.sendFailures.Add(1)
 		log.Printf("[qqbot] send failed key=%s: %v", key, err)
 	}
 }
@@ -599,6 +606,19 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 		out = append(out, chatMsg{Role: "system", Content: system})
 	}
 	b.mu.Lock()
+	// 会话表按「会话+用户」增长，只在被再次访问时才过期删除 → 顺手清一批长期不动的。
+	if len(b.sessions) > 512 {
+		ttl := time.Duration(b.cfg().SessionTTLMinutes) * time.Minute
+		if ttl <= 0 {
+			ttl = 30 * time.Minute
+		}
+		cut := time.Now().Add(-2 * ttl)
+		for k, sess := range b.sessions {
+			if sess.last.Before(cut) {
+				delete(b.sessions, k)
+			}
+		}
+	}
 	s := b.sessions[key]
 	var hist []chatMsg
 	if s != nil {

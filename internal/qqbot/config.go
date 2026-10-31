@@ -105,6 +105,9 @@ type Config struct {
 	// DisableStickerCollect 关掉"收藏群聊表情"（默认 false = 开启）。
 	// 用反向布尔：正向 bool 在旧配置文件里缺键时零值是 false，会把功能默认关掉（踩过）。
 	DisableStickerCollect bool `json:"disable_sticker_collect"`
+	// StickerCollectTotalMB 收藏目录总容量上限（MB，默认 50）：超了按最旧淘汰。
+	// 只限单张不够——群里斗图一天就能堆几十 MB。
+	StickerCollectTotalMB int `json:"sticker_collect_total_mb"`
 	// StickerCollectMaxKB 收藏单张图片的大小上限（KB，默认 1024）。
 	StickerCollectMaxKB int `json:"sticker_collect_max_kb"`
 
@@ -255,6 +258,18 @@ func (c *Config) normalize() {
 	}
 	if c.StickerCommand == nil {
 		c.StickerCommand = []string{"表情", "来个表情", "发表情"}
+	}
+	// 收藏配额：0 会被 enforceStickerQuota 当成「不限」直接跳过，必须在这里兜底，
+	// 否则旧配置文件（没有这两个键）等于永久无上限。
+	if c.StickerCollectMaxKB <= 0 {
+		c.StickerCollectMaxKB = 1024
+	}
+	if c.StickerCollectTotalMB <= 0 {
+		c.StickerCollectTotalMB = 50
+	}
+	// admin_token 支持环境变量覆盖：配置文件里存明文 token 不合适（会跟着备份走）。
+	if v := strings.TrimSpace(os.Getenv("QQBOT_ADMIN_TOKEN")); v != "" {
+		c.AdminToken = v
 	}
 	if c.CalmSeconds <= 0 {
 		c.CalmSeconds = 300

@@ -622,3 +622,25 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
 /* 余额趋势图容器：与 #dashChart 同理，ECharts 需要确定高度 */
 #dashBalance { height: 240px; }
+
+/* ── 积分流向矩阵（行=账号，列=模型）───────────────────────────────────── */
+.flow-matrix { overflow-x: auto; }
+.flow-matrix table { border-collapse: separate; border-spacing: 3px; font-size: 12px; }
+.flow-matrix th { font-weight: 500; color: var(--ink-3); font-size: 11px; padding: 4px 6px; white-space: nowrap; }
+.flow-matrix th.row-hd { text-align: right; max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.flow-matrix td { padding: 0; }
+.fm-cell {
+  min-width: 62px; height: 30px; border-radius: 5px; display: flex;
+  align-items: center; justify-content: center; font-variant-numeric: tabular-nums;
+  color: var(--ink-1, #e8ebf2); background: rgba(91, 124, 250, calc(var(--i, 0) * 0.85));
+  transition: background .4s ease;
+}
+.fm-cell.zero { background: rgba(127, 127, 127, .07); color: var(--ink-3); }
+.fm-cell.hot { box-shadow: 0 0 0 1px rgba(255, 180, 84, .55) inset; animation: fm-pulse 1.6s ease-in-out infinite; }
+@keyframes fm-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255, 180, 84, .35) inset; }
+  50% { box-shadow: 0 0 0 2px rgba(255, 180, 84, .85) inset, 0 0 10px rgba(255, 180, 84, .35); }
+}
+.fm-run { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ok, #3ddc97); margin-right: 5px; animation: fm-blink 1.2s ease-in-out infinite; }
+@keyframes fm-blink { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+.flow-matrix .fm-empty { color: var(--ink-3); padding: 14px 4px; font-size: 12.5px; }
