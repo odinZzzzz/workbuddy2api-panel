@@ -157,13 +157,13 @@ func (b *Bridge) refreshProfileAsync(uid int64) {
 	if u, ok := b.mem.Lookup(uid); ok && time.Since(u.ProfileAt) < 24*time.Hour && u.QQLevel > 0 {
 		return // 一天内拉过，够新鲜
 	}
-	go func() {
+	safeGo("refreshProfile", func() {
 		p, err := b.fetchProfile(uid)
 		if err != nil {
 			return
 		}
 		b.mem.SetProfile(p)
-	}()
+	})
 }
 
 // ProfileLine 把画像压成一行人话（给 prompt 与后台）。

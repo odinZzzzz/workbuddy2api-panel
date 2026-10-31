@@ -23,6 +23,10 @@ import (
 
 const collectSubdir = "collected"
 
+// stickerHTTPClient 收藏图片用的共享客户端：每次 new 一个会丢掉连接池，
+// 群里连发图时等于每条都重新握手。
+var stickerHTTPClient = &http.Client{Timeout: 12 * time.Second}
+
 // stickerHash 用内容哈希做文件名：天然去重，也不会因 URL 里的临时签名重复存。
 func stickerHash(data []byte) string {
 	sum := sha256.Sum256(data)
@@ -49,7 +53,7 @@ func (b *Bridge) collectStickers(urls []string) {
 	}
 	maxBytes *= 1024
 
-	client := &http.Client{Timeout: 12 * time.Second}
+	client := stickerHTTPClient
 	for _, u := range urls {
 		u = strings.TrimSpace(u)
 		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {

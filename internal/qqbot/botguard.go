@@ -65,6 +65,16 @@ func (g *BotGuard) Check(cfg Config, key string, uid int64) Verdict {
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// 计数表按「会话|用户」增长，只增不减 → 顺手清掉冷却已过期的记录
+	// （until 非零且已过去 = 这轮风控结束，rounds 归零等价于新会话）。
+	if len(g.counters) > 512 {
+		now := time.Now()
+		for k, c := range g.counters {
+			if !c.until.IsZero() && now.After(c.until) {
+				delete(g.counters, k)
+			}
+		}
+	}
 	c := g.counters[gk]
 	if c == nil {
 		c = &botCounter{}

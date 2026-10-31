@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -190,7 +191,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(images) > 0 {
 		// 顺手收藏群聊表情（异步，失败静默；只存普通图片，mface 无图源会跳过）
-		go b.collectStickers(images)
+		safeGo("collectStickers", func() { b.collectStickers(images) })
 	}
 	if len(images) > 0 {
 		// 模型看不到图，但必须知道"有人发了图"，否则答非所问。
@@ -310,11 +311,11 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		// 只 @ 不说话（群里很常见）：给一句引导，而不是静默——静默会被当成"机器人挂了"。
 		// 这条不走网关，不消耗额度。
 		if atBot {
-			go func() {
+			safeGo("hint", func() {
 				if err := b.send(&ev, "在的，说点什么？也可以发 /help 看指令。"); err != nil {
 					log.Printf("[qqbot] hint send failed: %v", err)
 				}
-			}()
+			})
 		}
 		return
 	}
@@ -332,7 +333,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	prompt := b.cfg().PersonaDefaultPrompt
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
-	go b.reply(&ev, key, name, text, atTargets, prompt, visionURLs)
+	safeGo("reply", func() { b.reply(&ev, key, name, text, atTargets, prompt, visionURLs) })
 }
 
 // allow 令牌桶限速：每用户每分钟 RatePerMinute 次（0 = 不限）。
@@ -343,6 +344,15 @@ func (b *Bridge) allow(userID int64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := time.Now()
+	// 令牌桶表按 QQ 号增长，且永不复用 → 长期运行会一直累积。
+	// 超过阈值时顺手清掉「10 分钟没动过」的桶（它们早已回满，删了等价于新建）。
+	if len(b.limits) > 512 {
+		for uid, old := range b.limits {
+			if now.Sub(old.last) > 10*time.Minute {
+				delete(b.limits, uid)
+			}
+		}
+	}
 	bk := b.limits[userID]
 	if bk == nil {
 		bk = &bucket{tokens: float64(b.cfg().RatePerMinute), last: now}
@@ -1135,3 +1145,19 @@ func stripStageDirections(s string) string {
 
 // codePattern 匹配游戏分享码（16+ 位大写字母数字，且含字母）。
 var codePattern = regexp.MustCompile(`\b[A-Z0-9]{14,}\b`)
+
+// safeGo 起一个**带 recover** 的 goroutine。
+//
+// 为什么必须有：回复链路会走模型解析、工具执行（含 exec 图表渲染、KB 读盘）、
+// 图片/语音发送——任何一处 panic，裸 `go` 都会让整个桥进程退出。QQ 桥是常驻服务，
+// 一次畸形响应就够把机器人打死；这里选择丢这一条消息并留下堆栈。
+func safeGo(what string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[qqbot] panic in %s: %v\n%s", what, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}

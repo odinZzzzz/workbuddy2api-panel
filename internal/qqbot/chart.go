@@ -181,6 +181,11 @@ func fetchIcon(url string) image.Image {
 		return nil
 	}
 	iconCache.mu.Lock()
+	// 图标按 URL 缓存且永不过期：道具图/表情图 URL 会越积越多，加个上限，
+	// 满了直接整表清空（重新下载几张图，代价远小于无界增长）。
+	if len(iconCache.m) > 256 {
+		iconCache.m = map[string]image.Image{}
+	}
 	iconCache.m[url] = img
 	iconCache.mu.Unlock()
 	return img
