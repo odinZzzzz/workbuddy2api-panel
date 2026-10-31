@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="night" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b1a3a"/>
+      <stop offset="1" stop-color="#16305c"/>
+    </linearGradient>
+    <radialGradient id="moonGlow">
+      <stop offset="0" stop-color="#ffe9a8"/>
+      <stop offset="1" stop-color="#e8b93f"/>
+    </radialGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" fill="url(#night)"/>
+  <path d="M8 60 Q40 28 78 52 Q112 22 150 48 Q184 24 220 52 Q248 66 240 96" fill="none" stroke="#5b7cfa" stroke-width="7" stroke-linecap="round"/>
+  <path d="M10 96 Q46 70 82 92 Q118 66 154 90 Q190 68 224 94" fill="none" stroke="#8f7cf6" stroke-width="6" stroke-linecap="round"/>
+  <path d="M16 132 Q52 106 88 128 Q124 104 160 126 Q196 106 232 130" fill="none" stroke="#5b7cfa" stroke-width="5" stroke-linecap="round"/>
+  <path d="M24 166 Q60 142 96 162 Q132 140 168 160 Q204 142 236 164" fill="none" stroke="#3f5f9e" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="196" cy="52" r="26" fill="url(#moonGlow)"/>
+  <circle cx="208" cy="44" r="22" fill="#16305c"/>
+  <circle cx="52" cy="44" r="4" fill="#ffe9a8"/>
+  <circle cx="96" cy="30" r="3" fill="#ffe9a8"/>
+  <circle cx="140" cy="40" r="3.5" fill="#ffe9a8"/>
+  <circle cx="70" cy="72" r="3" fill="#ffe9a8"/>
+  <circle cx="120" cy="64" r="2.5" fill="#ffe9a8"/>
+  <circle cx="168" cy="30" r="3" fill="#ffe9a8"/>
+  <path d="M96 256 L104 190 Q110 150 96 116 Q86 92 96 74 Q108 96 116 74 Q126 100 134 84 Q142 118 130 160 Q122 200 128 256 Z" fill="#1d3d2b"/>
+  <path d="M108 256 L112 196 Q116 158 108 128 Q102 108 110 92 Q118 112 124 96 Q130 126 124 164 Q118 202 122 256 Z" fill="#2c5a3c"/>
+  <rect x="40" y="196" width="26" height="20" fill="#2a3a52"/>
+  <rect x="70" y="204" width="20" height="14" fill="#2a3a52"/>
+  <polygon points="46,196 53,182 60,196" fill="#6b4a2a"/>
+  <rect x="146" y="200" width="30" height="18" fill="#2a3a52"/>
+  <polygon points="152,200 161,184 170,200" fill="#6b4a2a"/>
+  <rect x="186" y="206" width="22" height="14" fill="#2a3a52"/>
+  <rect x="0" y="216" width="256" height="40" fill="#12233d"/>
+  <circle cx="86" cy="212" r="2" fill="#ffe9a8"/>
+  <circle cx="160" cy="214" r="2" fill="#ffe9a8"/>
+  <circle cx="200" cy="212" r="2" fill="#ffe9a8"/>
+</svg>

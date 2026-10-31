@@ -69,6 +69,9 @@ type Config struct {
 	// ProfileEnabled 是否拉群友画像（昵称/等级/签名/号位数）；默认 true。
 	ProfileEnabled bool `json:"profile_enabled"`
 
+	// StickerTemplateDir 自定义 SVG 模板目录（同名 .svg 覆盖内置名画模板）。
+	StickerTemplateDir string `json:"sticker_template_dir"`
+
 	// StickerDir 表情包目录（本地图片，随机挑一张发）；空 = 不支持发表情。
 	StickerDir string `json:"sticker_dir"`
 	// StickerCommand 发表情包的关键词（默认「表情」「来个表情」）。

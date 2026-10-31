@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="skyScream" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8663c"/>
+      <stop offset="0.55" stop-color="#f0a04b"/>
+      <stop offset="1" stop-color="#f6d08a"/>
+    </linearGradient>
+    <linearGradient id="water" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f4b6e"/>
+      <stop offset="1" stop-color="#123049"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="150" fill="url(#skyScream)"/>
+  <path d="M0 44 Q44 8 88 40 Q132 6 176 38 Q214 12 256 40 L256 66 Q214 40 176 64 Q132 34 88 66 Q44 36 0 68 Z" fill="#d94f2b"/>
+  <path d="M0 82 Q46 50 92 80 Q138 48 184 78 Q220 54 256 78 L256 100 Q220 78 184 98 Q138 72 92 102 Q46 74 0 104 Z" fill="#c9411f"/>
+  <path d="M0 118 Q50 92 100 116 Q150 90 200 114 Q228 98 256 112 L256 150 L0 150 Z" fill="#e07a34"/>
+  <rect x="0" y="150" width="256" height="106" fill="url(#water)"/>
+  <path d="M0 160 Q64 148 128 158 Q192 148 256 158 L256 176 Q192 166 128 176 Q64 166 0 178 Z" fill="#2c6a92"/>
+  <polygon points="0,196 256,150 256,178 0,232" fill="#6b4a2a"/>
+  <polygon points="0,208 256,164 256,176 0,222" fill="#8a6238"/>
+  <ellipse cx="128" cy="150" rx="26" ry="40" fill="#f2e3c8"/>
+  <ellipse cx="128" cy="118" rx="20" ry="26" fill="#f7ecd6"/>
+  <ellipse cx="120" cy="112" rx="4" ry="6" fill="#3a2b22"/>
+  <ellipse cx="136" cy="112" rx="4" ry="6" fill="#3a2b22"/>
+  <ellipse cx="128" cy="134" rx="7" ry="11" fill="#3a2b22"/>
+  <path d="M110 168 Q128 176 146 168" fill="none" stroke="#c9b79b" stroke-width="4"/>
+  <ellipse cx="98" cy="176" rx="12" ry="8" fill="#f2e3c8"/>
+  <ellipse cx="158" cy="176" rx="12" ry="8" fill="#f2e3c8"/>
+  <polygon points="104,190 152,190 160,256 96,256" fill="#2b3a4a"/>
+  <path d="M112 190 L146 190 L150 232 L108 232 Z" fill="#39495c"/>
+  <circle cx="40" cy="120" r="5" fill="#f6d08a"/>
+  <circle cx="212" cy="112" r="5" fill="#f6d08a"/>
+</svg>

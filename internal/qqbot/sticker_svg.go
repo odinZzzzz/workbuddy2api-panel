@@ -25,6 +25,48 @@ import (
 //   - 画布边长 ≤ 512（QQ 表情包够用，光栅化开销可控）
 //   - 解析/绘制 panic 一律 recover 成错误（第三方渲染库遇到畸形输入会 panic）
 
+// stickerStyleGuide 给模型看的"能画什么"清单（基于实测，不是抄文档）。
+//
+// 实测矩阵（128px 渲染后数非透明像素）：
+//
+//	可用：path / circle / ellipse / rect(rx) / polygon / polyline / line、
+//	      fill / stroke / stroke-width / stroke-linecap / stroke-dasharray / opacity、
+//	      linearGradient / radialGradient（url(#id)）、<use href>
+//	不可用：<text>（完全不渲染）、<g transform="...">（整组消失）、clipPath/mask/filter（静默忽略）、
+//	       <style>/CSS、外部图片
+//
+// 所以规范里最要紧的两条是：**别写文字**、**别用 transform 分组**（坐标要自己算好）。
+const stickerStyleGuide = `
+画布：viewBox="0 0 256 256"，背景铺满整块。
+只能用的元素：path、circle、ellipse、rect（可用 rx 圆角）、polygon、polyline、line。
+只能用的属性：fill、stroke、stroke-width、stroke-linecap、stroke-dasharray、opacity、
+  fill-opacity、linearGradient/radialGradient（用 url(#id) 引用）、<use href="#id">。
+**禁止**：<text>（渲染不出来）、<g transform>（整组不画）、clipPath/mask/filter、<style>/CSS、外部图片。
+所有坐标直接算成绝对坐标（没有 transform 可用）。
+画风：粗描边（stroke-width 6~12）+ 纯色/渐变填充 + 大脸 + 少元素（5~15 个形状），
+  靠眼睛形状/眉毛角度/嘴型/汗滴/怒气符号表达情绪，不靠文字。
+配色：主色 + 对比色 + 一个强调色，深色描边（#1b2330 之类）保证小图也清楚。
+`
+
+// inkPixels 数非透明像素（判断"画出来了没有"）。
+func inkPixels(pngBytes []byte) (int, error) {
+	img, err := png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			_, _, _, a := img.At(x, y).RGBA()
+			if a > 0x1000 {
+				n++
+			}
+		}
+	}
+	return n, nil
+}
+
 const (
 	maxSVGBytes    = 64 << 10
 	maxSVGSide     = 512

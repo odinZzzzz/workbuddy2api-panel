@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6e7c1"/>
+      <stop offset="1" stop-color="#e8d9b0"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d3f6e"/>
+      <stop offset="1" stop-color="#0e2340"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" fill="url(#sky)"/>
+  <polygon points="128,74 168,132 88,132" fill="#3b4a63"/>
+  <polygon points="128,84 154,124 102,124" fill="#eef2f6"/>
+  <rect x="0" y="132" width="256" height="124" fill="url(#sea)"/>
+  <path d="M0 200 Q40 150 78 176 Q60 150 96 140 Q78 122 118 118 Q104 96 148 100 Q132 76 176 86 Q196 60 232 82 Q256 96 256 132 L256 256 L0 256 Z" fill="#2c5c95"/>
+  <path d="M0 214 Q46 172 84 194 Q66 168 104 158 Q88 140 128 136 Q116 114 158 118 Q144 94 186 104 Q206 80 240 100 Q256 112 256 150 L256 256 L0 256 Z" fill="#3f7ab8"/>
+  <path d="M0 232 Q50 196 92 216 Q74 190 112 180 Q96 162 136 158 Q124 138 166 142 Q152 118 194 128 Q214 104 244 122 L256 136 L256 256 L0 256 Z" fill="#5b9ad4"/>
+  <circle cx="40" cy="196" r="10" fill="#eef2f6"/>
+  <circle cx="62" cy="184" r="8" fill="#eef2f6"/>
+  <circle cx="86" cy="196" r="11" fill="#eef2f6"/>
+  <circle cx="112" cy="180" r="9" fill="#eef2f6"/>
+  <circle cx="140" cy="192" r="12" fill="#eef2f6"/>
+  <circle cx="170" cy="176" r="9" fill="#eef2f6"/>
+  <circle cx="198" cy="188" r="11" fill="#eef2f6"/>
+  <circle cx="226" cy="172" r="8" fill="#eef2f6"/>
+  <circle cx="24" cy="176" r="7" fill="#eef2f6"/>
+  <path d="M120 214 Q140 206 160 214 Q140 222 120 214 Z" fill="#8a5a2b"/>
+  <circle cx="128" cy="216" r="3" fill="#c9a06a"/>
+  <circle cx="152" cy="216" r="3" fill="#c9a06a"/>
+</svg>

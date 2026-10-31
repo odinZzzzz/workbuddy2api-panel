@@ -70,7 +70,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 		return m
 	}
 
-	add("draw_sticker", "自己画一张表情包并发到当前会话。用 SVG 源码描述画面（≤64KB，画布按 256×256 设计）。只在真的想发表情时调用。",
+	add("draw_sticker", "自己画一张表情包并发到当前会话（SVG 源码，≤64KB）。只在真的想发表情时调用。"+stickerStyleGuide,
 		obj(map[string]any{
 			"svg": map[string]any{"type": "string", "description": "完整 SVG 源码，必须以 <svg 开头，含 xmlns"},
 		}, "svg"),
@@ -85,6 +85,13 @@ func (b *Bridge) buildTools() *toolRegistry {
 			if err != nil {
 				return "", err
 			}
+			// 空白自纠：渲染成功但几乎没内容，通常是用到了不支持的 <text>/<g transform>/clipPath。
+			// 把原因回给模型，它可以在同一轮里改对再画（比静默发出一张空白图好得多）。
+			if ink, e := inkPixels(png); e == nil && ink < 300 {
+				return "", fmt.Errorf("画出来几乎空白（非透明像素 %d）。"+
+					"检查是否用了不支持的 <text>、<g transform>、clipPath——这些不会渲染；"+
+					"请只用 path/circle/ellipse/rect/polygon/polyline/line，坐标写绝对坐标", ink)
+			}
 			path, err := tc.b.SaveGeneratedSticker(png)
 			if err != nil {
 				return "", err
@@ -94,6 +101,30 @@ func (b *Bridge) buildTools() *toolRegistry {
 			}
 			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_sticker"})
 			return "已把自绘表情包发到当前会话", nil
+		})
+
+	add("list_sticker_templates", "列出可用的名画/风格 SVG 模板（神奈川冲浪里、星月夜、呐喊、珍珠耳环等）。想画「有名画感」的表情包时先看这里。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var sb strings.Builder
+			for _, tp := range tc.b.ListTemplates() {
+				sb.WriteString("- " + tp.Name + "：" + tp.Desc + "\n")
+			}
+			return sb.String(), nil
+		})
+
+	add("get_sticker_template", "取某个模板的完整 SVG 源码。拿到后改配色/换表情/加元素，再用 draw_sticker 画出来。",
+		obj(map[string]any{
+			"name": map[string]any{"type": "string", "description": "模板名，如 wave / starry / scream / pearl"},
+		}, "name"),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", err
+			}
+			return tc.b.TemplateSource(in.Name)
 		})
 
 	add("send_sticker", "从表情库里随机发一张表情包到当前会话。",

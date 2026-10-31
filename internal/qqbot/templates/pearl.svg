@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <radialGradient id="pearlGlow">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.6" stop-color="#e8eef6"/>
+      <stop offset="1" stop-color="#a8b8cc"/>
+    </radialGradient>
+    <linearGradient id="veil" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f4f8f"/>
+      <stop offset="1" stop-color="#16294d"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" fill="#101a2b"/>
+  <path d="M0 0 L256 0 L256 256 L0 256 Z" fill="#0d1626" opacity="0.55"/>
+  <ellipse cx="128" cy="168" rx="46" ry="56" fill="#e8c9a8"/>
+  <ellipse cx="128" cy="176" rx="34" ry="44" fill="#f0d6b8"/>
+  <ellipse cx="112" cy="164" rx="7" ry="9" fill="#4a3524"/>
+  <ellipse cx="146" cy="164" rx="7" ry="9" fill="#4a3524"/>
+  <ellipse cx="112" cy="163" rx="3" ry="4" fill="#101a2b"/>
+  <ellipse cx="146" cy="163" rx="3" ry="4" fill="#101a2b"/>
+  <path d="M120 196 Q128 202 136 196" fill="none" stroke="#b07a5e" stroke-width="3"/>
+  <path d="M104 148 Q112 142 120 148" fill="none" stroke="#6b4a32" stroke-width="3"/>
+  <path d="M136 148 Q144 142 152 148" fill="none" stroke="#6b4a32" stroke-width="3"/>
+  <path d="M70 150 Q78 96 128 88 Q178 96 186 150 Q176 118 128 112 Q80 118 70 150 Z" fill="url(#veil)"/>
+  <path d="M78 140 Q86 104 128 98 Q170 104 178 140 Q168 116 128 110 Q88 116 78 140 Z" fill="#3f63a8"/>
+  <path d="M186 150 Q206 176 198 214 Q188 240 168 236 Q184 206 176 168 Z" fill="url(#veil)"/>
+  <path d="M70 150 Q50 176 58 214 Q68 240 88 236 Q72 206 80 168 Z" fill="url(#veil)"/>
+  <path d="M88 214 Q128 236 168 214 Q150 246 128 246 Q106 246 88 214 Z" fill="#e8d9c0"/>
+  <circle cx="168" cy="196" r="11" fill="url(#pearlGlow)"/>
+  <circle cx="164" cy="192" r="3.5" fill="#ffffff" opacity="0.9"/>
+  <path d="M0 236 Q64 224 128 232 Q192 224 256 236 L256 256 L0 256 Z" fill="#1b2a44"/>
+</svg>
