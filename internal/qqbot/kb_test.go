@@ -1,6 +1,8 @@
 package qqbot
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -54,5 +56,40 @@ func TestFormatKkrbUpdated(t *testing.T) {
 	}
 	if got := formatKkrbUpdated("bad"); got != "" {
 		t.Errorf("非法输入应返回空: %q", got)
+	}
+}
+
+// 改枪码直出：枪名必须词边界匹配（M7 不能命中 M700），没提枪名时给汇总卡。
+func TestKbDirectGunMatch(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("改枪码-M7.md", "keys: M7, M7改枪\n---\n改枪码：M7-CODE-AAAA\n")
+	write("改枪码-M700.md", "keys: M700, M700改枪\n---\n改枪码：M700-CODE-BBBB\n")
+	write("改枪码-汇总.md", "keys: 改枪码, 改枪\n---\n目前收录的枪型：M7、M700\n")
+
+	c := Default()
+	c.KBDir = dir
+	c.MemoryFile = ""
+	b := New(c)
+
+	// M7 必须拿到 M7 的卡，不能是 M700
+	if got, ok := b.kbDirect("M7 改枪码"); !ok || !strings.Contains(got, "M7-CODE-AAAA") {
+		t.Errorf("M7 应命中 M7 卡，实际 ok=%v got=%.60s", ok, got)
+	}
+	// M700 拿 M700
+	if got, ok := b.kbDirect("M700 改枪码"); !ok || !strings.Contains(got, "M700-CODE-BBBB") {
+		t.Errorf("M700 应命中 M700 卡，实际 ok=%v got=%.60s", ok, got)
+	}
+	// 不提枪名 → 汇总卡
+	if got, ok := b.kbDirect("有改枪码吗"); !ok || !strings.Contains(got, "目前收录") {
+		t.Errorf("泛问应给汇总，实际 ok=%v got=%.60s", ok, got)
+	}
+	// 完全无关 → 不抢答
+	if _, ok := b.kbDirect("今天天气如何"); ok {
+		t.Error("无关消息不该直出")
 	}
 }

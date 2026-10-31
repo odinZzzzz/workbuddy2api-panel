@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -228,33 +229,95 @@ func (b *Bridge) kbContext(text string) string {
 // kbDirect 改枪码走**确定性回复**：命中「改枪码-<枪名>」卡片就直接把卡片正文发出去。
 //
 // 为什么绕开模型：实测模型（多个档位都试过）看到注入的资料仍然回"我没有改枪码数据源"，
-// 因为它倾向认为"码必须实时校验、不能保证有效"。这类**会失效的码**本来就不该由模型转述，
-// 直接给原始资料更准，也不会被它加戏。
+// 因为它倾向认为"码必须实时校验、不能保证有效"。这类**会失效的码**本来就不该由模型转述。
+//
+// 匹配规则（踩过坑）：
+//   - 必须**词边界**匹配：M7 不能命中 M700（strings.Contains 会把 M700 判成 M7）；
+//   - 多个枪名同时命中时取**最长**的那个（M700 优先于 M7）；
+//   - 只问"改枪/配装/码"但没提具体枪名 → 返回汇总卡（列出收录了哪些枪）。
 func (b *Bridge) kbDirect(text string) (string, bool) {
 	if !b.cfg().KBEnabled {
 		return "", false
 	}
-	// 只在问"改枪/配装/码"时才直出，避免抢了普通问答
-	if !strings.Contains(text, "改枪") && !strings.Contains(text, "配装") &&
-		!strings.Contains(text, "码") {
+	lower := strings.ToLower(text)
+	triggers := []string{"改枪", "配装", "配枪", "改装", "枪械码", "分享码", "方案", "码"}
+	hit := false
+	for _, k := range triggers {
+		if strings.Contains(lower, k) {
+			hit = true
+			break
+		}
+	}
+	if !hit {
 		return "", false
 	}
+
 	entries := loadKBDir(b.cfg().KBDir)
-	upper := strings.ToUpper(text)
+
+	// 按枪名长度降序：先匹配最长的，避免 M7 抢了 M700 的卡
+	type cand struct {
+		gun  string
+		text string
+	}
+	var cands []cand
+	var summary string
 	for _, e := range entries {
-		// 卡片 keys 第一项就是枪名
 		if len(e.Keys) == 0 {
 			continue
 		}
-		gun := e.Keys[0]
-		if gun == "" || !strings.Contains(upper, strings.ToUpper(gun)) {
-			continue
-		}
-		// 只认改枪码卡片
 		if !strings.HasPrefix(e.Text, "改枪码") {
+			// 汇总卡正文不是以"改枪码"开头也留着当兜底
+			if strings.Contains(e.Text, "目前收录") {
+				summary = e.Text
+			}
 			continue
 		}
-		return e.Text, true
+		cands = append(cands, cand{gun: e.Keys[0], text: e.Text})
+	}
+	sort.Slice(cands, func(i, j int) bool { return len(cands[i].gun) > len(cands[j].gun) })
+
+	upper := strings.ToUpper(text)
+	for _, c := range cands {
+		if gunMentioned(upper, strings.ToUpper(c.gun)) {
+			return c.text, true
+		}
+	}
+	if summary != "" {
+		return summary, true
 	}
 	return "", false
 }
+
+// gunMentioned 判断枪名是否在文本里**独立出现**（词边界），避免 M7 命中 M700。
+func gunMentioned(upperText, upperGun string) bool {
+	if upperGun == "" {
+		return false
+	}
+	idx := 0
+	for {
+		i := strings.Index(upperText[idx:], upperGun)
+		if i < 0 {
+			return false
+		}
+		i += idx
+		before := byte(' ')
+		if i > 0 {
+			before = upperText[i-1]
+		}
+		after := byte(' ')
+		if i+len(upperGun) < len(upperText) {
+			after = upperText[i+len(upperGun)]
+		}
+		// 前一个字符不能是字母数字；后一个字符不能是数字（M7 vs M700）
+		if !isAlnum(before) && !isDigit(after) {
+			return true
+		}
+		idx = i + len(upperGun)
+	}
+}
+
+func isAlnum(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
