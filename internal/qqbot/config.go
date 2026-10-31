@@ -65,13 +65,6 @@ type Config struct {
 	KkrbEnabled bool `json:"kkrb_enabled"`
 	// KkrbCacheMinutes 实时数据缓存时长（分钟，默认 10）。
 	KkrbCacheMinutes int `json:"kkrb_cache_minutes"`
-	// TTSVoice 语音合成音色（edge-tts 名称，默认 zh-CN-XiaoxiaoNeural）。
-	TTSVoice string `json:"tts_voice"`
-	// TTSPython 跑 edge-tts 的解释器（默认 python3.9）。
-	TTSPython string `json:"tts_python"`
-	// TTSMaxRunes 单条语音最多念多少字（默认 80，语音太长没人听）。
-	TTSMaxRunes int `json:"tts_max_runes"`
-
 	// ChartFont 画图表文字用的字体（.ttf；.ttc 集合字体 opentype 解析不了）。
 	ChartFont string `json:"chart_font"`
 
@@ -174,9 +167,6 @@ func Default() Config {
 		MaxReplyRunes:      1200,
 		TimeoutSeconds:     120,
 		ChartFont:          "/usr/share/fonts/chinese/simhei.ttf",
-		TTSVoice:           "zh-CN-XiaoxiaoNeural",
-		TTSPython:          "python3.9",
-		TTSMaxRunes:        80,
 		KkrbEnabled:        true,
 		KkrbCacheMinutes:   10,
 		KBEnabled:          true,
@@ -232,9 +222,6 @@ func (c *Config) normalize() {
 	c.OneBotAPI = strings.TrimRight(c.OneBotAPI, "/")
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
-	}
-	if c.TTSMaxRunes <= 0 {
-		c.TTSMaxRunes = 80
 	}
 	if c.KkrbCacheMinutes <= 0 {
 		c.KkrbCacheMinutes = 10

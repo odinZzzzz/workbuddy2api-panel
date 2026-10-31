@@ -897,21 +897,6 @@ func (b *Bridge) sendPoke(ev *Event) error {
 	return b.callAction(action, payload)
 }
 
-// sendRecord 发一条语音（本地 mp3 路径；NapCat 负责转码成 QQ 语音）。
-func (b *Bridge) sendRecord(ev *Event, path string) error {
-	action := "send_private_msg"
-	payload := map[string]any{"message": []map[string]any{
-		{"type": "record", "data": map[string]string{"file": path}},
-	}}
-	if ev.MessageType == "group" {
-		action = "send_group_msg"
-		payload["group_id"] = ev.GroupID
-	} else {
-		payload["user_id"] = ev.UserID
-	}
-	return b.callAction(action, payload)
-}
-
 // sendImage 发一张图（本地文件路径或 URL，NapCat 都接受）。
 func (b *Bridge) sendImage(ev *Event, ref string) error {
 	action := "send_private_msg"

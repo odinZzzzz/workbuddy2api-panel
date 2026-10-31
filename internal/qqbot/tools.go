@@ -422,28 +422,6 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return tc.b.TemplateSource(in.Name)
 		})
 
-	add("send_voice", "把一段话用**语音**发出来（在线合成，中文自然）。想用说话代替打字时调用；text 控制在 80 字内，太长会截断。",
-		obj(map[string]any{
-			"text": map[string]any{"type": "string", "description": "要念出来的内容，≤80 字"},
-		}, "text"),
-		func(tc toolContext, args json.RawMessage) (string, error) {
-			var in struct {
-				Text string `json:"text"`
-			}
-			if err := json.Unmarshal(args, &in); err != nil {
-				return "", fmt.Errorf("参数解析失败: %w", err)
-			}
-			path, err := tc.b.VoiceSynthesis(in.Text)
-			if err != nil {
-				return "", err
-			}
-			if err := tc.b.sendRecord(tc.ev, path); err != nil {
-				return "", err
-			}
-			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "voice"})
-			return "语音已发出", nil
-		})
-
 	add("send_sticker", "从表情库里随机发一张表情包到当前会话。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
