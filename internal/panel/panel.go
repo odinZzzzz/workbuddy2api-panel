@@ -41,6 +41,10 @@ type Config struct {
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
+	// QQBotAdminURL QQ bot 桥的后台地址（默认 http://127.0.0.1:8095，空 = 面板不提供该视图）。
+	QQBotAdminURL string
+	// QQBotAdminToken 桥后台的 token（桥监听回环时可留空）。
+	QQBotAdminToken string
 	// BalanceHistory 余额时序采样器（nil = 面板不提供趋势图）。
 	BalanceHistory *balancehist.Recorder
 	// Tokens 多令牌库（nil = 未启用令牌管理，面板隐藏该视图的写操作）。
@@ -184,6 +188,9 @@ func (p *Panel) routes() {
 	// 多令牌（API Key）管理：列表/新建/启停/重置用量/删除。
 	p.mux.HandleFunc("GET /panel/api/tokens", p.withAuth(p.tokensList))
 	p.mux.HandleFunc("GET /panel/api/balance_history", p.withAuth(p.balanceHistory))
+	p.mux.HandleFunc("GET /panel/api/qqbot/state", p.withAuth(p.qqbotState))
+	p.mux.HandleFunc("POST /panel/api/qqbot/config", p.withAuth(p.qqbotConfig))
+	p.mux.HandleFunc("POST /panel/api/qqbot/forget", p.withAuth(p.qqbotForget))
 	p.mux.HandleFunc("POST /panel/api/tokens", p.withAuth(p.tokensCreate))
 	p.mux.HandleFunc("POST /panel/api/tokens/{id}/toggle", p.withAuth(p.tokensToggle))
 	p.mux.HandleFunc("POST /panel/api/tokens/{id}/reset", p.withAuth(p.tokensReset))

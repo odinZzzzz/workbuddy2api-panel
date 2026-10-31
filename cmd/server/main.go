@@ -282,19 +282,21 @@ func main() {
 	// 用迟绑闭包，请求期才解引用（服务尚未启动时 h 必已赋值；nil 兜底只为构造期安全）。
 	var h *server.Handler
 	pn := panel.New(panel.Config{
-		Tokens:         tokens,
-		BalanceHistory: balanceHist,
-		Pool:           p,
-		Usage:          rec,
-		RequestLog:     requestLog,
-		Upstream:       up,
-		Scheduler:      sch,
-		AuthDir:        cfg.AuthDir,
-		APIKey:         cfg.APIKey,
-		RedisMode:      redisMode,
-		StickyCount:    sessCount,
-		Version:        appVersion,
-		Live:           live,
+		Tokens:          tokens,
+		BalanceHistory:  balanceHist,
+		QQBotAdminURL:   cfg.Panel.QQBotAdminURL,
+		QQBotAdminToken: cfg.Panel.QQBotAdminToken,
+		Pool:            p,
+		Usage:           rec,
+		RequestLog:      requestLog,
+		Upstream:        up,
+		Scheduler:       sch,
+		AuthDir:         cfg.AuthDir,
+		APIKey:          cfg.APIKey,
+		RedisMode:       redisMode,
+		StickyCount:     sessCount,
+		Version:         appVersion,
+		Live:            live,
 		DegradeStatus: func() (bool, time.Time) {
 			if h == nil {
 				return false, time.Time{}

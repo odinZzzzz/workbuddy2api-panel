@@ -23,6 +23,10 @@ type Config struct {
 	StateFile string `json:"state_file"` // ./data/state.json
 
 	Panel struct {
+		// QQBotAdminURL QQ bot 桥后台地址（默认 http://127.0.0.1:8095；空 = 面板不显示该视图）。
+		QQBotAdminURL string `json:"qqbot_admin_url"`
+		// QQBotAdminToken 桥后台 token（桥只监听回环时可留空）。
+		QQBotAdminToken string `json:"qqbot_admin_token"`
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
 		// CORSOrigins 前后端分离时的跨域来源白名单（逗号分隔或数组）。
@@ -277,6 +281,8 @@ func Default() *Config {
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
+	// QQ bot 桥后台默认地址（本机回环；桥没部署时面板该视图会提示不可达）
+	c.Panel.QQBotAdminURL = "http://127.0.0.1:8095"
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
 	c.Logging.RequestArchiveMaxMB = 100
@@ -502,6 +508,13 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	if c.Panel.QQBotAdminURL == "" {
+		// 未配置 → 用默认回环地址；显式想关掉该视图可填 "-"（约定）
+		c.Panel.QQBotAdminURL = "http://127.0.0.1:8095"
+	}
+	if c.Panel.QQBotAdminURL == "-" {
+		c.Panel.QQBotAdminURL = ""
+	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}

@@ -354,7 +354,7 @@ function expSnapshotSig(d) {
   return list.map(a => [a.uid, a.credits, a.credits_expiring, a.credits_earliest_expiry, a.credits_earliest_remaining].join(':')).join('|');
 }
 
-const TITLES = { accounts: '账号池', dashboard: '仪表盘', tokens: '令牌', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', dashboard: '仪表盘', tokens: '令牌', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志', qqbot: 'QQ bot' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -366,6 +366,7 @@ function go(v) {
   if (v === 'usage') loadUsage();
   if (v === 'dashboard') loadDashboard();
   if (v === 'tokens') loadTokens();
+  if (v === 'qqbot') loadQQBot();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
@@ -3547,3 +3548,107 @@ if ($('tokBody')) $('tokBody').addEventListener('click', async ev => {
     loadTokens();
   } catch (e) { toast(e.message, 'err'); b.disabled = false; }
 });
+
+
+/* ── QQ bot 视图（数据来自 /panel/api/qqbot/*，由面板代理到桥的本地后台）── */
+function qbNums(v) { return String(v || '').split(',').map(x => parseInt(x.trim(), 10)).filter(x => !isNaN(x)); }
+function qbStr(v) { return (v || []).join(','); }
+
+async function loadQQBot() {
+  let d;
+  try { d = await api('qqbot/state'); }
+  catch (e) {
+    if ($('qbStatus')) $('qbStatus').textContent = '桥未接入：' + (e.message || e);
+    return;
+  }
+  const c = d.config || {}, st = d.stats || {};
+  $('qbEvents').textContent = st.events ?? 0;
+  $('qbReplied').textContent = st.replied ?? 0;
+  $('qbSkipped').textContent = st.skipped ?? 0;
+  $('qbMemUsers').textContent = st.memory_users ?? 0;
+  $('qbStatus').textContent = (c.enabled ? '已启用' : '已停用') + ' · ' + (c.model || '') +
+    ' · 运行 ' + Math.floor((st.uptime_sec || 0) / 60) + ' 分钟';
+
+  $('qbPersona').value = c.system_prompt || '';
+  $('qbModel').value = c.model || '';
+  $('qbRate').value = c.rate_per_minute || 0;
+  $('qbMaxRunes').value = c.max_reply_runes || 0;
+  $('qbHist').value = c.max_history_pairs || 0;
+  $('qbActWin').value = c.activation_window_seconds || 0;
+  $('qbSilence').value = c.silence_seconds || 0;
+  $('qbGroups').value = qbStr(c.allowed_groups);
+  $('qbNoAt').value = qbStr(c.no_at_groups);
+  $('qbUsers').value = qbStr(c.allowed_users);
+  $('qbIgnored').value = qbStr(c.ignored_users);
+  $('qbActKw').value = qbStr(c.activation_keywords);
+  $('qbIntKw').value = qbStr(c.interrupt_keywords);
+  $('qbEnabled').checked = !!c.enabled;
+  $('qbRequireAt').checked = !!c.require_at_in_group;
+
+  const mem = d.memory || [];
+  $('qbMemBody').innerHTML = mem.length ? mem.map(m =>
+    '<tr><td><code>' + esc(String(m.uid)) + '</code></td><td>' + esc(m.nick || '—') + '</td><td>' + m.count +
+    '</td><td class="note">' + esc(m.last_seen || '') + '</td><td class="note">' + esc((m.notes || []).join(' / ')) +
+    '</td><td>' + esc(m.verdict || '—') + '</td>' +
+    '<td><button class="xs" data-qbforget="' + m.uid + '">忘掉</button></td></tr>').join('')
+    : '<tr><td colspan="7" class="note">还没有记忆</td></tr>';
+
+  const gates = (d.gate || []).concat((d.botguard || []).map(g => ({ key: g.key, mode: 'bot x' + g.rounds, until: g.until, hits: g.rounds })));
+  $('qbGateBody').innerHTML = gates.length ? gates.map(g =>
+    '<tr><td><code>' + esc(g.key) + '</code></td><td>' + esc(g.mode) + '</td><td class="note">' +
+    esc(g.until || '—') + '</td><td>' + (g.hits || 0) + '</td></tr>').join('')
+    : '<tr><td colspan="4" class="note">暂无状态</td></tr>';
+
+  const evs = (d.recent || []).slice().reverse();
+  $('qbEvBody').innerHTML = evs.length ? evs.map(e =>
+    '<tr><td class="note">' + esc((e.time || '').slice(11, 19)) + '</td><td>' + esc(e.type || '') + '</td><td>' +
+    (e.group || '—') + '</td><td>' + (e.user || '—') + (e.nick ? ' <span class="note">' + esc(e.nick) + '</span>' : '') +
+    '</td><td>' + (e.at ? '是' : '否') + '</td><td class="' + (e.action === 'replied' ? 'ok' : 'note') + '">' + esc(e.action || '') + '</td></tr>').join('')
+    : '<tr><td colspan="6" class="note">暂无事件</td></tr>';
+}
+
+async function saveQQBot() {
+  const btn = $('qbSave');
+  btn.disabled = true;
+  try {
+    await api('qqbot/config', { method: 'POST', body: JSON.stringify({
+      system_prompt: $('qbPersona').value,
+      model: $('qbModel').value,
+      rate_per_minute: Number($('qbRate').value || 0),
+      max_reply_runes: Number($('qbMaxRunes').value || 0),
+      max_history_pairs: Number($('qbHist').value || 0),
+      allowed_groups: qbNums($('qbGroups').value),
+      no_at_groups: qbNums($('qbNoAt').value),
+      allowed_users: qbNums($('qbUsers').value),
+      ignored_users: qbNums($('qbIgnored').value),
+      enabled: $('qbEnabled').checked,
+      require_at_in_group: $('qbRequireAt').checked,
+    })});
+    $('qbSaveHint').textContent = '已保存并热生效 ' + new Date().toLocaleTimeString();
+    await loadQQBot();
+  } catch (e) {
+    $('qbSaveHint').textContent = '保存失败：' + (e.message || e);
+  }
+  btn.disabled = false;
+}
+
+
+/* QQ bot 视图的按钮绑定（放在脚本末尾，等 DOM 就绪后一次性绑） */
+(function bindQQBotUI() {
+  const bind = () => {
+    const save = document.getElementById('qbSave');
+    if (save && !save.__bound) { save.__bound = true; save.addEventListener('click', () => saveQQBot()); }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bind);
+  else bind();
+  // 记忆表的「忘掉」按钮走事件委托（表格是动态渲染的）
+  document.addEventListener('click', async (ev) => {
+    const uid = ev.target && ev.target.getAttribute && ev.target.getAttribute('data-qbforget');
+    if (!uid) return;
+    if (!confirm('清除 QQ ' + uid + ' 的记忆？')) return;
+    try {
+      await api('qqbot/forget', { method: 'POST', body: JSON.stringify({ uid: Number(uid) }) });
+      await loadQQBot();
+    } catch (e) { alert('失败：' + (e.message || e)); }
+  });
+})();
