@@ -93,3 +93,61 @@ func TestGunsmithCardMatch(t *testing.T) {
 		t.Error("未收录的枪不该返回卡片")
 	}
 }
+
+// 群友投稿改枪码：只能给已收录的枪加、码要校验、重复不加、写盘后能被读回。
+func TestAddGunsmithCode(t *testing.T) {
+	dir := t.TempDir()
+	card := "keys: M700, M700改枪\n---\n改枪码（烽火地带）：\n\n- 短管红点版：6LKJIG80EU90O684D8QL5\n\n视频链接：https://x\n"
+	if err := os.WriteFile(filepath.Join(dir, "改枪码-M700.md"), []byte(card), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := Default()
+	c.KBDir = dir
+	c.MemoryFile = ""
+	b := New(c)
+
+	// 正常加一条
+	msg, err := b.AddGunsmithCode("M700", "6LNEWCODE1234567890ABC", "长枪管版", "怪我咯")
+	if err != nil {
+		t.Fatalf("加码失败: %v", err)
+	}
+	if !strings.Contains(msg, "已给 M700") {
+		t.Errorf("返回文案不对: %s", msg)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "改枪码-M700.md"))
+	if !strings.Contains(string(raw), "6LNEWCODE1234567890ABC") || !strings.Contains(string(raw), "投稿") {
+		t.Errorf("卡片没写进去或缺投稿标记:\n%s", raw)
+	}
+	// 码要插在「视频链接」之前，保持结构
+	if strings.Index(string(raw), "6LNEWCODE1234567890ABC") > strings.Index(string(raw), "视频链接") {
+		t.Error("新码应插在视频链接之前")
+	}
+
+	// 重复的码不再加
+	msg2, err := b.AddGunsmithCode("M700", "6LNEWCODE1234567890ABC", "", "")
+	if err != nil {
+		t.Fatalf("重复加报错: %v", err)
+	}
+	if !strings.Contains(msg2, "已经在库里") {
+		t.Errorf("重复码应提示已存在: %s", msg2)
+	}
+
+	// 没收录的枪要拒绝
+	if _, err := b.AddGunsmithCode("K437", "6LNEWCODE1234567890ABC", "", ""); err == nil {
+		t.Error("未收录的枪应拒绝")
+	}
+	// 码格式不对要拒绝
+	// 小写码会被自动转大写接受（用户粘小写很常见），不算非法
+	if _, err := b.AddGunsmithCode("M700", "6llowercase1234567890ab", "小写投稿", ""); err != nil {
+		t.Errorf("小写码应自动转大写接受: %v", err)
+	}
+	for _, bad := range []string{"abc", "123", "6L", "6L NEW CODE 1234"} {
+		if _, err := b.AddGunsmithCode("M700", bad, "", ""); err == nil {
+			t.Errorf("非法码 %q 应拒绝", bad)
+		}
+	}
+	// 纯数字要拒绝（那是 ID 不是码）
+	if _, err := b.AddGunsmithCode("M700", "1234567890123456", "", ""); err == nil {
+		t.Error("纯数字应拒绝")
+	}
+}

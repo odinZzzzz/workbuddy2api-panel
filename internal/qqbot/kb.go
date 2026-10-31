@@ -1,9 +1,11 @@
 package qqbot
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -305,3 +307,94 @@ func isAlnum(c byte) bool {
 }
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// shareCodeRe 分享码格式：16~24 位大写字母数字，且至少含一个字母（纯数字是 ID，不是码）。
+var shareCodeRe = regexp.MustCompile(`^[A-Z0-9]{16,24}$`)
+
+// AddGunsmithCode 给**已收录**的枪追加一条改枪码（群友投稿）。
+//
+// 设计取舍：
+//   - 只允许已收录的枪：避免有人随手贴个码就凭空造出一把新枪的卡；
+//   - 码做格式校验（16~24 位大写字母数字 + 至少一个字母），杜绝乱贴；
+//   - 内容哈希去重（同一把枪同一个码不重复写）；
+//   - 追加后立刻落盘，kb 目录 mtime 变了会自动重读，不用重启。
+func (b *Bridge) AddGunsmithCode(weapon, code, label, who string) (string, error) {
+	if !b.cfg().KBEnabled {
+		return "", fmt.Errorf("知识库没开，加不了")
+	}
+	dir := strings.TrimSpace(b.cfg().KBDir)
+	if dir == "" {
+		return "", fmt.Errorf("没配置 kb_dir，加不了")
+	}
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if !shareCodeRe.MatchString(code) || !strings.ContainsAny(code, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+		return "", fmt.Errorf("码格式不对（要 16~24 位大写字母数字，且含字母）")
+	}
+	weapon = strings.TrimSpace(weapon)
+	if weapon == "" {
+		return "", fmt.Errorf("得说清是哪把枪")
+	}
+
+	// 找已收录的卡：keys 第一项就是枪名
+	entries := loadKBDir(dir)
+	var target string
+	for _, e := range entries {
+		if len(e.Keys) == 0 || !strings.HasPrefix(e.Text, "改枪码") {
+			continue
+		}
+		if strings.EqualFold(e.Keys[0], weapon) {
+			target = filepath.Join(dir, "改枪码-"+e.Keys[0]+".md")
+			break
+		}
+	}
+	if target == "" {
+		// 也允许模糊匹配（用户可能只说 M700 短管）
+		for _, e := range entries {
+			if len(e.Keys) == 0 || !strings.HasPrefix(e.Text, "改枪码") {
+				continue
+			}
+			if strings.Contains(strings.ToUpper(e.Keys[0]), strings.ToUpper(weapon)) ||
+				strings.Contains(strings.ToUpper(weapon), strings.ToUpper(e.Keys[0])) {
+				target = filepath.Join(dir, "改枪码-"+e.Keys[0]+".md")
+				weapon = e.Keys[0]
+				break
+			}
+		}
+	}
+	if target == "" {
+		return "", fmt.Errorf("没收录 %s 这把枪，只能给已收录的枪加码", weapon)
+	}
+
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		return "", fmt.Errorf("读卡片失败: %w", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, code) {
+		return "这个码已经在库里了，没重复加", nil
+	}
+	lab := strings.TrimSpace(label)
+	if lab == "" {
+		lab = weapon + "（群友投稿）"
+	} else if !strings.Contains(lab, "投稿") {
+		lab += "（群友投稿）"
+	}
+	if who != "" {
+		lab += " · " + who
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	// 插到「视频链接」之前，保持卡片结构整齐
+	marker := "\n视频链接"
+	line := "- " + lab + "：" + code + "\n"
+	if i := strings.Index(text, marker); i >= 0 {
+		text = text[:i] + "\n" + line + text[i:]
+	} else {
+		text += line
+	}
+	if err := os.WriteFile(target, []byte(text), 0o600); err != nil {
+		return "", fmt.Errorf("写卡片失败: %w", err)
+	}
+	return fmt.Sprintf("已给 %s 加了一条码：%s", weapon, code), nil
+}

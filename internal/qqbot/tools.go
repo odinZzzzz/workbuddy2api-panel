@@ -179,6 +179,30 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return text, nil
 		})
 
+	add("add_gunsmith_code", "把群友提供的改枪码加进知识库（只支持**已收录**的枪）。weapon 传枪名，code 传分享码，label 可选（说明这码什么流派）。",
+		obj(map[string]any{
+			"weapon": map[string]any{"type": "string", "description": "枪名，必须是已收录的，如 M700 / MK47"},
+			"code":   map[string]any{"type": "string", "description": "16~24 位分享码（大写字母数字）"},
+			"label":  map[string]any{"type": "string", "description": "可选：这套码的说明，如 短管红点版"},
+		}, "weapon", "code"),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				Weapon string `json:"weapon"`
+				Code   string `json:"code"`
+				Label  string `json:"label"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			who := ""
+			if tc.b.mem != nil {
+				if u, ok := tc.b.mem.Lookup(tc.ev.UserID); ok {
+					who = u.Nick
+				}
+			}
+			return tc.b.AddGunsmithCode(in.Weapon, in.Code, in.Label, who)
+		})
+
 	add("chart_password", "把今日地图密码画成图片（图名 + 四位数字，方便照着抄）。有人问密码、密码门时配合 daily_password 一起发。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
