@@ -551,10 +551,6 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 		compact := truncateRunes(strings.ReplaceAll(persona, "\n", " "), 160)
 		userText = "（人设提醒，务必遵守：" + compact + "）\n\n" + userText
 	}
-	// 把说话人的称呼告诉模型：否则它只能用"你"或念号码（用户明确要求别念 QQ 号）
-	if nick := b.nickOf(uid); nick != "" && nick != "那位" {
-		userText = "（说话人：" + nick + "）\n" + userText
-	}
 
 	system := strings.Join(parts, "\n\n")
 	if system != "" {
@@ -1022,10 +1018,6 @@ const layoutGuide = `【改枪码】
 - 涉及**每日密码、制造利润、材料价格、活动时间、改枪码**这类"能一眼看完的数据"，除文字外要顺手画图：
   密码 → chart_password；制造/材料/子弹 → chart_market；活动 → chart_events。
 - 文字给结论和要点，图片给直观对比，两者不重复堆砌（图上有的，文字只提关键一条）。
-
-【称呼规则】
-- 称呼人一律用**群昵称或 QQ 昵称**，不要念 QQ 号（数字串在群里既难读又像查户口）。
-- 不知道对方叫什么就直接说「你」，别用「123456789」这种号码代称。
 
 【排版规则】
 - QQ 是**纯文本**，不支持任何富文本/Markdown：
