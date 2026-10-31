@@ -332,6 +332,25 @@ keys: M700, M700改枪, M700配装, M700改枪码, M700码
 > 所以模型自绘表情包时必须只用 path/circle/ellipse/rect/polygon/polyline/line，
 > 文字另画。渲染后会数非透明像素，几乎空白就把原因回给模型让它重画。
 
+### 面板加载优化
+
+首屏原来要下 **1.27MB**（echarts 1MB + app.js 186KB + HTML 86KB），且无压缩、无缓存头，
+每次刷新整份重传。三处改动：
+
+| 改动 | 效果 |
+|---|---|
+| **echarts 改按需加载**（CDN 优先，本地兜底） | 只有打开仪表盘/余额图时才拉；依次试 jsdelivr → unpkg → staticfile → baomitu → 本服务 |
+| **gzip + ETag/304**（`writeAsset`） | 首屏 1.27MB → **105KB**；重复访问 304 零字节 |
+| **CSS 拆出 index.html** → `/panel/app.css` | HTML 86KB → 47KB，样式可单独缓存 |
+
+实测（线上 curl，gzip 后）：`/` 13.9KB、`app.js` 77.9KB、`app.css` 13.5KB；
+`If-None-Match` 命中返回 **304 0 字节**。
+浏览器实测：进账号页时 `window.echarts === undefined`（1MB 没下载），切到仪表盘才从
+jsdelivr 拉库并画出 canvas；CDN 全挂时回落到本服务 `/panel/echarts.min.js`。
+
+> CSP 的 `script-src` 已放行上述 CDN 源；若部署环境完全离线，把 `ECHARTS_SRC` 里的
+> CDN 项删掉即可只用本地副本。二进制里仍内嵌一份 echarts 作兜底（想减体积可删 embed）。
+
 ### 管理入口
 
 - `GET /admin`：桥自带的最小后台（token 或 loopback 鉴权），看闸门 / 人格 / 记忆 / 最近动作

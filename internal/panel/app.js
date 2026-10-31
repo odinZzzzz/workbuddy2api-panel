@@ -3067,11 +3067,56 @@ async function loadDashboard() {
     const [ov, mt, us, bal] = await Promise.all([
       api('overview'), api('request_metrics'), api('usage?hours=24'), api('balance_history?hours=24'),
     ]);
-    renderDashboard(ov || {}, mt || {}, us || {}, bal || {});
+    renderDashboard(ov || {}, mt || {}, us || {}, bal || {}).catch(() => {});
     if (note) note.textContent = '更新于 ' + new Date().toLocaleTimeString() + ' · 每 5 秒自动刷新';
   } catch (e) {
     if (note) note.textContent = '读取失败：' + e.message;
   }
+}
+
+
+// ── 图表库按需加载（CDN 优先，本地兜底）────────────────────────────────────
+//
+// echarts 压缩后仍有 ~1MB。以前它写死在 index.html 里，等于每次打开面板都要先下 1MB，
+// 而只有仪表盘/余额两个视图用到它。现在改成首次真正要画图时才加载，并按可达性依次试：
+//   jsdelivr → unpkg → staticfile → baomitu → 本服务 /panel/echarts.min.js
+// 全失败就安静降级（图表区留空，不影响其它功能）。
+let echartsPromise = null;
+const ECHARTS_SRC = [
+  'https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js',
+  'https://unpkg.com/echarts@5.5.1/dist/echarts.min.js',
+  'https://cdn.staticfile.org/echarts/5.5.1/echarts.min.js',
+  'https://lib.baomitu.com/echarts/5.5.1/echarts.min.js',
+  'echarts.min.js',
+];
+
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.async = true;
+    el.onload = () => resolve(true);
+    el.onerror = () => { el.remove(); reject(new Error('load failed: ' + src)); };
+    document.head.appendChild(el);
+  });
+}
+
+function ensureECharts() {
+  if (window.echarts) return Promise.resolve(true);
+  if (echartsPromise) return echartsPromise;
+  echartsPromise = (async () => {
+    for (const src of ECHARTS_SRC) {
+      try {
+        await loadScriptOnce(src);
+        if (window.echarts) return true;
+      } catch (e) {
+        // 换下一个源
+      }
+    }
+    console.warn('[panel] echarts 所有源都加载失败，图表降级');
+    return false;
+  })();
+  return echartsPromise;
 }
 
 function dashMinuteKey(iso) {
@@ -3081,7 +3126,7 @@ function dashMinuteKey(iso) {
     ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 }
 
-function renderDashboard(ov, mt, us, bal) {
+async function renderDashboard(ov, mt, us, bal) {
   const recent = Array.isArray(mt.recent) ? mt.recent : [];
   const now = Date.now();
   const win5 = recent.filter(r => { const t = Date.parse(r.time); return Number.isFinite(t) && now - t <= 5 * 60 * 1000; });
@@ -3128,6 +3173,10 @@ function renderDashboard(ov, mt, us, bal) {
   const pts = [...buckets.values()];
   const maxC = Math.max(0.0001, ...pts.map(p => p.credits));
   const maxR = Math.max(1, ...pts.map(p => p.reqs));
+
+  // 图表库按需加载：只有真的要看仪表盘时才拉（CDN 优先，失败回落到手绘 SVG）。
+  // 放在空态判断之后，避免"没数据"也要等 1MB 下载。
+  await ensureECharts();
 
   // 余额趋势与主图走两条独立通道：主图可能命中 ECharts 分支后 return，
   // 所以余额图必须在分支之前渲染（这里踩过：放在兜底路径里 → 浏览器里整块空白）。
@@ -3182,7 +3231,7 @@ function renderDashboard(ov, mt, us, bal) {
 /* 余额趋势：各账号剩余积分堆叠面积图（数据来自 /panel/api/balance_history）。
    为什么堆叠：单看总量会掩盖"某个号在掉、另一个在涨"；堆叠后每层厚度就是该号余额，
    掉层的形状一眼能看出是谁在被消耗。 */
-function renderBalanceChart(bal) {
+async function renderBalanceChart(bal) {
   const el = $('dashBalance');
   const note = $('dashBalNote');
   const hint = $('dashBalHint');
@@ -3226,6 +3275,7 @@ function renderBalanceChart(bal) {
   try {
     if (!el.__inst || (el.__inst.isDisposed && el.__inst.isDisposed())) {
       el.innerHTML = '';
+      if (!window.echarts && !(await ensureECharts())) return;
       el.__inst = window.echarts.init(el, null, { renderer: 'canvas' });
       addEventListener('resize', () => { try { el.__inst && el.__inst.resize(); } catch (e) {} });
     }

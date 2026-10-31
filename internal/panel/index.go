@@ -9,11 +9,16 @@
 package panel
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 //go:embed index.html
@@ -21,6 +26,12 @@ var indexHTML []byte
 
 //go:embed app.js
 var appJS []byte
+
+// app.css 样式从 index.html 里拆出来：HTML 从 86KB 降到 ~35KB，
+// 而且样式能单独缓存（每次改面板逻辑不必让浏览器重下 CSS）。
+//
+//go:embed app.css
+var appCSS []byte
 
 // echarts 5.5.1（Apache-2.0）随二进制分发：仪表盘图表要动效与交互 tooltip，
 // 而 CSP 是 script-src 'self'、面板又无构建步骤，所以只能同源嵌入（约 1MB）。
@@ -40,7 +51,12 @@ var echartsJS []byte
 //   - form-action 'none'        页面无表单提交目标（配置页是 JS 提交）
 //   - frame-ancestors 'none'    禁止被任何站点 iframe 嵌套（点击劫持）
 //   - base-uri 'none'          禁止注入 <base> 改写相对路径
-const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+// script-src 放行图表库的 CDN（echarts 1MB，没必要塞进首屏和二进制）：
+// 四个源按大陆可达性排序，app.js 里的 ensureECharts() 会依次尝试，全失败再回落到本服务。
+const cspScriptSrc = "'self' https://cdn.jsdelivr.net https://unpkg.com " +
+	"https://cdn.staticfile.org https://lib.baomitu.com"
+
+const csp = "default-src 'none'; script-src " + cspScriptSrc + "; style-src 'self' 'unsafe-inline'; " +
 	"connect-src 'self'; img-src 'self' data:; form-action 'none'; " +
 	"frame-ancestors 'none'; base-uri 'none'"
 
@@ -57,17 +73,22 @@ func setSecurityHeaders(w http.ResponseWriter) {
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(p.asset(indexHTML, "index.html"))
+	// HTML 必须每次回源验证（no-cache + ETag）：面板发版后要立刻生效，
+	// 但未变更时只回 304，省掉 35KB 传输。
+	writeAsset(w, r, "text/html; charset=utf-8", "no-cache", p.asset(indexHTML, "index.html"), &assetMetaIndex, p.cacheable())
 }
 
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(p.asset(appJS, "app.js"))
+	// 逻辑文件同理：no-cache + ETag，改完刷新即生效，没改就 304。
+	writeAsset(w, r, "text/javascript; charset=utf-8", "no-cache", p.asset(appJS, "app.js"), &assetMetaApp, p.cacheable())
+}
+
+// styleSheet 输出面板样式（从 index.html 拆出）。
+func (p *Panel) styleSheet(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	writeAsset(w, r, "text/css; charset=utf-8", "no-cache", p.asset(appCSS, "app.css"), &assetMetaCSS, p.cacheable())
 }
 
 // echartsScript 输出图表库（同源脚本，供 CSP script-src 'self' 加载）。
@@ -75,10 +96,9 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 // 单独给一条长缓存：这文件 1MB 且版本固定（随二进制），面板刷新不该反复重下。
 func (p *Panel) echartsScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(p.asset(echartsJS, "echarts.min.js"))
+	// 1MB 且随二进制版本固定 → 长缓存 + ETag，重复访问只回 304。
+	writeAsset(w, r, "text/javascript; charset=utf-8", "public, max-age=86400",
+		p.asset(echartsJS, "echarts.min.js"), &assetMetaECharts, p.cacheable())
 }
 
 // asset 返回前端资源内容。前后端分离开发时若设置了 WebDir，则每次请求
@@ -95,4 +115,86 @@ func (p *Panel) asset(embedded []byte, name string) []byte {
 		return embedded
 	}
 	return b
+}
+
+// ── 静态资源输出：ETag + 304 + gzip ─────────────────────────────────────────
+//
+// 为什么要做：面板三份资源加起来约 1.28MB（echarts 1MB + app.js 186KB + HTML 86KB），
+// 每次刷新都整份重传，首屏明显卡。三件事分别解决：
+//   - gzip：文本资源通常压到 1/3（echarts 1MB → ~330KB）
+//   - ETag + 304：没变更就只回一个空响应，浏览器直接用缓存
+//   - 压缩与摘要都**只算一次**（WebDir 开发模式除外，那种模式要每次读盘）
+
+type assetMeta struct {
+	once    sync.Once
+	etag    string
+	gzipped []byte
+}
+
+var (
+	assetMetaIndex   assetMeta
+	assetMetaApp     assetMeta
+	assetMetaCSS     assetMeta
+	assetMetaECharts assetMeta
+)
+
+// cacheable WebDir 为空（用 go:embed 的内置副本）时资源是常量，可以缓存摘要与压缩结果；
+// 前后端分离开发模式下每次读盘，内容会变，不能缓存。
+func (p *Panel) cacheable() bool { return strings.TrimSpace(p.cfg.WebDir) == "" }
+
+// writeAsset 输出一份静态资源。
+func writeAsset(w http.ResponseWriter, r *http.Request, contentType, cacheControl string, data []byte, meta *assetMeta, useCache bool) {
+	etag, gz := "", []byte(nil)
+	if useCache {
+		meta.once.Do(func() {
+			sum := sha256.Sum256(data)
+			meta.etag = `"` + hex.EncodeToString(sum[:12]) + `"`
+			var buf bytes.Buffer
+			zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+			_, _ = zw.Write(data)
+			_ = zw.Close()
+			meta.gzipped = buf.Bytes()
+		})
+		etag, gz = meta.etag, meta.gzipped
+	} else {
+		sum := sha256.Sum256(data)
+		etag = `"` + hex.EncodeToString(sum[:12]) + `"`
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", cacheControl)
+	w.Header().Set("ETag", etag)
+	w.Header().Add("Vary", "Accept-Encoding")
+
+	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatch(inm, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if len(data) > 1024 && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		if gz == nil {
+			var buf bytes.Buffer
+			zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+			_, _ = zw.Write(data)
+			_ = zw.Close()
+			gz = buf.Bytes()
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(gz)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+// etagMatch 处理 If-None-Match（可能是逗号分隔的列表，也可能带 W/ 弱前缀）。
+func etagMatch(header, etag string) bool {
+	for _, part := range strings.Split(header, ",") {
+		v := strings.TrimSpace(part)
+		v = strings.TrimPrefix(v, "W/")
+		if v == etag || v == "*" {
+			return true
+		}
+	}
+	return false
 }
