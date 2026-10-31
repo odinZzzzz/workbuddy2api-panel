@@ -165,6 +165,68 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return fmt.Sprintf("已画出柱状图（%d 条数据）并发到当前会话", len(in.Items)), nil
 		})
 
+	add("chart_password", "把今日地图密码画成图片（图名 + 四位数字，方便照着抄）。有人问密码、密码门时配合 daily_password 一起发。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			ov, err := tc.b.kkrbOverview()
+			if err != nil {
+				return "", err
+			}
+			tiles := make([]Tile, 0, len(ov.Passwords))
+			for _, p := range ov.Passwords {
+				sub := ""
+				if p.Updated != "" {
+					sub = p.Updated
+				}
+				tiles = append(tiles, Tile{Label: p.Map, Value: p.Code, Sub: sub})
+			}
+			if len(tiles) == 0 {
+				return "没有密码数据", nil
+			}
+			png, err := RenderTiles("今日地图密码", tiles, 3, tc.b.cfg().ChartFont)
+			if err != nil {
+				return "", err
+			}
+			path, err := tc.b.SaveGeneratedSticker(png)
+			if err != nil {
+				return "", err
+			}
+			if err := tc.b.sendImage(tc.ev, path); err != nil {
+				return "", err
+			}
+			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_password"})
+			return fmt.Sprintf("已把 %d 张图的密码画成图片发出", len(tiles)), nil
+		})
+
+	add("chart_events", "把当前活动画成日历图片（活动名 + 时间区间 + 物品）。有人问最近有什么活动、活动到什么时候时用。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			ov, err := tc.b.kkrbOverview()
+			if err != nil {
+				return "", err
+			}
+			rows := make([]EventRow, 0, len(ov.Activities))
+			for _, a := range ov.Activities {
+				rows = append(rows, EventRow{Name: a.Name, Time: a.Time, Item: a.Item})
+			}
+			if len(rows) == 0 {
+				return "当前没有活动数据", nil
+			}
+			png, err := RenderEventList("当前活动", rows, tc.b.cfg().ChartFont)
+			if err != nil {
+				return "", err
+			}
+			path, err := tc.b.SaveGeneratedSticker(png)
+			if err != nil {
+				return "", err
+			}
+			if err := tc.b.sendImage(tc.ev, path); err != nil {
+				return "", err
+			}
+			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_events"})
+			return fmt.Sprintf("已把 %d 个活动画成日历图片发出", len(rows)), nil
+		})
+
 	add("chart_market", "把三角洲市场数据画成柱状图（一次调用：取数 + 画图 + 发送）。kind=craft（制造利润）/material（材料当前价）/ammo（子弹兑换利润）。",
 		obj(map[string]any{
 			"kind": map[string]any{"type": "string", "enum": []string{"craft", "material", "ammo"}},

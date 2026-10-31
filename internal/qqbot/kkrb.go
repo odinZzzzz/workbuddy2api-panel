@@ -85,6 +85,13 @@ type KkrbAmmoProfit struct {
 	Profit float64 `json:"profit"`
 }
 
+// KkrbActivity 活动（研发部门集市等）。
+type KkrbActivity struct {
+	Name string `json:"name"`
+	Time string `json:"time,omitempty"`
+	Item string `json:"item,omitempty"`
+}
+
 // KkrbOverview 一次拉取的全部概览数据。
 type KkrbOverview struct {
 	FetchedAt  time.Time        `json:"fetched_at"`
@@ -93,6 +100,7 @@ type KkrbOverview struct {
 	Materials  []KkrbMaterial   `json:"materials"`
 	AmmoHot    []KkrbAmmo       `json:"ammo_hot"`
 	AmmoProfit []KkrbAmmoProfit `json:"ammo_profit"`
+	Activities []KkrbActivity   `json:"activities"`
 }
 
 // kkrbClient 带 cookie 与缓存的客户端。
@@ -199,6 +207,11 @@ func parseKkrbOverview(raw []byte) (*KkrbOverview, error) {
 				CurrectPrice int    `json:"currectPrice"`
 				ItemGrade    int    `json:"itemGrade"`
 			} `json:"hapData"`
+			AriiData []struct {
+				ActivityName string `json:"activityName"`
+				ActivityTime string `json:"activityTime"`
+				ItemName     string `json:"itemName"`
+			} `json:"ariiData"`
 			DtaData []struct {
 				ItemName string  `json:"itemName"`
 				Pic      string  `json:"pic"`
@@ -244,6 +257,12 @@ func parseKkrbOverview(raw []byte) (*KkrbOverview, error) {
 	}
 	for _, d := range out.Data.DtaData {
 		ov.AmmoProfit = append(ov.AmmoProfit, KkrbAmmoProfit{Item: d.ItemName, Profit: d.Profit, Pic: d.Pic})
+	}
+	for _, a := range out.Data.AriiData {
+		if strings.TrimSpace(a.ActivityName) == "" {
+			continue
+		}
+		ov.Activities = append(ov.Activities, KkrbActivity{Name: a.ActivityName, Time: a.ActivityTime, Item: a.ItemName})
 	}
 	sort.Slice(ov.AmmoProfit, func(i, j int) bool { return ov.AmmoProfit[i].Profit > ov.AmmoProfit[j].Profit })
 	if len(ov.Passwords) == 0 && len(ov.Crafts) == 0 {

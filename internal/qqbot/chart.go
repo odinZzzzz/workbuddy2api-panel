@@ -51,20 +51,21 @@ var (
 	colName   = color.RGBA{0x66, 0x66, 0x66, 0xff}
 	colMuted  = color.RGBA{0x99, 0x99, 0x99, 0xff}
 	colTrack  = color.RGBA{0xee, 0xee, 0xee, 0xff}
-	colValue  = color.RGBA{0x1e, 0x9f, 0xff, 0xff} // 唯一主色（蓝）
-	colChamp  = color.RGBA{0xff, 0x57, 0x22, 0xff} // 冠军标记（橙）
+	colValue  = color.RGBA{0x9c, 0xbf, 0x3b, 0xff} // 唯一主色：三角洲军绿
+	colChamp  = color.RGBA{0xff, 0x8a, 0x00, 0xff} // 冠军标记：警戒橙
+	colValueD = color.RGBA{0x7a, 0x99, 0x2a, 0xff} // 绿的字重色（数字用，深一档保证可读）
 	colDiv    = color.RGBA{0xe6, 0xe6, 0xe6, 0xff}
 )
 
 const (
 	chartWidth  = 720
 	chartPerRow = 4
-	chartPadL   = 24
-	chartPadT   = 92
-	chartPadB   = 26
-	chartCellH  = 168
-	chartIconSz = 40
-	chartBarH   = 6
+	chartPadL   = 14 // 左右留白收紧
+	chartPadT   = 70 // 标题区收紧
+	chartPadB   = 12
+	chartCellH  = 128 // 行高从 168 → 128
+	chartIconSz = 32  // 图标略小，省空间
+	chartBarH   = 5
 )
 
 // fontCache 按 (路径,字号) 缓存 face，避免每张图都解析 9MB 字体。
@@ -235,8 +236,8 @@ func RenderBarChart(title string, items []ChartItem, fontPath string) ([]byte, e
 	fillRect(canvas, image.Rect(0, 0, chartWidth, 6), colValue)
 
 	// 标题 + 分割线
-	drawText(canvas, fontPath, 30, chartPadL, 60, fitText(fontPath, 30, title, chartWidth-2*chartPadL), colTitle)
-	fillRect(canvas, image.Rect(chartPadL, chartPadT-22, chartWidth-chartPadL, chartPadT-21), colDiv)
+	drawText(canvas, fontPath, 26, chartPadL, 46, fitText(fontPath, 26, title, chartWidth-2*chartPadL), colTitle)
+	fillRect(canvas, image.Rect(chartPadL, chartPadT-16, chartWidth-chartPadL, chartPadT-15), colDiv)
 
 	// 网格：横排 cell
 	cellW := (chartWidth - 2*chartPadL) / chartPerRow
@@ -248,33 +249,33 @@ func RenderBarChart(title string, items []ChartItem, fontPath string) ([]byte, e
 
 		// 冠军标记：第一名加一条橙色顶条（其余不加，保持统一）
 		if i == 0 {
-			fillRect(canvas, image.Rect(x0+8, y0-6, x0+cellW-8, y0-2), colChamp)
+			fillRect(canvas, image.Rect(x0+6, y0+2, x0+cellW-6, y0+5), colChamp)
 		}
 
 		// 图标（居中）
-		iconY := y0 + 6
+		iconY := y0 + 8
 		if img := fetchIcon(it.Icon); img != nil {
 			drawIcon(canvas, img, x0+(cellW-chartIconSz)/2, iconY, chartIconSz)
 		}
 
 		// 名字（居中、按宽度截断）
 		nameMaxW := cellW - 24
-		name := fitText(fontPath, 18, it.Label, nameMaxW)
-		nw := textWidth(fontPath, 18, name)
-		drawText(canvas, fontPath, 18, x0+(cellW-nw)/2, iconY+chartIconSz+26, name, colName)
+		name := fitText(fontPath, 17, it.Label, nameMaxW)
+		nw := textWidth(fontPath, 17, name)
+		drawText(canvas, fontPath, 17, x0+(cellW-nw)/2, iconY+chartIconSz+22, name, colName)
 
 		// 数字（居中、大号、统一主色）
 		valStr := formatChartValue(it.Value)
-		vw := textWidth(fontPath, 34, valStr)
-		drawText(canvas, fontPath, 34, x0+(cellW-vw)/2, iconY+chartIconSz+66, valStr, colValue)
+		vw := textWidth(fontPath, 30, valStr)
+		drawText(canvas, fontPath, 30, x0+(cellW-vw)/2, iconY+chartIconSz+58, valStr, colValueD)
 
 		// 细比例条（配角，居中，统一主色）
-		barW := cellW - 48
+		barW := cellW - 32
 		if barW < 40 {
 			barW = 40
 		}
 		barX := x0 + (cellW-barW)/2
-		barY := iconY + chartIconSz + 82
+		barY := iconY + chartIconSz + 64
 		fillRect(canvas, image.Rect(barX, barY, barX+barW, barY+chartBarH), colTrack)
 		fillW := int(math.Round(float64(barW) * math.Abs(it.Value) / maxV))
 		if fillW < 4 {
@@ -283,7 +284,7 @@ func RenderBarChart(title string, items []ChartItem, fontPath string) ([]byte, e
 		fillRect(canvas, image.Rect(barX, barY, barX+fillW, barY+chartBarH), colValue)
 
 		// 名次（左上小灰字）
-		drawText(canvas, fontPath, 16, x0+8, y0+22, fmt.Sprintf("#%d", i+1), colMuted)
+		drawText(canvas, fontPath, 15, x0+6, y0+18, fmt.Sprintf("#%d", i+1), colMuted)
 	}
 
 	var buf bytes.Buffer
@@ -311,4 +312,125 @@ func formatChartValue(v float64) string {
 		return fmt.Sprintf("%.0f", v)
 	}
 	return fmt.Sprintf("%.1f", v)
+}
+
+// Tile 卡片格：一个标签 + 一个大号值（密码、坐标、日期都适用）。
+type Tile struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+	Sub   string `json:"sub,omitempty"`
+}
+
+// RenderTiles 画"标签 + 大号值"网格卡（每日密码就长这样：图名 + 四位数字）。
+//
+// 为什么单独一个函数而不是复用 RenderBarChart：密码是**定长数字**、没有大小关系，
+// 用进度条反而误导；这里只强调"看得清、抄得准"——大字号 + 等宽间距。
+func RenderTiles(title string, tiles []Tile, perRow int, fontPath string) ([]byte, error) {
+	if len(tiles) == 0 {
+		return nil, fmt.Errorf("没有数据可画")
+	}
+	if perRow <= 0 || perRow > 4 {
+		perRow = 3
+	}
+	rows := (len(tiles) + perRow - 1) / perRow
+	const cellH = 112
+	const padL = 14
+	const padT = 68
+	const padB = 12
+	h := padT + rows*cellH + padB
+	canvas := image.NewRGBA(image.Rect(0, 0, chartWidth, h))
+
+	fillRect(canvas, canvas.Bounds(), colPageBG)
+	fillRect(canvas, canvas.Bounds(), colCardBG)
+	fillRect(canvas, image.Rect(0, 0, chartWidth, 6), colValue)
+
+	drawText(canvas, fontPath, 26, padL, 46, fitText(fontPath, 26, title, chartWidth-2*padL), colTitle)
+	fillRect(canvas, image.Rect(padL, padT-16, chartWidth-padL, padT-15), colDiv)
+
+	cellW := (chartWidth - 2*padL) / perRow
+	for i, t := range tiles {
+		row := i / perRow
+		col := i % perRow
+		x0 := padL + col*cellW
+		y0 := padT + row*cellH
+
+		// 标签（灰、居中）
+		lw := textWidth(fontPath, 17, t.Label)
+		drawText(canvas, fontPath, 17, x0+(cellW-lw)/2, y0+24, t.Label, colName)
+
+		// 值（军绿、大号、居中）
+		vw := textWidth(fontPath, 40, t.Value)
+		drawText(canvas, fontPath, 40, x0+(cellW-vw)/2, y0+72, t.Value, colValueD)
+
+		// 副标题（可选，小灰字）
+		if t.Sub != "" {
+			sw := textWidth(fontPath, 14, t.Sub)
+			drawText(canvas, fontPath, 14, x0+(cellW-sw)/2, y0+94, t.Sub, colMuted)
+		}
+
+		// 格子之间的细分隔线（竖线，仅非末列）
+		if col < perRow-1 {
+			x := x0 + cellW - 1
+			fillRect(canvas, image.Rect(x, y0+10, x+1, y0+cellH-14), colDiv)
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, canvas); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// EventRow 一行活动（名称 + 时间区间 + 可选物品）。
+type EventRow struct {
+	Name string `json:"name"`
+	Time string `json:"time"`
+	Item string `json:"item,omitempty"`
+}
+
+// RenderEventList 画活动日历（每行一个活动：名称、时间、物品）。
+func RenderEventList(title string, events []EventRow, fontPath string) ([]byte, error) {
+	if len(events) == 0 {
+		return nil, fmt.Errorf("没有活动可画")
+	}
+	if len(events) > 8 {
+		events = events[:8]
+	}
+	const rowH = 76
+	const padL = 14
+	const padT = 68
+	const padB = 12
+	h := padT + len(events)*rowH + padB
+	canvas := image.NewRGBA(image.Rect(0, 0, chartWidth, h))
+
+	fillRect(canvas, canvas.Bounds(), colPageBG)
+	fillRect(canvas, canvas.Bounds(), colCardBG)
+	fillRect(canvas, image.Rect(0, 0, chartWidth, 6), colValue)
+	drawText(canvas, fontPath, 26, padL, 46, fitText(fontPath, 26, title, chartWidth-2*padL), colTitle)
+	fillRect(canvas, image.Rect(padL, padT-16, chartWidth-padL, padT-15), colDiv)
+
+	for i, e := range events {
+		y0 := padT + i*rowH
+		// 左侧军绿竖条（活动标记）
+		fillRect(canvas, image.Rect(padL, y0+8, padL+4, y0+rowH-16), colValue)
+
+		// 名称（粗一点：24px）
+		drawText(canvas, fontPath, 22, padL+16, y0+34, fitText(fontPath, 22, e.Name, chartWidth-2*padL-140), colTitle)
+		// 时间（右对齐、灰）
+		tw := textWidth(fontPath, 17, e.Time)
+		drawText(canvas, fontPath, 17, chartWidth-padL-tw, y0+32, e.Time, colName)
+		// 物品（第二行、绿）
+		if e.Item != "" {
+			drawText(canvas, fontPath, 16, padL+16, y0+58, fitText(fontPath, 16, "物品："+e.Item, chartWidth-2*padL-16), colValueD)
+		}
+		// 行分隔
+		fillRect(canvas, image.Rect(padL+16, y0+rowH-8, chartWidth-padL, y0+rowH-7), colDiv)
+	}
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, canvas); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
