@@ -3062,6 +3062,48 @@ if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
    这是唯一能反映"此刻正在烧多少积分"的数据源（usage 只按小时聚合）。 */
 
 
+// ── 美术方向预设（三版结构性不同的氛围，运行时可切：window.__flowStyle）──
+//
+// 差异不只在配色，而是整套质感：背景构成（极光/网格/纸纹）、描边策略
+// （柔和发光/硬边霓虹/水墨晕染）、粒子形态（彗尾/电火花/火星）。
+const FLOW_STYLES = {
+  aurora: {
+    name: '深空极光',
+    bgTop: '#0d1226', bgBot: '#070912',
+    aurora: ['rgba(96,144,255,0.16)', 'rgba(132,86,224,0.13)', 'rgba(40,200,220,0.07)'],
+    acc: { core: '#e8f0ff', mid: '#5f86f5', edge: '#26409e' },
+    mod: { core: '#dcfff5', mid: '#31d6a8', edge: '#0c7f68' },
+    edge: [[128, 168, 255], [64, 232, 184]],
+    part: [158, 205, 255], hot: [255, 190, 112],
+    ring: '120,165,255', glow: 1.0, grain: 0.055, vignette: 0.55, dashes: true,
+  },
+  neon: {
+    name: '霓虹电路',
+    bgTop: '#05070d', bgBot: '#010204',
+    aurora: ['rgba(0,210,255,0.12)', 'rgba(255,0,170,0.10)', 'rgba(0,255,180,0.05)'],
+    acc: { core: '#f2feff', mid: '#22c8ff', edge: '#075b85' },
+    mod: { core: '#fff2fb', mid: '#ff3fb0', edge: '#7d1057' },
+    edge: [[46, 224, 255], [255, 64, 178]],
+    part: [130, 245, 255], hot: [255, 226, 96],
+    ring: '0,215,255', glow: 1.25, grain: 0.02, vignette: 0.68, dashes: true,
+  },
+  ink: {
+    name: '水墨鎏金',
+    bgTop: '#191410', bgBot: '#0b0907',
+    aurora: ['rgba(255,196,104,0.13)', 'rgba(168,126,64,0.10)', 'rgba(90,60,30,0.10)'],
+    acc: { core: '#fff6e2', mid: '#e2b463', edge: '#7d5a1e' },
+    mod: { core: '#fff8ec', mid: '#c98b3f', edge: '#5f3a12' },
+    edge: [[244, 206, 138], [176, 118, 58]],
+    part: [255, 228, 176], hot: [255, 146, 86],
+    ring: '255,200,124', glow: 0.85, grain: 0.10, vignette: 0.62, dashes: false,
+  },
+};
+// 运行时可通过 window.__flowStyle = 'neon' 切换（出多版对比图用），默认 aurora
+function flowStyle() {
+  const k = (typeof window !== 'undefined' && window.__flowStyle) || 'aurora';
+  return FLOW_STYLES[k] || FLOW_STYLES.aurora;
+}
+
 // ── 积分流向：悬浮球 + 粒子流 + 汇聚吸收 ─────────────────────────────────────
 //
 // 四个效果一次画全：
@@ -3207,9 +3249,10 @@ function flowAnimStart(box, agg) {
   cv.height = Math.round(h * dpr);
   cv.style.height = h + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  // 注意：Windows 上「关闭动画效果」会让 prefers-reduced-motion 命中，而本机就是这种环境。
-  // 所以 reduce 不等于"完全静止"——降成 lite 模式：粒子照流（密度 1/3、速度减半），
-  // 去掉浮尘和漂浮漂移，避免整块图变成一张静态图。
+
+  const S = flowStyle();
+  // 注意：Windows 上「关闭动画效果」会让 prefers-reduced-motion 命中，本机就是这种环境。
+  // reduce 不等于"完全静止"——降成 lite：粒子密度 1/3、去掉浮尘与颗粒噪点、悬浮幅度减半。
   const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 
   // ── 节点 ──
@@ -3219,15 +3262,13 @@ function flowAnimStart(box, agg) {
   const slot = (n, i) => (h * (i + 1)) / (n + 1);
   agg.accs.forEach(([uid, sum], i) => {
     const meta = agg.accMeta.get(uid) || {};
-    const name = meta.name || String(uid).slice(0, 8);
     nodes.push({
-      kind: 'acc', id: uid, label: name, value: sum,
+      kind: 'acc', id: uid, label: meta.name || String(uid).slice(0, 8), value: sum,
       running: (meta.inFlight || 0) > 0,
       ax: w * 0.23, ay: slot(agg.accs.length, i),
       x: w * 0.23, y: slot(agg.accs.length, i),
       r: 10 + 20 * Math.sqrt(sum / maxAcc),
-      phase: Math.random() * Math.PI * 2,
-      feed: 0, // 被"喂亮"的强度
+      phase: Math.random() * Math.PI * 2, feed: 0,
     });
   });
   agg.mods.forEach(([mod, sum], i) => {
@@ -3236,8 +3277,7 @@ function flowAnimStart(box, agg) {
       ax: w * 0.77, ay: slot(agg.mods.length, i),
       x: w * 0.77, y: slot(agg.mods.length, i),
       r: 9 + 17 * Math.sqrt(sum / maxMod),
-      phase: Math.random() * Math.PI * 2,
-      feed: 0,
+      phase: Math.random() * Math.PI * 2, feed: 0,
     });
   });
   const byId = new Map(nodes.map(n => [n.kind + ':' + n.id, n]));
@@ -3245,38 +3285,65 @@ function flowAnimStart(box, agg) {
   const edges = [];
   for (const [k, v] of agg.cell.entries()) {
     const [acc, mod] = k.split('\u0000');
-    const a = byId.get('acc:' + acc);
-    const m = byId.get('model:' + mod);
-    if (!a || !m || v.credit <= 0) continue;
-    edges.push({ a, m, credit: v.credit, reqs: v.reqs, last: v.last });
+    const an = byId.get('acc:' + acc);
+    const mn = byId.get('model:' + mod);
+    if (!an || !mn || v.credit <= 0) continue;
+    edges.push({ a: an, m: mn, credit: v.credit, reqs: v.reqs, last: v.last, acc: 0 });
   }
   const maxEdge = Math.max(...edges.map(e => e.credit), 0.0001);
   for (const e of edges) e.w = e.credit / maxEdge;
 
-  // ── 背景浮尘（景深）──
+  // ── 浮尘：三层视差（近层大而亮、远层小而暗），营造景深 ──
   const dust = [];
-  for (let i = 0; i < 46; i++) {
-    dust.push({ x: Math.random() * w, y: Math.random() * h, r: 0.6 + Math.random() * 1.1,
-      vx: (Math.random() - 0.5) * 6, vy: -3 - Math.random() * 6, a: 0.06 + Math.random() * 0.12 });
+  const layers = [{ n: 18, r: [1.4, 2.6], a: [0.10, 0.20], sp: 1.0 },
+                  { n: 20, r: [0.9, 1.6], a: [0.06, 0.12], sp: 0.6 },
+                  { n: 26, r: [0.5, 0.9], a: [0.03, 0.07], sp: 0.32 }];
+  for (const L of layers) {
+    for (let i = 0; i < L.n; i++) {
+      dust.push({
+        x: Math.random() * w, y: Math.random() * h,
+        r: L.r[0] + Math.random() * (L.r[1] - L.r[0]),
+        a: L.a[0] + Math.random() * (L.a[1] - L.a[0]),
+        vx: (Math.random() - 0.5) * 8 * L.sp, vy: (-2 - Math.random() * 6) * L.sp,
+        tw: Math.random() * Math.PI * 2,
+      });
+    }
   }
+
+  // ── 胶片颗粒：预生成一次噪点瓦片，逐帧随机偏移贴上去（比每帧生成噪点便宜得多）──
+  const grainTiles = [];
+  for (let k = 0; k < 3; k++) {
+    const g = document.createElement('canvas');
+    g.width = g.height = 96;
+    const gx = g.getContext('2d');
+    const img = gx.createImageData(96, 96);
+    for (let i = 0; i < img.data.length; i += 4) {
+      const v = 128 + (Math.random() - 0.5) * 255;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+      img.data[i + 3] = 26;
+    }
+    gx.putImageData(img, 0, 0);
+    grainTiles.push(g);
+  }
+  const grainPatterns = grainTiles.map(g => ctx.createPattern(g, 'repeat'));
 
   flowAnim = {
     raf: 0, cv, ctx, w, h, dpr, nodes, edges, parts: [], pulses: [], dust,
-    hover: null, last: performance.now(), reduceMotion, box,
+    hover: null, last: performance.now(), reduceMotion, box, S,
     sig: agg.accs.map(x => x[0]).join('|') + '//' + agg.mods.map(x => x[0]).join('|'),
-    byId,
+    byId, grainPatterns,
   };
 
-  // 悬停：球放大 + 高亮该账号的所有出边
   const onMove = (ev) => {
     const st = flowAnim; if (!st) return;
     const rect = cv.getBoundingClientRect();
     const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
     let hit = null;
     for (const n of st.nodes) {
-      if ((mx - n.x) ** 2 + (my - n.y) ** 2 <= (n.r + 10) ** 2) { hit = n; break; }
+      if ((mx - n.x) ** 2 + (my - n.y) ** 2 <= (n.r + 12) ** 2) { hit = n; break; }
     }
     st.hover = hit;
+    cv.style.cursor = hit ? 'pointer' : 'default';
   };
   const onLeave = () => { if (flowAnim) flowAnim.hover = null; };
   cv.addEventListener('mousemove', onMove);
@@ -3289,89 +3356,131 @@ function flowAnimStart(box, agg) {
     const view = document.querySelector('#view-dashboard');
     if (!view || view.hidden || document.hidden) { st.raf = 0; return; }
 
-    // rawDt 是真实经过时间（后台/低帧率时可能是 1 秒），物理用钳制后的 dt 防止跳变，
-    // 但**吐粒子必须用 rawDt**——否则 1fps 环境下每秒只按 0.05 秒算，密度会少 20 倍。
     const rawDt = Math.min(1.5, Math.max(0.001, (now - st.last) / 1000));
-    const dt = Math.min(0.05, rawDt);   // 只给"平滑/漂移"用
-    const pdt = Math.min(0.5, rawDt);   // 粒子推进：按真实时间，否则低帧率下是慢动作
+    const dt = Math.min(0.05, rawDt);
+    const pdt = Math.min(0.5, rawDt);
     st.last = now;
     const t = now / 1000;
 
-    ctx.clearRect(0, 0, w, h);
-
-    // 背景：中心微光 + 浮尘
-    const bg = ctx.createRadialGradient(w / 2, h / 2, 8, w / 2, h / 2, Math.max(w, h) * 0.72);
-    bg.addColorStop(0, 'rgba(91,124,250,0.10)');
-    bg.addColorStop(0.55, 'rgba(60,90,200,0.04)');
-    bg.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = bg;
+    // ── 背景：竖直渐变 + 极光团 + 视差浮尘 + 暗角 + 颗粒 ──
+    const bgg = ctx.createLinearGradient(0, 0, w * 0.35, h);
+    bgg.addColorStop(0, S.bgTop);
+    bgg.addColorStop(1, S.bgBot);
+    ctx.fillStyle = bgg;
     ctx.fillRect(0, 0, w, h);
 
     ctx.globalCompositeOperation = 'lighter';
-    for (const d of (reduceMotion ? [] : st.dust)) {
-      if (!reduceMotion) {
+    const blobs = [
+      { x: w * (0.32 + 0.05 * Math.sin(t * 0.11)), y: h * (0.42 + 0.06 * Math.cos(t * 0.09)), r: Math.max(w, h) * 0.55, c: S.aurora[0] },
+      { x: w * (0.72 + 0.06 * Math.cos(t * 0.08)), y: h * (0.58 + 0.05 * Math.sin(t * 0.12)), r: Math.max(w, h) * 0.48, c: S.aurora[1] },
+      { x: w * 0.5, y: h * (0.5 + 0.1 * Math.sin(t * 0.05)), r: Math.max(w, h) * 0.62, c: S.aurora[2] },
+    ];
+    for (const b of blobs) {
+      const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+      g.addColorStop(0, b.c);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+    }
+
+    if (!reduceMotion) {
+      for (const d of st.dust) {
         d.x += d.vx * dt; d.y += d.vy * dt;
-        if (d.y < -4) { d.y = h + 4; d.x = Math.random() * w; }
-        if (d.x < -4) d.x = w + 4; else if (d.x > w + 4) d.x = -4;
+        if (d.y < -6) { d.y = h + 6; d.x = Math.random() * w; }
+        if (d.x < -6) d.x = w + 6; else if (d.x > w + 6) d.x = -6;
+        const tw = 0.65 + 0.35 * Math.sin(t * 2 + d.tw);   // 闪烁
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + S.part[0] + ',' + S.part[1] + ',' + S.part[2] + ',' + (d.a * tw).toFixed(3) + ')';
+        ctx.fill();
       }
-      ctx.beginPath();
-      ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(150,180,255,' + d.a.toFixed(3) + ')';
-      ctx.fill();
     }
     ctx.globalCompositeOperation = 'source-over';
 
-    // 悬浮：弹簧回锚点 + 慢漂移
+    // 暗角
+    const vg = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.25, w / 2, h / 2, Math.max(w, h) * 0.78);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,' + S.vignette + ')');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, w, h);
+
+    // 颗粒（三张瓦片轮换，逐帧位移）
+    if (!reduceMotion && st.grainPatterns) {
+      const pat = st.grainPatterns[Math.floor(t * 24) % st.grainPatterns.length];
+      ctx.save();
+      ctx.globalAlpha = S.grain;
+      ctx.translate((Math.random() * 96) | 0, (Math.random() * 96) | 0);
+      ctx.fillStyle = pat;
+      ctx.fillRect(-96, -96, w + 192, h + 192);
+      ctx.restore();
+    }
+
+    // ── 悬浮：弹簧回锚点 + 慢漂移 ──
     for (const n of st.nodes) {
-      // lite 模式下也留一点悬浮（幅度 1.4px），否则"悬浮"在关闭动画的系统上等于没有
-      const bob = Math.sin(t * 0.8 + n.phase) * (reduceMotion ? 1.4 : 3.2);
+      const bob = Math.sin(t * 0.8 + n.phase) * (reduceMotion ? 1.4 : 3.4);
       n.x += (n.ax - n.x) * Math.min(1, dt * 3.2);
       n.y += (n.ay + bob - n.y) * Math.min(1, dt * 3.2);
       n.feed = Math.max(0, n.feed - pdt * 1.6);
     }
 
-    // 连线（底纹）
+    // ── 连线：沿路径渐变 + 宽度随权重 + 电流虚线 ──
     for (const e of st.edges) {
       const hot = st.hover && (st.hover === e.a || st.hover === e.m);
-      const alpha = (0.10 + 0.26 * e.w) * (hot ? 2.2 : 1);
+      const mx = (e.a.x + e.m.x) / 2;
+      const grad = ctx.createLinearGradient(e.a.x, e.a.y, e.m.x, e.m.y);
+      const c1 = S.edge[0], c2 = S.edge[1];
+      grad.addColorStop(0, 'rgba(' + c1[0] + ',' + c1[1] + ',' + c1[2] + ',' + ((0.22 + 0.42 * e.w) * (hot ? 1.8 : 1)).toFixed(3) + ')');
+      grad.addColorStop(1, 'rgba(' + c2[0] + ',' + c2[1] + ',' + c2[2] + ',' + ((0.18 + 0.38 * e.w) * (hot ? 1.8 : 1)).toFixed(3) + ')');
       ctx.beginPath();
       ctx.moveTo(e.a.x, e.a.y);
-      const mx = (e.a.x + e.m.x) / 2;
       ctx.bezierCurveTo(mx, e.a.y, mx, e.m.y, e.m.x, e.m.y);
-      ctx.strokeStyle = 'rgba(120,150,255,' + Math.min(0.85, alpha).toFixed(3) + ')';
-      ctx.lineWidth = 0.7 + 2.4 * e.w;
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 0.8 + 2.6 * e.w;
       ctx.stroke();
+
+      if (S.dashes && !reduceMotion) {
+        // 沿同一路径叠一层短虚线并让它流动，暗示"电流/管道"
+        ctx.save();
+        ctx.setLineDash([2, 14]);
+        ctx.lineDashOffset = -(t * 46) % 16;
+        ctx.beginPath();
+        ctx.moveTo(e.a.x, e.a.y);
+        ctx.bezierCurveTo(mx, e.a.y, mx, e.m.y, e.m.x, e.m.y);
+        ctx.strokeStyle = 'rgba(' + c2[0] + ',' + c2[1] + ',' + c2[2] + ',' + (0.20 + 0.25 * e.w).toFixed(3) + ')';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
-    // 吐粒子：速率 ∝ 权重；最近一分钟活跃 → 琥珀色
+    // ── 吐粒子：时间累加器（与帧率无关）──
     {
       const cap = reduceMotion ? 160 : FLOW_MAX_PARTICLES;
-      const rate = reduceMotion ? 16 : 34; // 每秒每条满权重边吐多少粒子
+      const rate = reduceMotion ? 16 : 34;
       for (const e of st.edges) {
-        // 累加器：把小数份额存到边上，低帧率也不会漏发
         e.acc = (e.acc || 0) + e.w * rate * rawDt;
         let n = Math.floor(e.acc);
         e.acc -= n;
         for (let i = 0; i < n && st.parts.length < cap; i++) {
           st.parts.push({
-            e, t: 0, sp: (0.22 + Math.random() * 0.20 + e.w * 0.18) * (reduceMotion ? 0.6 : 1),
-            size: 1.4 + Math.random() * 1.6 + e.w * 1.2,
+            e, t: 0,
+            sp: (0.22 + Math.random() * 0.20 + e.w * 0.18) * (reduceMotion ? 0.6 : 1),
+            size: 1.3 + Math.random() * 1.7 + e.w * 1.3,
             hot: now - e.last < 60e3, wob: (Math.random() - 0.5) * 0.5,
+            glint: Math.random() < 0.18,
           });
         }
       }
     }
 
-    // 粒子推进 + 汇聚吸收
+    // ── 粒子推进 + 汇聚 ──
     const alive = [];
     for (const pt of st.parts) {
-      // t>0.82 加速并缩向球心（汇聚感）
       const rush = pt.t > 0.82 ? 1 + (pt.t - 0.82) * 6 : 1;
       pt.t += pt.sp * rush * pdt;
       if (pt.t >= 1) {
-        // 抵达 → 吸收脉冲 + 目标球被喂亮
         pt.e.m.feed = Math.min(1, pt.e.m.feed + 0.5);
-        st.pulses.push({ x: pt.e.m.x, y: pt.e.m.y, r: pt.e.m.r, a: 0.75, hot: pt.hot });
+        st.pulses.push({ x: pt.e.m.x, y: pt.e.m.y, r: pt.e.m.r * 0.9, a: 0.7, hot: pt.hot, life: 0 });
         continue;
       }
       alive.push(pt);
@@ -3381,96 +3490,142 @@ function flowAnimStart(box, agg) {
       const x = bez(e.a.x, mx, mx, e.m.x, p);
       const y = bez(e.a.y, e.a.y, e.m.y, e.m.y, p) + Math.sin(p * Math.PI) * pt.wob * 12;
       const shrink = p > 0.82 ? 1 - (p - 0.82) / 0.18 : 1;
+      const col = pt.hot ? S.hot : S.part;
 
-      // 拖尾：沿路径回看 3 个采样点
       ctx.globalCompositeOperation = 'lighter';
-      for (let k = 3; k >= 1; k--) {
-        const tp = Math.max(0, p - k * 0.018);
+      // 彗尾：沿路径回看 5 个采样点，越远越淡越小
+      for (let k = 5; k >= 1; k--) {
+        const tp = Math.max(0, p - k * 0.014);
         const tx = bez(e.a.x, mx, mx, e.m.x, tp);
         const ty = bez(e.a.y, e.a.y, e.m.y, e.m.y, tp) + Math.sin(tp * Math.PI) * pt.wob * 12;
+        const a = (0.30 - k * 0.05) * shrink;
+        if (a <= 0) continue;
         ctx.beginPath();
-        ctx.arc(tx, ty, pt.size * shrink * (1 - k * 0.22), 0, Math.PI * 2);
-        ctx.fillStyle = pt.hot
-          ? 'rgba(255,186,94,' + (0.30 - k * 0.08).toFixed(3) + ')'
-          : 'rgba(140,200,255,' + (0.26 - k * 0.07).toFixed(3) + ')';
+        ctx.arc(tx, ty, Math.max(0.4, pt.size * shrink * (1 - k * 0.16)), 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + a.toFixed(3) + ')';
         ctx.fill();
       }
-      // 粒子本体
+      // 粒子核心
       ctx.beginPath();
       ctx.arc(x, y, pt.size * shrink, 0, Math.PI * 2);
-      ctx.fillStyle = pt.hot ? 'rgba(255,205,130,0.98)' : 'rgba(160,215,255,0.9)';
+      ctx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0.95)';
       ctx.fill();
+      // 少量粒子带十字星芒（高光点缀）
+      if (pt.glint && shrink > 0.6) {
+        const gl = pt.size * 3.2 * shrink;
+        ctx.strokeStyle = 'rgba(255,255,255,' + (0.22 * shrink).toFixed(3) + ')';
+        ctx.lineWidth = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(x - gl, y); ctx.lineTo(x + gl, y);
+        ctx.moveTo(x, y - gl); ctx.lineTo(x, y + gl);
+        ctx.stroke();
+      }
       ctx.globalCompositeOperation = 'source-over';
     }
     st.parts = alive;
 
-    // 吸收脉冲：扩散光环
+    // ── 汇聚涟漪：双环（亮细环 + 宽淡环）──
     const pulses = [];
     for (const pu of st.pulses) {
-      pu.r += Math.min(pdt, 0.1) * 46;
-      pu.a -= Math.min(pdt, 0.1) * 1.9; // 用 min(pdt,0.1)：低帧率下也让脉冲活够几帧，肉眼可见
+      pu.life += Math.min(pdt, 0.1);
+      pu.r += Math.min(pdt, 0.1) * 52;
+      pu.a -= Math.min(pdt, 0.1) * 1.7;
       if (pu.a <= 0) continue;
       pulses.push(pu);
       ctx.beginPath();
       ctx.arc(pu.x, pu.y, pu.r, 0, Math.PI * 2);
-      ctx.strokeStyle = pu.hot
-        ? 'rgba(255,186,94,' + pu.a.toFixed(3) + ')'
-        : 'rgba(140,200,255,' + pu.a.toFixed(3) + ')';
-      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = 'rgba(' + (pu.hot ? S.hot.join(',') : S.ring) + ',' + (pu.a * 0.85).toFixed(3) + ')';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(pu.x, pu.y, pu.r * 0.72, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(' + (pu.hot ? S.hot.join(',') : S.ring) + ',' + (pu.a * 0.30).toFixed(3) + ')';
+      ctx.lineWidth = 3.2;
       ctx.stroke();
     }
     st.pulses = pulses;
 
-    // 球（悬浮 + 呼吸 + 被喂亮 + 悬停放大）
+    // ── 球：外晕 → 内芯 → 高光 → 描边 → 运行弧 ──
     for (const n of st.nodes) {
       const isAcc = n.kind === 'acc';
+      const pal = isAcc ? S.acc : S.mod;
       const hovered = st.hover === n;
       const r = n.r * (hovered ? 1.14 : 1) * (1 + n.feed * 0.10);
-      const glowR = r * (2.6 + n.feed * 1.4) * (n.running ? 1.12 : 1);
+      const glowR = r * (3.0 + n.feed * 1.6) * S.glow;
 
-      const halo = ctx.createRadialGradient(n.x, n.y, r * 0.2, n.x, n.y, glowR);
-      halo.addColorStop(0, isAcc ? 'rgba(120,155,255,0.34)' : 'rgba(80,230,180,0.30)');
-      halo.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = halo;
+      // 外晕（两层）
+      let g1 = ctx.createRadialGradient(n.x, n.y, r * 0.3, n.x, n.y, glowR);
+      g1.addColorStop(0, 'rgba(' + hexRGB(pal.mid) + ',0.26)');
+      g1.addColorStop(0.55, 'rgba(' + hexRGB(pal.mid) + ',0.09)');
+      g1.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g1;
+      ctx.beginPath(); ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2); ctx.fill();
+
+      let g2 = ctx.createRadialGradient(n.x, n.y, r * 0.5, n.x, n.y, r * 1.9);
+      g2.addColorStop(0, 'rgba(' + hexRGB(pal.core) + ',0.30)');
+      g2.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g2;
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * 1.9, 0, Math.PI * 2); ctx.fill();
+
+      // 球体（带高光的径向渐变）
+      const g3 = ctx.createRadialGradient(n.x - r * 0.36, n.y - r * 0.42, r * 0.1, n.x, n.y, r);
+      g3.addColorStop(0, pal.core);
+      g3.addColorStop(0.45, pal.mid);
+      g3.addColorStop(1, pal.edge);
+      ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = g3; ctx.fill();
+
+      // 顶部高光弧（湿润感）
       ctx.beginPath();
-      ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.arc(n.x, n.y, r * 0.82, -Math.PI * 0.78, -Math.PI * 0.24);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (hovered ? 0.5 : 0.28).toFixed(2) + ')';
+      ctx.lineWidth = Math.max(1, r * 0.09);
+      ctx.stroke();
 
-      const g = ctx.createRadialGradient(n.x - r * 0.35, n.y - r * 0.4, r * 0.12, n.x, n.y, r);
-      if (isAcc) {
-        g.addColorStop(0, 'rgba(190,210,255,0.98)');
-        g.addColorStop(0.6, 'rgba(95,130,245,0.9)');
-        g.addColorStop(1, 'rgba(50,80,200,0.55)');
-      } else {
-        g.addColorStop(0, 'rgba(190,255,235,0.98)');
-        g.addColorStop(0.6, 'rgba(60,210,170,0.9)');
-        g.addColorStop(1, 'rgba(20,140,115,0.55)');
-      }
+      // 描边
       ctx.beginPath();
       ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = g;
-      ctx.fill();
+      ctx.strokeStyle = 'rgba(' + hexRGB(pal.core) + ',' + (hovered ? 0.75 : 0.35).toFixed(2) + ')';
+      ctx.lineWidth = 1;
+      ctx.stroke();
 
-      // 运行中：外圈脉冲环
-      if (n.running) {
-        const pr = r + 4 + Math.sin(t * 3 + n.phase) * 2.4;
+      // 被喂亮时的一圈额外光
+      if (n.feed > 0.05) {
         ctx.beginPath();
-        ctx.arc(n.x, n.y, pr, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(61,220,151,' + (0.30 + 0.40 * Math.abs(Math.sin(t * 2.2))).toFixed(2) + ')';
-        ctx.lineWidth = 1.5;
+        ctx.arc(n.x, n.y, r * (1.5 + n.feed * 0.6), 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(' + hexRGB(pal.core) + ',' + (n.feed * 0.45).toFixed(3) + ')';
+        ctx.lineWidth = 2;
         ctx.stroke();
       }
 
-      // 标签
-      ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+      // 运行中：旋转弧（不是整圈，像在"扫描"）
+      if (n.running) {
+        const a0 = t * 2.2 + n.phase;
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, r + 5, a0, a0 + Math.PI * 1.15);
+        ctx.strokeStyle = 'rgba(61,220,151,' + (0.45 + 0.35 * Math.abs(Math.sin(t * 2.4))).toFixed(2) + ')';
+        ctx.lineWidth = 1.8;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+      }
+
+      // 标签：主名 + 副值（mono），带阴影保证在极光背景上也能读
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.55)';
+      ctx.shadowBlur = 6;
       ctx.textAlign = isAcc ? 'right' : 'left';
       ctx.textBaseline = 'middle';
-      const lx = isAcc ? n.x - r - 9 : n.x + r + 9;
-      ctx.fillStyle = hovered ? 'rgba(235,242,255,0.98)' : 'rgba(200,212,238,0.92)';
+      const lx = isAcc ? n.x - r - 11 : n.x + r + 11;
+      ctx.font = '600 12.5px ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei", sans-serif';
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '0.3px';
+      ctx.fillStyle = hovered ? 'rgba(255,255,255,0.98)' : 'rgba(226,234,252,0.94)';
       ctx.fillText(n.label.length > 10 ? n.label.slice(0, 10) + '…' : n.label, lx, n.y - 7);
       ctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
-      ctx.fillStyle = 'rgba(150,168,200,0.85)';
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+      ctx.fillStyle = 'rgba(' + hexRGB(pal.core) + ',0.72)';
       ctx.fillText(n.value.toFixed(2) + ' 分', lx, n.y + 8);
+      ctx.restore();
     }
 
     st.raf = requestAnimationFrame(draw);
@@ -3485,6 +3640,13 @@ function flowAnimStart(box, agg) {
     st.raf = requestAnimationFrame(draw);
   };
   flowAnim.start();
+}
+
+// hexRGB 把 #rrggbb 转成 "r,g,b" 片段，方便拼 rgba()
+function hexRGB(hex) {
+  const s = String(hex || '#ffffff').replace('#', '');
+  const n = parseInt(s.length === 3 ? s.split('').map(c => c + c).join('') : s, 16);
+  return ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255);
 }
 
 function bez(p0, p1, p2, p3, t) {
