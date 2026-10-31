@@ -43,8 +43,12 @@ type Config struct {
 	AllowedGroups []int64 `json:"allowed_groups"`
 	// AllowedUsers 允许的私聊 QQ 白名单（空 = 不回任何私聊）。
 	AllowedUsers []int64 `json:"allowed_users"`
-	// RequireAtInGroup 群里必须 @ 机器人才回（默认 true，防刷屏）。
+	// RequireAtInGroup 群里默认必须 @ 机器人才回（默认 true，防刷屏）。
 	RequireAtInGroup bool `json:"require_at_in_group"`
+	// NoAtGroups 例外群：这些群里**不需要 @** 也回（"监听所有消息"）。
+	NoAtGroups []int64 `json:"no_at_groups"`
+	// IgnoredUsers 忽略的 QQ 号（别的 bot、旧 bot 等）：不回复它们，避免 bot 互相回。
+	IgnoredUsers []int64 `json:"ignored_users"`
 
 	// MaxHistoryPairs 每个会话保留多少轮上下文（0 = 无记忆）。
 	MaxHistoryPairs int `json:"max_history_pairs"`
@@ -141,6 +145,29 @@ func (c Config) AllowsGroup(groupID int64) bool {
 // AllowsUser 私聊白名单判定。
 func (c Config) AllowsUser(userID int64) bool {
 	for _, u := range c.AllowedUsers {
+		if u == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// RequiresAt 该群是否必须 @ 机器人才回。
+func (c Config) RequiresAt(groupID int64) bool {
+	if !c.RequireAtInGroup {
+		return false
+	}
+	for _, g := range c.NoAtGroups {
+		if g == groupID {
+			return false
+		}
+	}
+	return true
+}
+
+// Ignores 该 QQ 号是否应被忽略（别的 bot、旧 bot 自己等）。
+func (c Config) Ignores(userID int64) bool {
+	for _, u := range c.IgnoredUsers {
 		if u == userID {
 			return true
 		}

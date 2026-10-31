@@ -273,3 +273,61 @@ func TestTruncateRunes(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// 「监听所有消息」的群 + 忽略名单（别的 bot / 旧 bot，避免 bot 互回成环）。
+func TestRequiresAtAndIgnores(t *testing.T) {
+	c := Default()
+	c.AllowedGroups = []int64{992511553, 414452720}
+	c.NoAtGroups = []int64{992511553}
+	c.IgnoredUsers = []int64{190839970}
+
+	if c.RequiresAt(992511553) {
+		t.Error("no_at_groups 里的群不应要求 @")
+	}
+	if !c.RequiresAt(414452720) {
+		t.Error("其他群仍应要求 @")
+	}
+	if !c.Ignores(190839970) {
+		t.Error("忽略名单未生效")
+	}
+	if c.Ignores(941628696) {
+		t.Error("普通用户不应被忽略")
+	}
+	// 全局关掉 require_at 时，所有群都不要求
+	c.RequireAtInGroup = false
+	if c.RequiresAt(414452720) {
+		t.Error("全局关闭后不应要求 @")
+	}
+}
+
+// 忽略名单里的账号发言不触发任何外呼（防 bot 互回）。
+func TestIgnoredUserNoReply(t *testing.T) {
+	var calls int
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"x"}}]}`)
+	}))
+	defer gw.Close()
+	cfg := Default()
+	cfg.Enabled = true
+	cfg.GatewayBase = gw.URL
+	cfg.OneBotAPI = gw.URL
+	cfg.AllowedGroups = []int64{992511553}
+	cfg.NoAtGroups = []int64{992511553}
+	cfg.IgnoredUsers = []int64{190839970}
+	b := New(cfg)
+	srv := httptest.NewServer(b.Handler())
+	defer srv.Close()
+
+	body := `{"post_type":"message","message_type":"group","group_id":992511553,"user_id":190839970,
+		"self_id":3467208422,"message":[{"type":"text","data":{"text":"我是旧 bot"}}]}`
+	resp, err := http.Post(srv.URL+"/onebot", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	time.Sleep(200 * time.Millisecond)
+	if calls != 0 {
+		t.Fatalf("忽略名单内的账号不应触发网关调用，实际 %d", calls)
+	}
+}

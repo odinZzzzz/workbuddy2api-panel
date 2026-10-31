@@ -96,13 +96,17 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		ev.MessageType, ev.GroupID, ev.UserID, atBot, len([]rune(text)))
 
 	// 白名单：默认谁都不回（空名单 = 全拒），这是安全默认。
+	// 忽略名单（别的 bot / 旧 bot）：必须在白名单判断之前——否则两个 bot 会互回成环。
+	if b.cfg.Ignores(ev.UserID) {
+		return
+	}
 	if ev.MessageType == "group" {
 		if !b.cfg.AllowsGroup(ev.GroupID) {
 			log.Printf("[qqbot] skip: group %d 不在白名单", ev.GroupID)
 			return
 		}
-		if b.cfg.RequireAtInGroup && !atBot {
-			return // 群里没 @ 机器人：正常静默，不刷日志
+		if b.cfg.RequiresAt(ev.GroupID) && !atBot {
+			return // 该群要求 @：没 @ 就静默
 		}
 	} else if ev.MessageType == "private" {
 		if !b.cfg.AllowsUser(ev.UserID) {
@@ -122,6 +126,15 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(text) == "" {
+		// 只 @ 不说话（群里很常见）：给一句引导，而不是静默——静默会被当成"机器人挂了"。
+		// 这条不走网关，不消耗额度。
+		if atBot {
+			go func() {
+				if err := b.send(&ev, "在的，说点什么？也可以发 /help 看指令。"); err != nil {
+					log.Printf("[qqbot] hint send failed: %v", err)
+				}
+			}()
+		}
 		return
 	}
 	if !b.allow(ev.UserID) {
