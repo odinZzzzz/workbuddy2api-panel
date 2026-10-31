@@ -50,6 +50,34 @@ type Config struct {
 	// IgnoredUsers 忽略的 QQ 号（别的 bot、旧 bot 等）：不回复它们，避免 bot 互相回。
 	IgnoredUsers []int64 `json:"ignored_users"`
 
+	// BotPatterns 识别 bot 的昵称关键词（不区分大小写）。命中即按 bot 对话风控处理。
+	BotPatterns []string `json:"bot_patterns"`
+	// BotRoundLimit 与同一个 bot 在同一会话里最多接几轮（默认 3），超过则高冷退场。
+	BotRoundLimit int `json:"bot_round_limit"`
+	// BotCooldownSeconds 高冷退场的冷却时长（默认 600 秒）。
+	BotCooldownSeconds int `json:"bot_cooldown_seconds"`
+
+	// ActivationKeywords 激活词：出现任一（或被 @）才应声。
+	ActivationKeywords []string `json:"activation_keywords"`
+	// ActivationWindowSeconds 激活期长度（秒），期间每说一句自动续期。
+	ActivationWindowSeconds int `json:"activation_window_seconds"`
+	// CalmKeywords 冷静词：**@机器人 + 命中冷静词** → 直接进入冷静期（默认 5 分钟）。
+	// 与 interrupt_keywords 的区别：中断词=短静默（默认 60s，谁都能触发）；
+	// 冷静词=长冷静（需 @，用于"别刷屏了"的强指令），且能把已静默期升级加长。
+	CalmKeywords []string `json:"calm_keywords"`
+	// CalmSeconds 冷静期时长（默认 300 秒）。
+	CalmSeconds int `json:"calm_seconds"`
+
+	// InterruptKeywords 中断词：命中后立即闭嘴。
+	InterruptKeywords []string `json:"interrupt_keywords"`
+	// SilenceSeconds 静默期长度（秒）：期间任何消息都不处理（连激活词也不认）。
+	SilenceSeconds int `json:"silence_seconds"`
+
+	// AdminListen 管理后台监听地址（空 = 不启用）；admin_token 为空时只允许回环访问。
+	AdminListen string `json:"admin_listen"`
+	// AdminToken 后台访问 token（Bearer 或 ?token=）。
+	AdminToken string `json:"admin_token"`
+
 	// MemoryScope 会话上下文的作用域：
 	//   "per_user"（默认）—— 群里按「群+人」隔离，每个人各自一段上下文；
 	//   "per_chat"        —— 整个群共享一段（旧行为）。
@@ -126,6 +154,33 @@ func (c *Config) normalize() {
 	c.OneBotAPI = strings.TrimRight(c.OneBotAPI, "/")
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
+	}
+	if c.CalmSeconds <= 0 {
+		c.CalmSeconds = 300
+	}
+	if c.CalmKeywords == nil {
+		c.CalmKeywords = []string{"冷静", "安静点", "别吵"}
+	}
+	if c.BotRoundLimit <= 0 {
+		c.BotRoundLimit = 3
+	}
+	if c.BotCooldownSeconds <= 0 {
+		c.BotCooldownSeconds = 600
+	}
+	if c.BotPatterns == nil {
+		c.BotPatterns = []string{"bot", "机器人", "助手", "gpt", "ai"}
+	}
+	if c.ActivationWindowSeconds <= 0 {
+		c.ActivationWindowSeconds = 300
+	}
+	if c.SilenceSeconds <= 0 {
+		c.SilenceSeconds = 60
+	}
+	if c.ActivationKeywords == nil {
+		c.ActivationKeywords = []string{"小八嘎", "龙王"}
+	}
+	if c.InterruptKeywords == nil {
+		c.InterruptKeywords = []string{"闭嘴", "退下", "别说了", "安静", "/stop"}
 	}
 	if strings.TrimSpace(c.MemoryScope) == "" {
 		c.MemoryScope = "per_user"

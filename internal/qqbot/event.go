@@ -99,9 +99,19 @@ func stripCQ(s string) string {
 
 // Command 解析内置指令；返回 (指令名, 参数, 是否是指令)。
 //
-// 支持的指令刻意少：/help /clear /model /ping。其余一律当聊天内容。
+// 支持：/help /clear /new /model /ping /summary(/whois) 以及中文「总结」「点评一下」。
+// 其余一律当聊天内容。
 func Command(text string) (name, arg string, ok bool) {
 	t := strings.TrimSpace(text)
+	if t == "" {
+		return "", "", false
+	}
+	// 中文指令：允许不带斜杠（群里没人爱打斜杠）
+	for _, zh := range []string{"总结", "点评一下"} {
+		if strings.HasPrefix(t, zh) {
+			return "/summary", strings.TrimSpace(strings.TrimPrefix(t, zh)), true
+		}
+	}
 	if !strings.HasPrefix(t, "/") {
 		return "", "", false
 	}
@@ -111,18 +121,58 @@ func Command(text string) (name, arg string, ok bool) {
 		arg = strings.TrimSpace(parts[1])
 	}
 	switch name {
-	case "/help", "/clear", "/model", "/ping", "/new":
+	case "/help", "/clear", "/new", "/model", "/ping", "/summary", "/whois":
 		return name, arg, true
 	default:
 		return "", "", false
 	}
 }
 
+// ParseAtTargets 抽出消息里被 @ 的所有 QQ 号（用于「总结 @某人」这类指令）。
+func ParseAtTargets(raw json.RawMessage, rawMessage string) []int64 {
+	var out []int64
+	seen := map[int64]bool{}
+	add := func(v string) {
+		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n > 0 && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed != "" && strings.HasPrefix(trimmed, "[") {
+		var segs []segment
+		if json.Unmarshal(raw, &segs) == nil {
+			for _, sg := range segs {
+				if sg.Type == "at" {
+					add(sg.Data.QQ)
+				}
+			}
+			return out
+		}
+	}
+	// string 形态：扫 [CQ:at,qq=xxx]
+	rest := rawMessage
+	for {
+		i := strings.Index(rest, "[CQ:at,qq=")
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len("[CQ:at,qq="):]
+		j := strings.IndexByte(rest, ']')
+		if j < 0 {
+			break
+		}
+		add(rest[:j])
+		rest = rest[j+1:]
+	}
+	return out
+}
+
 // chatKey 会话键。
 //
 // per_user（默认）：群聊按「群+人」隔离——龙王记得住每个人各自说过什么，A 的梗
 // 不会串到 B 身上；私聊天然按人。
-// per_chat：整个群共享一段上下文（旧行为，适合"群里是一个集体"的场景）。
+// per_chat：整个群共享一段上下文（旧行为）。
 func chatKey(ev *Event, scopePerUser bool) string {
 	if ev.MessageType == "group" {
 		key := "group:" + strconv.FormatInt(ev.GroupID, 10)
@@ -134,7 +184,7 @@ func chatKey(ev *Event, scopePerUser bool) string {
 	return "private:" + strconv.FormatInt(ev.UserID, 10)
 }
 
-// displayName 日志里用的人名（优先群名片）。
+// displayName 日志/记忆里用的人名（优先群名片）。
 func displayName(ev *Event) string {
 	if ev.Sender.Card != "" {
 		return ev.Sender.Card

@@ -31,6 +31,8 @@ type UserMemory struct {
 	LastSeen  time.Time `json:"last_seen"`
 	Count     int       `json:"count"`
 	Notes     []string  `json:"notes,omitempty"`
+	// Verdict 上一次对这个人下的点评（每轮收尾那句"〔点评：…〕"），下次说话会带上。
+	Verdict string `json:"verdict,omitempty"`
 }
 
 // Memory 记忆库。
@@ -133,6 +135,11 @@ func (m *Memory) Describe(uid int64) string {
 		b.WriteString(strings.Join(u.Notes, "；"))
 		b.WriteString("。")
 	}
+	if u.Verdict != "" {
+		b.WriteString("你上次对他的点评是：")
+		b.WriteString(u.Verdict)
+		b.WriteString("。")
+	}
 	b.WriteString("你要按龙王的性子接着对他说话（记得他，别当第一次见）。")
 	return b.String()
 }
@@ -179,4 +186,37 @@ func (m *Memory) Count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.users)
+}
+
+// SetVerdict 记录对某个人的点评（覆盖上一次）。
+func (m *Memory) SetVerdict(uid int64, verdict string) {
+	verdict = strings.TrimSpace(verdict)
+	if uid == 0 || verdict == "" {
+		return
+	}
+	if r := []rune(verdict); len(r) > 40 {
+		verdict = string(r[:40])
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := m.users[uid]
+	if u == nil {
+		u = &UserMemory{UID: uid, FirstSeen: time.Now()}
+		m.users[uid] = u
+	}
+	u.Verdict = verdict
+	m.dirty = true
+}
+
+// Lookup 取某个 QQ 号的记忆副本（不存在返回 false）。
+func (m *Memory) Lookup(uid int64) (UserMemory, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := m.users[uid]
+	if u == nil {
+		return UserMemory{}, false
+	}
+	cp := *u
+	cp.Notes = append([]string(nil), u.Notes...)
+	return cp, true
 }

@@ -8,22 +8,31 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
 
 // Bridge 消息桥：OneBot 事件 → 网关 → OneBot 发消息。
 type Bridge struct {
-	cfg    Config
+	// cfgPtr 用原子指针承载配置：后台热改人设/白名单时不需要停服，读路径也不加锁。
+	// 之所以不直接用 cfg Config + 互斥锁：b.cfg 在热路径上有 20+ 处读取，逐个加锁
+	// 既啰嗦又容易和既有锁（sessions/limits）缠成死锁。
+	cfgPtr atomic.Pointer[Config]
 	client *http.Client
 
 	mu       sync.Mutex
 	sessions map[string]*session
 	limits   map[int64]*bucket
 	mem      *Memory // 按 QQ 号持久化的记忆（人设连续性）
+	state    *adminState
+	gate     *Gate
+	botGuard *BotGuard
+	cfgPath  string
 }
 
 type chatMsg struct {
@@ -50,13 +59,58 @@ func New(cfg Config) *Bridge {
 		log.Printf("[qqbot] memory disabled: %v", err)
 		mem, _ = OpenMemory("", cfg.MemoryNotesPerUser)
 	}
-	return &Bridge{
-		cfg:      cfg,
+	cp := cfg
+	br := &Bridge{
 		client:   &http.Client{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second},
 		sessions: map[string]*session{},
 		limits:   map[int64]*bucket{},
 		mem:      mem,
+		state:    &adminState{startedAt: time.Now()},
+		gate:     NewGate(),
+		botGuard: NewBotGuard(),
 	}
+	br.cfgPtr.Store(&cp)
+	return br
+}
+
+// currentConfig 返回当前配置的副本（后台读取）。
+func (b *Bridge) cfg() Config { return *b.cfgPtr.Load() }
+
+func (b *Bridge) currentConfig() Config { return b.cfg() }
+
+// applyConfig 热应用新配置：能热改的立刻生效；会话/限流状态保留。
+func (b *Bridge) applyConfig(cfg Config) {
+	cp := cfg
+	b.cfgPtr.Store(&cp)
+	b.client.Timeout = time.Duration(cfg.TimeoutSeconds) * time.Second
+}
+
+// saveConfig 把当前配置写回文件（0600，tmp+rename）。
+func (b *Bridge) saveConfig() error {
+	b.mu.Lock()
+	path := b.cfgPath
+	b.mu.Unlock()
+	cfg := b.cfg()
+	if path == "" {
+		return nil
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	_ = os.Chmod(tmp, 0o600)
+	return os.Rename(tmp, path)
+}
+
+// SetConfigPath 记录配置文件路径（供后台保存回写）。
+func (b *Bridge) SetConfigPath(p string) {
+	b.mu.Lock()
+	b.cfgPath = p
+	b.mu.Unlock()
 }
 
 // Close 落盘记忆（优雅退出时调用）。
@@ -73,7 +127,7 @@ func (b *Bridge) Handler() http.Handler {
 	mux.HandleFunc("POST /onebot", b.handleEvent)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, fmt.Sprintf(`{"ok":true,"enabled":%v,"model":%q}`, b.cfg.Enabled, b.cfg.Model))
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"ok":true,"enabled":%v,"model":%q}`, b.cfg().Enabled, b.cfg().Model))
 	})
 	return mux
 }
@@ -83,7 +137,7 @@ func (b *Bridge) Handler() http.Handler {
 // 关键：**永远快速返回 200**。OneBot 上报是 fire-and-forget，处理慢会拖住上游
 // 的事件循环；耗时的网关调用放到 goroutine 里，失败只记日志。
 func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
-	if !b.cfg.Enabled {
+	if !b.cfg().Enabled {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, `{"ok":false,"reason":"disabled"}`)
 		return
@@ -106,25 +160,26 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text, atBot := ParseText(ev.Message, ev.RawMessage, ev.SelfID)
+	atTargets := ParseAtTargets(ev.Message, ev.RawMessage)
 	// 到达即记一行：排查"为什么没回复"时，必须先能区分"事件没到"与"规则挡掉"。
 	log.Printf("[qqbot] event type=%s group=%d user=%d at=%v len=%d",
 		ev.MessageType, ev.GroupID, ev.UserID, atBot, len([]rune(text)))
 
 	// 白名单：默认谁都不回（空名单 = 全拒），这是安全默认。
 	// 忽略名单（别的 bot / 旧 bot）：必须在白名单判断之前——否则两个 bot 会互回成环。
-	if b.cfg.Ignores(ev.UserID) {
+	if b.cfg().Ignores(ev.UserID) {
 		return
 	}
 	if ev.MessageType == "group" {
-		if !b.cfg.AllowsGroup(ev.GroupID) {
+		if !b.cfg().AllowsGroup(ev.GroupID) {
 			log.Printf("[qqbot] skip: group %d 不在白名单", ev.GroupID)
 			return
 		}
-		if b.cfg.RequiresAt(ev.GroupID) && !atBot {
+		if b.cfg().RequiresAt(ev.GroupID) && !atBot {
 			return // 该群要求 @：没 @ 就静默
 		}
 	} else if ev.MessageType == "private" {
-		if !b.cfg.AllowsUser(ev.UserID) {
+		if !b.cfg().AllowsUser(ev.UserID) {
 			log.Printf("[qqbot] skip: user %d 不在白名单", ev.UserID)
 			return
 		}
@@ -132,12 +187,39 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := chatKey(&ev, b.cfg.ScopePerUser())
+	key := chatKey(&ev, b.cfg().ScopePerUser())
 	name := displayName(&ev)
+
+	// bot 对话风控：对方像 bot 时，同一会话最多接 N 轮，超过高冷退场（冷却期内不理）。
+	// 放在激活闸门之前：bot 的刷屏不该影响"人"的激活/静默状态。
+	if b.botGuard != nil && LooksLikeBot(b.cfg().BotPatterns, ev.Sender.Nickname, ev.Sender.Card) {
+		v := b.botGuard.Check(b.cfg(), key, ev.UserID)
+		if !v.Allow {
+			b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+				User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: v.Reason})
+			if v.Reason == "bot_capped" {
+				log.Printf("[qqbot] bot 风控: %s(%d) 已达 %d 轮，高冷退场至 %s", name, ev.UserID,
+					b.cfg().BotRoundLimit, v.Until.Format("15:04:05"))
+			}
+			return
+		}
+	}
+
+	// 激活闸门：idle 只认激活词/@；active 期内正常回话并续期；silent 期内一律不理。
+	if b.gate != nil {
+		d := b.gate.Decide(b.cfg(), key, text, atBot)
+		if !d.Allow {
+			b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+				User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)),
+				Action: "gate_" + d.Reason})
+			log.Printf("[qqbot] gate: %s 不放行（%s）user=%d", key, d.Reason, ev.UserID)
+			return
+		}
+	}
 
 	// 内置指令：不消耗网关额度。
 	if cmd, arg, ok := Command(text); ok {
-		go b.runCommand(&ev, key, name, cmd, arg)
+		go b.runCommand(&ev, key, name, cmd, arg, atTargets)
 		return
 	}
 	if strings.TrimSpace(text) == "" {
@@ -160,12 +242,14 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	if b.mem != nil {
 		b.mem.Observe(ev.UserID, name, text)
 	}
+	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
 	go b.reply(&ev, key, name, text)
 }
 
 // allow 令牌桶限速：每用户每分钟 RatePerMinute 次（0 = 不限）。
 func (b *Bridge) allow(userID int64) bool {
-	if b.cfg.RatePerMinute <= 0 {
+	if b.cfg().RatePerMinute <= 0 {
 		return true
 	}
 	b.mu.Lock()
@@ -173,15 +257,15 @@ func (b *Bridge) allow(userID int64) bool {
 	now := time.Now()
 	bk := b.limits[userID]
 	if bk == nil {
-		bk = &bucket{tokens: float64(b.cfg.RatePerMinute), last: now}
+		bk = &bucket{tokens: float64(b.cfg().RatePerMinute), last: now}
 		b.limits[userID] = bk
 	}
 	// 按经过时间补充令牌
 	elapsed := now.Sub(bk.last).Minutes()
 	if elapsed > 0 {
-		bk.tokens += elapsed * float64(b.cfg.RatePerMinute)
-		if bk.tokens > float64(b.cfg.RatePerMinute) {
-			bk.tokens = float64(b.cfg.RatePerMinute)
+		bk.tokens += elapsed * float64(b.cfg().RatePerMinute)
+		if bk.tokens > float64(b.cfg().RatePerMinute) {
+			bk.tokens = float64(b.cfg().RatePerMinute)
 		}
 		bk.last = now
 	}
@@ -199,7 +283,7 @@ func (b *Bridge) reply(ev *Event, key, name, text string) {
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
 	}
-	answer = truncateRunes(answer, b.cfg.MaxReplyRunes)
+	answer = truncateRunes(answer, b.cfg().MaxReplyRunes)
 	if strings.TrimSpace(answer) == "" {
 		return
 	}
@@ -209,18 +293,20 @@ func (b *Bridge) reply(ev *Event, key, name, text string) {
 }
 
 // runCommand 处理内置指令。
-func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string) {
+func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []int64) {
 	var out string
 	switch cmd {
 	case "/help":
-		out = "指令：/help 帮助｜/clear 清空上下文｜/model 看当前模型｜/ping 存活检查"
+		out = "指令：/help｜/clear 清空上下文｜/model 看模型｜/ping｜总结（或 总结 <QQ号>/@某人）看本王记得他什么"
+	case "/summary", "/whois":
+		out = b.summaryOf(ev, arg, atTargets)
 	case "/clear", "/new":
 		b.mu.Lock()
 		delete(b.sessions, key)
 		b.mu.Unlock()
 		out = "上下文已清空"
 	case "/model":
-		out = "当前模型：" + b.cfg.Model
+		out = "当前模型：" + b.cfg().Model
 	case "/ping":
 		out = "pong"
 	}
@@ -236,7 +322,7 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string) {
 func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
 	msgs := b.buildMessages(key, uid, userText)
 	payload := map[string]any{
-		"model":    b.cfg.Model,
+		"model":    b.cfg().Model,
 		"messages": msgs,
 		"stream":   false,
 	}
@@ -244,16 +330,16 @@ func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	url := b.cfg.GatewayBase + "/chat/completions"
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(b.cfg.TimeoutSeconds)*time.Second)
+	url := b.cfg().GatewayBase + "/chat/completions"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(b.cfg().TimeoutSeconds)*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if b.cfg.GatewayKey != "" {
-		req.Header.Set("Authorization", "Bearer "+b.cfg.GatewayKey)
+	if b.cfg().GatewayKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.cfg().GatewayKey)
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
@@ -279,6 +365,12 @@ func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
 	}
 	answer := strings.TrimSpace(out.Choices[0].Message.Content)
 
+	// 抽「〔点评：…〕」并入库（人设要求每轮收尾点评对方），正文保留点评行。
+	if b.mem != nil {
+		if v := extractVerdict(answer); v != "" {
+			b.mem.SetVerdict(uid, v)
+		}
+	}
 	// 记入历史（只记成功的一轮）
 	b.appendHistory(key, userText, answer)
 	return answer, nil
@@ -286,8 +378,8 @@ func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
 
 // buildMessages 组装请求消息：system + 历史 + 本轮。
 func (b *Bridge) buildMessages(key string, uid int64, userText string) []chatMsg {
-	out := make([]chatMsg, 0, 2*b.cfg.MaxHistoryPairs+2)
-	system := strings.TrimSpace(b.cfg.SystemPrompt)
+	out := make([]chatMsg, 0, 2*b.cfg().MaxHistoryPairs+2)
+	system := strings.TrimSpace(b.cfg().SystemPrompt)
 	// 把"你记得这个凡人"拼进 system：人设连续性靠它（同一人多轮之间记得住）。
 	if b.mem != nil {
 		if memo := b.mem.Describe(uid); memo != "" {
@@ -305,7 +397,7 @@ func (b *Bridge) buildMessages(key string, uid int64, userText string) []chatMsg
 	s := b.sessions[key]
 	var hist []chatMsg
 	if s != nil {
-		if b.cfg.SessionTTLMinutes > 0 && time.Since(s.last) > time.Duration(b.cfg.SessionTTLMinutes)*time.Minute {
+		if b.cfg().SessionTTLMinutes > 0 && time.Since(s.last) > time.Duration(b.cfg().SessionTTLMinutes)*time.Minute {
 			delete(b.sessions, key) // 闲置过期：按新会话处理
 		} else {
 			hist = append(hist, s.msgs...)
@@ -319,7 +411,7 @@ func (b *Bridge) buildMessages(key string, uid int64, userText string) []chatMsg
 
 // appendHistory 追加一轮并裁剪到 MaxHistoryPairs 轮。
 func (b *Bridge) appendHistory(key, userText, answer string) {
-	if b.cfg.MaxHistoryPairs <= 0 {
+	if b.cfg().MaxHistoryPairs <= 0 {
 		return
 	}
 	b.mu.Lock()
@@ -332,7 +424,7 @@ func (b *Bridge) appendHistory(key, userText, answer string) {
 	s.msgs = append(s.msgs,
 		chatMsg{Role: "user", Content: userText},
 		chatMsg{Role: "assistant", Content: answer})
-	max := b.cfg.MaxHistoryPairs * 2
+	max := b.cfg().MaxHistoryPairs * 2
 	if len(s.msgs) > max {
 		s.msgs = s.msgs[len(s.msgs)-max:]
 	}
@@ -356,7 +448,7 @@ func (b *Bridge) send(ev *Event, text string) error {
 	if err != nil {
 		return err
 	}
-	url := b.cfg.OneBotAPI + "/" + action
+	url := b.cfg().OneBotAPI + "/" + action
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
@@ -364,8 +456,8 @@ func (b *Bridge) send(ev *Event, text string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if b.cfg.OneBotToken != "" {
-		req.Header.Set("Authorization", "Bearer "+b.cfg.OneBotToken)
+	if b.cfg().OneBotToken != "" {
+		req.Header.Set("Authorization", "Bearer "+b.cfg().OneBotToken)
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
@@ -405,3 +497,94 @@ func (b *Bridge) Stats() (sessions, limiters int) {
 }
 
 var _ = strconv.Itoa
+
+// extractVerdict 从回复里抽出「〔点评：xxx〕」/「（点评：xxx）」/「【点评】xxx」。
+//
+// 为什么用标签抽取而不是再调一次模型：多一次调用就是多一份钱和延迟；点评本来
+// 就是同一轮生成的一部分，抽出来存进记忆即可。
+func extractVerdict(s string) string {
+	for _, pair := range [][2]string{{"〔点评：", "〕"}, {"〔点评:", "〕"}, {"（点评：", "）"}, {"(点评:", ")"}} {
+		if i := strings.Index(s, pair[0]); i >= 0 {
+			rest := s[i+len(pair[0]):]
+			if j := strings.Index(rest, pair[1]); j >= 0 {
+				return strings.TrimSpace(rest[:j])
+			}
+			return strings.TrimSpace(rest)
+		}
+	}
+	if i := strings.Index(s, "【点评】"); i >= 0 {
+		rest := strings.TrimSpace(s[i+len("【点评】"):])
+		if k := strings.IndexByte(rest, '\n'); k >= 0 {
+			rest = rest[:k]
+		}
+		return strings.TrimSpace(rest)
+	}
+	return ""
+}
+
+// summaryOf 生成「本王记得这个人什么」的总结（不走模型，零额度消耗）。
+//
+// 目标解析优先级：@ 的第一个人 > 参数里的数字 QQ > 说话人自己。
+// 为什么不用模型生成：这类查询是纯事实汇总（见过几次/说过什么/上次点评），
+// 用模板拼既准确又省钱，还能保证不编造。
+func (b *Bridge) summaryOf(ev *Event, arg string, atTargets []int64) string {
+	target := int64(0)
+	for _, uid := range atTargets {
+		if uid != ev.SelfID {
+			target = uid
+			break
+		}
+	}
+	if target == 0 {
+		if n, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64); err == nil && n > 0 {
+			target = n
+		}
+	}
+	if target == 0 {
+		target = ev.UserID
+	}
+	if b.mem == nil {
+		return "本王记忆未开，无话可说。"
+	}
+	u, ok := b.mem.Lookup(target)
+	if !ok || (u.Count == 0 && len(u.Notes) == 0) {
+		return "嗤，一个本王毫无印象的蝼蚁（" + strconv.FormatInt(target, 10) + "）。"
+	}
+	name := u.Nick
+	if name == "" {
+		name = "无名凡人"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "嗤，%s（%d）：见过 %d 次", name, target, u.Count)
+	if !u.FirstSeen.IsZero() {
+		fmt.Fprintf(&sb, "，首见 %s", u.FirstSeen.Format("2006-01-02"))
+	}
+	sb.WriteString("。")
+	if len(u.Notes) > 0 {
+		sb.WriteString("说过：")
+		sb.WriteString(strings.Join(u.Notes, "；"))
+		sb.WriteString("。")
+	}
+	if u.Verdict != "" {
+		sb.WriteString("本王上次点评：")
+		sb.WriteString(u.Verdict)
+		sb.WriteString("。")
+	}
+	sb.WriteString("就这点货色。")
+	return sb.String()
+}
+
+// gateSnapshot / botGuardSnapshot 供后台展示。
+func (b *Bridge) gateSnapshot() []GateView {
+	if b.gate == nil {
+		return nil
+	}
+	return b.gate.Snapshot()
+}
+
+func (b *Bridge) botGuardSnapshot() []BotGuardView {
+	if b.botGuard == nil {
+		return nil
+	}
+	return b.botGuard.Snapshot()
+}

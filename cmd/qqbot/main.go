@@ -34,6 +34,11 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 	br := qqbot.New(cfg)
+	// 记住配置文件路径（后台保存时回写）并启动管理后台（admin_listen 为空则不启动）。
+	br.SetConfigPath(*cfgPath)
+	if err := br.StartAdmin(); err != nil {
+		log.Printf("qqbot: admin 未启动: %v", err)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
