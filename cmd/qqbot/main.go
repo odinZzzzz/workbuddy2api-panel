@@ -46,6 +46,9 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
+		if err := br.Close(); err != nil {
+			log.Printf("qqbot: flush memory: %v", err)
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)

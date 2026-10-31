@@ -118,10 +118,18 @@ func Command(text string) (name, arg string, ok bool) {
 	}
 }
 
-// chatKey 会话键：群聊按群、私聊按人，互不串味。
-func chatKey(ev *Event) string {
+// chatKey 会话键。
+//
+// per_user（默认）：群聊按「群+人」隔离——龙王记得住每个人各自说过什么，A 的梗
+// 不会串到 B 身上；私聊天然按人。
+// per_chat：整个群共享一段上下文（旧行为，适合"群里是一个集体"的场景）。
+func chatKey(ev *Event, scopePerUser bool) string {
 	if ev.MessageType == "group" {
-		return "group:" + strconv.FormatInt(ev.GroupID, 10)
+		key := "group:" + strconv.FormatInt(ev.GroupID, 10)
+		if scopePerUser {
+			key += ":u:" + strconv.FormatInt(ev.UserID, 10)
+		}
+		return key
 	}
 	return "private:" + strconv.FormatInt(ev.UserID, 10)
 }

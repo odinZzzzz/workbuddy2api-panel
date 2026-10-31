@@ -112,7 +112,7 @@ func TestHistoryTTL(t *testing.T) {
 	b.sessions["group:1"].last = time.Now().Add(-2 * time.Minute)
 	b.mu.Unlock()
 
-	msgs := b.buildMessages("group:1", "新问题")
+	msgs := b.buildMessages("group:1", 1001, "新问题")
 	// 只有本轮 user（无 system、无历史）
 	if len(msgs) != 1 || msgs[0].Content != "新问题" {
 		t.Fatalf("过期会话应清空历史，得到 %+v", msgs)
@@ -329,5 +329,71 @@ func TestIgnoredUserNoReply(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if calls != 0 {
 		t.Fatalf("忽略名单内的账号不应触发网关调用，实际 %d", calls)
+	}
+}
+
+// 记忆：观察→描述→落盘→重开仍在（人设连续性靠它）。
+func TestMemoryObserveDescribePersist(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/users.json"
+	m, err := OpenMemory(path, 3)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	m.Observe(941628696, "怪我咯", "龙王你昨天骂我")
+	m.Observe(941628696, "怪我咯", "今天还骂吗")
+	m.Observe(1002, "别人", "我是路人")
+
+	d := m.Describe(941628696)
+	for _, want := range []string{"怪我咯", "941628696", "2 次", "昨天骂我"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("记忆片段缺 %q: %s", want, d)
+		}
+	}
+	if got := m.Describe(9999); got != "" {
+		t.Errorf("陌生人不该有记忆，得到 %q", got)
+	}
+	if err := m.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	m2, err := OpenMemory(path, 3)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if m2.Count() != 2 {
+		t.Fatalf("重开后用户数=%d want 2", m2.Count())
+	}
+	if d2 := m2.Describe(941628696); !strings.Contains(d2, "昨天骂我") {
+		t.Errorf("重开后记忆丢失: %s", d2)
+	}
+}
+
+// 记忆条数按 notesPerUser 裁剪（保留最近 N 句）。
+func TestMemoryNotesTrim(t *testing.T) {
+	m, _ := OpenMemory("", 2)
+	for i := 0; i < 5; i++ {
+		m.Observe(1, "u", "第"+string(rune('0'+i))+"句")
+	}
+	d := m.Describe(1)
+	if strings.Contains(d, "第0句") || strings.Contains(d, "第2句") {
+		t.Errorf("旧记忆应被裁掉: %s", d)
+	}
+	if !strings.Contains(d, "第4句") {
+		t.Errorf("最新记忆应保留: %s", d)
+	}
+}
+
+// 按人隔离：同一个群里两个人各自一段上下文（不串味）。
+func TestChatKeyPerUser(t *testing.T) {
+	a := &Event{MessageType: "group", GroupID: 992511553, UserID: 1}
+	b := &Event{MessageType: "group", GroupID: 992511553, UserID: 2}
+	if chatKey(a, true) == chatKey(b, true) {
+		t.Error("per_user 模式下同群不同人应有不同会话键")
+	}
+	if chatKey(a, false) != chatKey(b, false) {
+		t.Error("per_chat 模式下同群应共享会话键")
+	}
+	if chatKey(a, true) != "group:992511553:u:1" {
+		t.Errorf("会话键格式不符: %s", chatKey(a, true))
 	}
 }

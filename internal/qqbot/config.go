@@ -50,6 +50,15 @@ type Config struct {
 	// IgnoredUsers 忽略的 QQ 号（别的 bot、旧 bot 等）：不回复它们，避免 bot 互相回。
 	IgnoredUsers []int64 `json:"ignored_users"`
 
+	// MemoryScope 会话上下文的作用域：
+	//   "per_user"（默认）—— 群里按「群+人」隔离，每个人各自一段上下文；
+	//   "per_chat"        —— 整个群共享一段（旧行为）。
+	MemoryScope string `json:"memory_scope"`
+	// MemoryFile 跨会话的用户记忆文件（昵称/见面次数/最近原话），空 = 不落盘。
+	MemoryFile string `json:"memory_file"`
+	// MemoryNotesPerUser 每用户保留几句原话（默认 5）。
+	MemoryNotesPerUser int `json:"memory_notes_per_user"`
+
 	// MaxHistoryPairs 每个会话保留多少轮上下文（0 = 无记忆）。
 	MaxHistoryPairs int `json:"max_history_pairs"`
 	// SessionTTLMinutes 会话闲置多久清空（0 = 不过期）。
@@ -65,17 +74,20 @@ type Config struct {
 // Default 返回安全的默认值：白名单空、群里必须 @、无记忆。
 func Default() Config {
 	return Config{
-		Enabled:           false,
-		Listen:            "127.0.0.1:8090",
-		OneBotAPI:         "http://127.0.0.1:8091",
-		GatewayBase:       "http://127.0.0.1:7863/v1",
-		Model:             "cn:deepseek-v4-flash",
-		RequireAtInGroup:  true,
-		MaxHistoryPairs:   3,
-		SessionTTLMinutes: 30,
-		RatePerMinute:     6,
-		MaxReplyRunes:     1200,
-		TimeoutSeconds:    120,
+		Enabled:            false,
+		Listen:             "127.0.0.1:8090",
+		OneBotAPI:          "http://127.0.0.1:8091",
+		GatewayBase:        "http://127.0.0.1:7863/v1",
+		Model:              "cn:deepseek-v4-flash",
+		RequireAtInGroup:   true,
+		MemoryScope:        "per_user",
+		MemoryFile:         "data/users.json",
+		MemoryNotesPerUser: 5,
+		MaxHistoryPairs:    3,
+		SessionTTLMinutes:  30,
+		RatePerMinute:      6,
+		MaxReplyRunes:      1200,
+		TimeoutSeconds:     120,
 	}
 }
 
@@ -114,6 +126,12 @@ func (c *Config) normalize() {
 	c.OneBotAPI = strings.TrimRight(c.OneBotAPI, "/")
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
+	}
+	if strings.TrimSpace(c.MemoryScope) == "" {
+		c.MemoryScope = "per_user"
+	}
+	if c.MemoryNotesPerUser <= 0 {
+		c.MemoryNotesPerUser = 5
 	}
 	if c.MaxHistoryPairs < 0 {
 		c.MaxHistoryPairs = 0
@@ -173,4 +191,9 @@ func (c Config) Ignores(userID int64) bool {
 		}
 	}
 	return false
+}
+
+// ScopePerUser 群聊上下文是否按人隔离。
+func (c Config) ScopePerUser() bool {
+	return strings.TrimSpace(c.MemoryScope) != "per_chat"
 }

@@ -23,6 +23,7 @@ type Bridge struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	limits   map[int64]*bucket
+	mem      *Memory // 按 QQ 号持久化的记忆（人设连续性）
 }
 
 type chatMsg struct {
@@ -41,15 +42,29 @@ type bucket struct {
 	last   time.Time
 }
 
-// New 构造桥。
+// New 构造桥。记忆打开失败不致命：没有记忆也能聊天，只是少了人设连续性。
 func New(cfg Config) *Bridge {
 	cfg.normalize()
+	mem, err := OpenMemory(cfg.MemoryFile, cfg.MemoryNotesPerUser)
+	if err != nil {
+		log.Printf("[qqbot] memory disabled: %v", err)
+		mem, _ = OpenMemory("", cfg.MemoryNotesPerUser)
+	}
 	return &Bridge{
 		cfg:      cfg,
 		client:   &http.Client{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second},
 		sessions: map[string]*session{},
 		limits:   map[int64]*bucket{},
+		mem:      mem,
 	}
+}
+
+// Close 落盘记忆（优雅退出时调用）。
+func (b *Bridge) Close() error {
+	if b.mem == nil {
+		return nil
+	}
+	return b.mem.Flush()
 }
 
 // Handler 返回 HTTP 路由：POST /onebot 收事件，GET /healthz 健康检查。
@@ -117,7 +132,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := chatKey(&ev)
+	key := chatKey(&ev, b.cfg.ScopePerUser())
 	name := displayName(&ev)
 
 	// 内置指令：不消耗网关额度。
@@ -140,6 +155,10 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	if !b.allow(ev.UserID) {
 		log.Printf("[qqbot] rate limited user=%d(%s)", ev.UserID, name)
 		return
+	}
+	// 先记下这次发言（人设记忆），再生成回复。
+	if b.mem != nil {
+		b.mem.Observe(ev.UserID, name, text)
 	}
 	go b.reply(&ev, key, name, text)
 }
@@ -175,7 +194,7 @@ func (b *Bridge) allow(userID int64) bool {
 
 // reply 调网关拿回复并发出。
 func (b *Bridge) reply(ev *Event, key, name, text string) {
-	answer, err := b.chat(key, text)
+	answer, err := b.chat(key, ev.UserID, text)
 	if err != nil {
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
@@ -214,8 +233,8 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string) {
 }
 
 // chat 走网关 /chat/completions（非流式），带会话历史。
-func (b *Bridge) chat(key, userText string) (string, error) {
-	msgs := b.buildMessages(key, userText)
+func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
+	msgs := b.buildMessages(key, uid, userText)
 	payload := map[string]any{
 		"model":    b.cfg.Model,
 		"messages": msgs,
@@ -266,10 +285,21 @@ func (b *Bridge) chat(key, userText string) (string, error) {
 }
 
 // buildMessages 组装请求消息：system + 历史 + 本轮。
-func (b *Bridge) buildMessages(key, userText string) []chatMsg {
+func (b *Bridge) buildMessages(key string, uid int64, userText string) []chatMsg {
 	out := make([]chatMsg, 0, 2*b.cfg.MaxHistoryPairs+2)
-	if strings.TrimSpace(b.cfg.SystemPrompt) != "" {
-		out = append(out, chatMsg{Role: "system", Content: b.cfg.SystemPrompt})
+	system := strings.TrimSpace(b.cfg.SystemPrompt)
+	// 把"你记得这个凡人"拼进 system：人设连续性靠它（同一人多轮之间记得住）。
+	if b.mem != nil {
+		if memo := b.mem.Describe(uid); memo != "" {
+			if system != "" {
+				system += "\n\n" + memo
+			} else {
+				system = memo
+			}
+		}
+	}
+	if system != "" {
+		out = append(out, chatMsg{Role: "system", Content: system})
 	}
 	b.mu.Lock()
 	s := b.sessions[key]
