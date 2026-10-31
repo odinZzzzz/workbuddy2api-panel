@@ -91,17 +91,22 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text, atBot := ParseText(ev.Message, ev.RawMessage, ev.SelfID)
+	// 到达即记一行：排查"为什么没回复"时，必须先能区分"事件没到"与"规则挡掉"。
+	log.Printf("[qqbot] event type=%s group=%d user=%d at=%v len=%d",
+		ev.MessageType, ev.GroupID, ev.UserID, atBot, len([]rune(text)))
 
 	// 白名单：默认谁都不回（空名单 = 全拒），这是安全默认。
 	if ev.MessageType == "group" {
 		if !b.cfg.AllowsGroup(ev.GroupID) {
+			log.Printf("[qqbot] skip: group %d 不在白名单", ev.GroupID)
 			return
 		}
 		if b.cfg.RequireAtInGroup && !atBot {
-			return
+			return // 群里没 @ 机器人：正常静默，不刷日志
 		}
 	} else if ev.MessageType == "private" {
 		if !b.cfg.AllowsUser(ev.UserID) {
+			log.Printf("[qqbot] skip: user %d 不在白名单", ev.UserID)
 			return
 		}
 	} else {
