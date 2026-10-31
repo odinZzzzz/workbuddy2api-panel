@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -976,21 +975,8 @@ func (b *Bridge) pickSticker() string {
 	if dir == "" {
 		return ""
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-	var files []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		switch strings.ToLower(filepath.Ext(e.Name())) {
-		case ".jpg", ".jpeg", ".png", ".gif", ".webp":
-			files = append(files, filepath.Join(dir, e.Name()))
-		}
-	}
-	// 加上群聊里收藏的表情
+	// 根目录图片 + 群聊里收藏的表情（扫描逻辑见 libraryStickers/collectedStickers）
+	files := libraryStickers(dir)
 	files = append(files, collectedStickers(dir)...)
 	if len(files) == 0 {
 		return ""

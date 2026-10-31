@@ -105,6 +105,25 @@ func stickerExt(data []byte, url string) string {
 	return ""
 }
 
+// libraryStickers 列出表情库**根目录**下的图片（不递归，也不含 collected 子目录）。
+func libraryStickers(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+			out = append(out, filepath.Join(dir, e.Name()))
+		}
+	}
+	return out
+}
+
 // collectedStickers 列出收藏目录里的图片。
 func collectedStickers(dir string) []string {
 	entries, err := os.ReadDir(filepath.Join(dir, collectSubdir))
@@ -126,5 +145,29 @@ func collectedStickers(dir string) []string {
 
 // collectedCount 收藏了多少张（给后台/日志用）。
 func collectedCount(dir string) int { return len(collectedStickers(dir)) }
+
+// stickerStats 表情库统计：根目录图片数 / 收藏数 / 两者合计字节数。
+//
+// 读不到（目录不存在、无权限、单文件 stat 失败）一律当 0：这是后台的只读统计，
+// 不该因为磁盘问题让 /admin/api/state 500。dir 为空时直接返回 0——不能退化成
+// 扫当前工作目录下的 "collected"。
+func stickerStats(dir string) (library, collected int, bytes int64) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return 0, 0, 0
+	}
+	lib := libraryStickers(dir)
+	col := collectedStickers(dir)
+	size := func(files []string) int64 {
+		var n int64
+		for _, f := range files {
+			if info, err := os.Stat(f); err == nil && !info.IsDir() {
+				n += info.Size()
+			}
+		}
+		return n
+	}
+	return len(lib), len(col), size(lib) + size(col)
+}
 
 var _ = fmt.Sprintf
