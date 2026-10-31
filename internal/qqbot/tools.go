@@ -179,7 +179,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return text, nil
 		})
 
-	add("add_gunsmith_code", "把群友提供的改枪码加进知识库（只支持**已收录**的枪）。weapon 传枪名，code 传分享码，label 可选（说明这码什么流派）。",
+	add("add_gunsmith_code", "把群友提供的改枪码加进知识库（只支持**已收录**的枪）。weapon 传枪名，code 传分享码，label 可选（说明这码什么流派）。调用成功后**只用一句话确认**（如「加上了，M700」），不要追问是谁给的、也不要复述码。",
 		obj(map[string]any{
 			"weapon": map[string]any{"type": "string", "description": "枪名，必须是已收录的，如 M700 / MK47"},
 			"code":   map[string]any{"type": "string", "description": "16~24 位分享码（大写字母数字）"},
