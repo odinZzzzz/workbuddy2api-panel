@@ -66,7 +66,7 @@ func TestProfileInjectedIntoDescribe(t *testing.T) {
 		QQLevel: 92, Sign: "活着就是为了整活", City: "广东深圳", Digits: 9,
 	})
 	d := m.Describe(941628696)
-	for _, want := range []string{"你对他的印象", "QQ 等级 92", "活着就是为了整活"} {
+	for _, want := range []string{"印象：", "QQ 等级 92", "活着就是为了整活"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("描述缺 %q: %s", want, d)
 		}

@@ -644,3 +644,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .fm-run { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ok, #3ddc97); margin-right: 5px; animation: fm-blink 1.2s ease-in-out infinite; }
 @keyframes fm-blink { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 .flow-matrix .fm-empty { color: var(--ink-3); padding: 14px 4px; font-size: 12.5px; }
+
+/* 积分流向：canvas 空间图（球 + 连线 + 粒子） */
+.flow-canvas { display: block; width: 100%; border-radius: 8px; background:
+  radial-gradient(circle at 50% 40%, rgba(91,124,250,.05), transparent 70%); }
+.flow-matrix { overflow: visible; min-height: 280px; }

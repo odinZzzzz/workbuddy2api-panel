@@ -3061,22 +3061,25 @@ if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
    recent[] 里带 credit 与 time，按分钟分桶就能画出「每分钟消耗多少积分」，
    这是唯一能反映"此刻正在烧多少积分"的数据源（usage 只按小时聚合）。 */
 
-// ── 积分流向矩阵 ────────────────────────────────────────────────────────────
+
+// ── 积分流向：悬浮球 + 连线 + 流动粒子 ─────────────────────────────────────
 //
-// 想看的是"钱正在往哪流"：哪几个账号在跑、烧给哪个模型、流速多快。
-// 数据源用 request_logs（每条带 account/model/credit/time），纯前端聚合，
-// 不新增后端接口；窗口固定近 5 分钟，每 5 秒随仪表盘一起刷新。
+// 想表达的是"钱正在往哪流"：左边一串球是账号，右边一串球是模型，
+// 连线粗细 = 该组合近 5 分钟烧掉的积分，线上跑的琥珀色粒子 = 积分正在流出。
+// 纯 canvas 手写，不引图表库（echarts 按需加载，这里连它都不用）。
 const FLOW_WINDOW_MS = 5 * 60 * 1000;
-const FLOW_MAX_ROWS = 8;
-const FLOW_MAX_COLS = 6;
+const FLOW_MAX_ACCS = 6;
+const FLOW_MAX_MODELS = 5;
+const FLOW_MAX_PARTICLES = 220;
+
+let flowAnim = null; // { raf, cv, ctx, w, h, dpr, nodes, edges, parts, last }
 
 function flowModelLabel(m) {
   return String(m || '未知').replace(/^(cn|global):/, '');
 }
 
-function renderFlowMatrix(ov, logs) {
-  const box = $('flowMatrix');
-  if (!box) return;
+// 聚合近 5 分钟的 request_logs：谁 × 哪个模型 × 烧了多少
+function flowAggregate(ov, logs) {
   const entries = Array.isArray(logs.entries) ? logs.entries : (Array.isArray(logs) ? logs : []);
   const now = Date.now();
   const win = entries.filter(e => {
@@ -3084,13 +3087,12 @@ function renderFlowMatrix(ov, logs) {
     return Number.isFinite(t) && now - t <= FLOW_WINDOW_MS;
   });
 
-  // 账号昵称表 + 在途数（谁正在跑）
   const accMeta = new Map();
   for (const s of (ov.accounts || [])) {
     accMeta.set(s.uid, { name: s.nickname || (s.uid || '').slice(0, 8), inFlight: Number(s.in_flight) || 0 });
   }
 
-  const cell = new Map();   // `${acc}\u0000${model}` → { credit, reqs, last }
+  const cell = new Map(); // `${acc}\u0000${model}` → {credit, reqs, last}
   const accSum = new Map();
   const modSum = new Map();
   let total = 0;
@@ -3101,52 +3103,303 @@ function renderFlowMatrix(ov, logs) {
     const t = Date.parse(e.time) || 0;
     const k = acc + '\u0000' + mod;
     const cur = cell.get(k) || { credit: 0, reqs: 0, last: 0 };
-    cur.credit += credit;
-    cur.reqs += 1;
-    cur.last = Math.max(cur.last, t);
+    cur.credit += credit; cur.reqs += 1; cur.last = Math.max(cur.last, t);
     cell.set(k, cur);
     accSum.set(acc, (accSum.get(acc) || 0) + credit);
     modSum.set(mod, (modSum.get(mod) || 0) + credit);
     total += credit;
   }
 
+  const accs = [...accSum.entries()].sort((x, y) => y[1] - x[1]).slice(0, FLOW_MAX_ACCS);
+  const mods = [...modSum.entries()].sort((x, y) => y[1] - x[1]).slice(0, FLOW_MAX_MODELS);
+  return { win, cell, accSum, modSum, accs, mods, accMeta, total };
+}
+
+function flowStop() {
+  if (flowAnim && flowAnim.raf) cancelAnimationFrame(flowAnim.raf);
+  flowAnim = null;
+}
+
+
+function renderFlowMatrix(ov, logs) {
+  const box = $('flowMatrix');
+  if (!box) return;
+  const agg = flowAggregate(ov, logs);
+
   const rate = $('flowRate');
   const note = $('flowNote');
-  if (rate) rate.textContent = total > 0 ? '流出 ' + total.toFixed(2) + ' 分 / 5 分钟' : '窗口内无消耗';
-  if (note) note.textContent = win.length ? win.length + ' 条请求 · 每 5 秒刷新' : '近 5 分钟没有请求';
+  if (rate) rate.textContent = agg.total > 0 ? '流出 ' + agg.total.toFixed(2) + ' 分 / 5 分钟' : '窗口内无消耗';
+  if (note) note.textContent = agg.win.length ? agg.win.length + ' 条请求 · 每 5 秒刷新' : '近 5 分钟没有请求';
 
-  if (!win.length) {
-    box.innerHTML = '<div class="fm-empty">近 5 分钟没有请求，矩阵空着——等有流量了这里会亮起来。</div>';
+  if (!agg.win.length || !agg.accs.length || !agg.mods.length) {
+    flowStop();
+    box.innerHTML = '<div class="fm-empty">近 5 分钟没有请求，球还没浮起来——等有流量了这里会亮。</div>';
     return;
   }
 
-  const rows = [...accSum.entries()].sort((x, y) => y[1] - x[1]).slice(0, FLOW_MAX_ROWS).map(r => r[0]);
-  const cols = [...modSum.entries()].sort((x, y) => y[1] - x[1]).slice(0, FLOW_MAX_COLS).map(r => r[0]);
-  const max = Math.max(0.0001, ...rows.map(a => Math.max(0, ...[...cell.entries()]
-    .filter(([k]) => k.startsWith(a + '\u0000')).map(([, v]) => v.credit))));
+  // 工作流式节点图：echarts 现成的 graph（节点）+ lines（连线带 effect 粒子流）
+  renderFlowGraph(box, agg).catch(() => flowCanvasFallback(box, agg));
+}
 
-  let html = '<table><thead><tr><th class="row-hd">账号 \\ 模型</th>';
-  for (const m of cols) html += '<th>' + esc(m) + '</th>';
-  html += '<th>合计</th></tr></thead><tbody>';
-  for (const acc of rows) {
-    const meta = accMeta.get(acc) || {};
-    const running = (meta.inFlight || 0) > 0;
-    const label = (running ? '<span class="fm-run"></span>' : '') + esc(meta.name || String(acc).slice(0, 8));
-    html += '<tr><th class="row-hd" title="' + esc(String(acc)) + (running ? ' · 在途 ' + meta.inFlight : '') + '">' + label + '</th>';
-    for (const m of cols) {
-      const v = cell.get(acc + '\u0000' + m);
-      if (!v) { html += '<td><div class="fm-cell zero">·</div></td>'; continue; }
-      const i = Math.min(1, v.credit / max);
-      const hot = now - v.last <= 60 * 1000 ? ' hot' : '';
-      html += '<td><div class="fm-cell' + hot + '" style="--i:' + i.toFixed(3) + '" title="' +
-        esc(acc + ' → ' + m + '：' + v.credit.toFixed(3) + ' 分 / ' + v.reqs + ' 次') + '">' +
-        (v.credit > 0 ? v.credit.toFixed(2) : '0') + '</div></td>';
-    }
-    const sum = accSum.get(acc) || 0;
-    html += '<td><div class="fm-cell zero" title="该账号窗口内合计">' + sum.toFixed(2) + '</div></td></tr>';
+
+// ── 工作流式节点图（echarts graph + lines）──────────────────────────────────
+//
+// 用现成图表能力，不手搓动画：
+//   - graph 系列画节点（圆角矩形，账号蓝/模型绿，标签两行：名字 + 消耗）
+//   - lines 系列的 effect 自带"粒子沿线流动"，正好表达积分持续流出
+// 布局用隐藏的笛卡尔坐标系：账号一列在左、模型一列在右，纵向按消耗排开。
+let flowChart = null;
+
+async function renderFlowGraph(box, agg) {
+  const ok = await ensureECharts();
+  if (!ok) throw new Error('echarts unavailable');
+  const echarts = window.echarts;
+  // echarts 按容器尺寸自适应：容器没有高度就会渲染成 0 高（踩过一次，canvas 高度为 0）
+  const boxH = Math.max(260, Math.min(380, Math.round((box.clientWidth || 640) * 0.45)));
+  if (!box.style.height) box.style.height = boxH + 'px';
+  if (!flowChart || flowChart.getDom() !== box) {
+    box.innerHTML = '';
+    if (flowChart) { try { flowChart.dispose(); } catch (e) {} }
+    flowChart = echarts.init(box, null, { renderer: 'canvas' });
+    window.addEventListener('resize', () => { try { flowChart && flowChart.resize(); } catch (e) {} });
   }
-  html += '</tbody></table>';
-  box.innerHTML = html;
+
+  const maxAcc = Math.max(...agg.accs.map(x => x[1]), 0.0001);
+  const maxMod = Math.max(...agg.mods.map(x => x[1]), 0.0001);
+  const pos = new Map(); // key → [x, y]
+  const nodes = [];
+  const yFor = (n, i) => 10 - ((i + 1) * 10) / (n + 1);
+
+  agg.accs.forEach(([uid, sum], i) => {
+    const meta = agg.accMeta.get(uid) || {};
+    const running = (meta.inFlight || 0) > 0;
+    const name = meta.name || String(uid).slice(0, 6);
+    const x = 2, y = yFor(agg.accs.length, i);
+    pos.set('acc:' + uid, [x, y]);
+    nodes.push({
+      value: [x, y],
+      symbol: 'roundRect', symbolSize: [Math.max(96, name.length * 13 + 26), 46],
+      itemStyle: { color: running ? 'rgba(70,105,235,.95)' : 'rgba(70,105,235,.55)', borderColor: running ? '#3ddc97' : 'transparent', borderWidth: running ? 1.6 : 0, borderRadius: 6 },
+      label: { show: true, position: 'inside', formatter: name + '\n' + sum.toFixed(2) + ' 分', color: '#e8ebf2', fontSize: 11, lineHeight: 14, overflow: 'break' },
+    });
+  });
+  agg.mods.forEach(([mod, sum], i) => {
+    const x = 8, y = yFor(agg.mods.length, i);
+    pos.set('model:' + mod, [x, y]);
+    nodes.push({
+      value: [x, y],
+      symbol: 'roundRect', symbolSize: [Math.max(96, mod.length * 8 + 26), 46],
+      itemStyle: { color: 'rgba(40,170,140,.78)', borderRadius: 6 },
+      label: { show: true, position: 'inside', formatter: mod + '\n' + sum.toFixed(2) + ' 分', color: '#e8ebf2', fontSize: 11, lineHeight: 14, overflow: 'break' },
+    });
+  });
+
+  const maxEdge = Math.max(...[...agg.cell.values()].map(v => v.credit), 0.0001);
+  const edges = [];
+  const flows = [];
+  for (const [k, v] of agg.cell.entries()) {
+    const [acc, mod] = k.split('\u0000');
+    const a = pos.get('acc:' + acc), b = pos.get('model:' + mod);
+    if (!a || !b || v.credit <= 0) continue;
+    const w = v.credit / maxEdge;
+    edges.push({ coords: [a, b], lineStyle: { width: 0.8 + 2.4 * w, opacity: 0.25 + 0.45 * w, curveness: 0.12 } });
+    const hot = Date.now() - v.last < 60e3;
+    flows.push({
+      coords: [a, b],
+      lineStyle: { width: 0, opacity: 0, curveness: 0.12 },
+      effect: { show: true, period: 3 + 5 * (1 - w), trailLength: 0.35, symbol: 'circle',
+        symbolSize: hot ? 5 : 3.5, color: hot ? '#ffba5e' : '#8cc8ff' },
+    });
+  }
+
+  const axisCommon = {
+    type: 'value', min: 0, max: 10, show: false,
+    axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false },
+  };
+  flowChart.setOption({
+    animationDuration: 500,
+    grid: { left: 8, right: 8, top: 10, bottom: 10, containLabel: false },
+    xAxis: axisCommon,
+    yAxis: axisCommon,
+    series: [
+      { type: 'lines', coordinateSystem: 'cartesian2d', polyline: false, zlevel: 1, data: flows, silent: true },
+      { type: 'lines', coordinateSystem: 'cartesian2d', polyline: false, zlevel: 2, data: edges, silent: true },
+      { type: 'scatter', coordinateSystem: 'cartesian2d', zlevel: 3, data: nodes, silent: true },
+    ],
+  }, true);
+  try { flowChart.resize(); } catch (e) {}
+}
+
+function flowCanvasFallback(box, agg) {
+  flowStop(); // 同一 canvas 上绝不允许两条 RAF 并行（会变双倍速）
+  let cv = box.querySelector('canvas');
+  if (!cv) {
+    box.innerHTML = '';
+    cv = document.createElement('canvas');
+    cv.className = 'flow-canvas';
+    box.appendChild(cv);
+  }
+  const ctx = cv.getContext('2d');
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = cv.clientWidth || 600;
+  const h = Math.max(240, Math.min(360, Math.round(w * 0.42)));
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  cv.style.height = h + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 节点：账号在左、模型在右，按消耗占比定球径
+  const maxAcc = Math.max(...agg.accs.map(x => x[1]), 0.0001);
+  const maxMod = Math.max(...agg.mods.map(x => x[1]), 0.0001);
+  const nodes = [];
+  const ySlots = (n, i) => (h * (i + 1)) / (n + 1);
+  agg.accs.forEach(([uid, sum], i) => {
+    const meta = agg.accMeta.get(uid) || {};
+    nodes.push({
+      kind: 'acc', id: uid, label: meta.name || String(uid).slice(0, 6),
+      value: sum, running: (meta.inFlight || 0) > 0,
+      x: w * 0.22, y: ySlots(agg.accs.length, i),
+      tx: w * 0.22, ty: ySlots(agg.accs.length, i),
+      r: 9 + 17 * Math.sqrt(sum / maxAcc),
+      phase: Math.random() * Math.PI * 2,
+    });
+  });
+  agg.mods.forEach(([mod, sum], i) => {
+    nodes.push({
+      kind: 'model', id: mod, label: mod,
+      value: sum, running: false,
+      x: w * 0.78, y: ySlots(agg.mods.length, i),
+      tx: w * 0.78, ty: ySlots(agg.mods.length, i),
+      r: 8 + 15 * Math.sqrt(sum / maxMod),
+      phase: Math.random() * Math.PI * 2,
+    });
+  });
+
+  const byId = new Map(nodes.map(n => [n.kind + ':' + n.id, n]));
+  const edges = [];
+  for (const [k, v] of agg.cell.entries()) {
+    const [acc, mod] = k.split('\u0000');
+    const a = byId.get('acc:' + acc);
+    const m = byId.get('model:' + mod);
+    if (!a || !m || v.credit <= 0) continue;
+    edges.push({ a, m, credit: v.credit, reqs: v.reqs, last: v.last });
+  }
+  const maxEdge = Math.max(...edges.map(e => e.credit), 0.0001);
+
+  flowAnim = { raf: 0, cv, ctx, w, h, dpr, nodes, edges, parts: [], last: performance.now(), maxEdge, reduceMotion };
+
+  const draw = (now) => {
+    if (!flowAnim || flowAnim.cv !== cv) return;
+    // 离开仪表盘就停：省 CPU，也避免后台标签页空转
+    const view = document.querySelector('#view-dashboard');
+    if (!view || view.hidden || document.hidden) { flowAnim.raf = 0; return; }
+    const st = flowAnim;
+    const dt = Math.min(64, now - st.last) / 1000;
+    st.last = now;
+    const t = now / 1000;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // 背景微光
+    const bg = ctx.createRadialGradient(w / 2, h / 2, 10, w / 2, h / 2, Math.max(w, h) * 0.7);
+    bg.addColorStop(0, 'rgba(91,124,250,0.07)');
+    bg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, w, h);
+
+    // 节点漂移（很轻，像悬浮）
+    for (const n of st.nodes) {
+      if (!st.reduceMotion) {
+        n.x += (n.tx - n.x) * Math.min(1, dt * 3);
+        n.y += (n.ty - n.y) * Math.min(1, dt * 3) + Math.sin(t * 0.9 + n.phase) * 0.25;
+      } else {
+        n.x = n.tx; n.y = n.ty;
+      }
+    }
+
+    // 连线
+    for (const e of st.edges) {
+      const wgt = e.credit / st.maxEdge;
+      const mx = (e.a.x + e.m.x) / 2;
+      ctx.beginPath();
+      ctx.moveTo(e.a.x, e.a.y);
+      ctx.bezierCurveTo(mx, e.a.y, mx, e.m.y, e.m.x, e.m.y);
+      ctx.strokeStyle = 'rgba(120,150,255,' + (0.10 + 0.30 * wgt).toFixed(3) + ')';
+      ctx.lineWidth = 0.7 + 2.2 * wgt;
+      ctx.stroke();
+    }
+
+    // 粒子：按边的权重持续吐，沿贝塞尔飞向模型
+    if (!st.reduceMotion) {
+      for (const e of st.edges) {
+        const wgt = e.credit / st.maxEdge;
+        if (Math.random() < wgt * dt * 9 && st.parts.length < FLOW_MAX_PARTICLES) {
+          st.parts.push({ e, p: 0, speed: 0.35 + Math.random() * 0.35, hot: now - e.last < 60e3 });
+        }
+      }
+    }
+    const alive = [];
+    for (const pt of st.parts) {
+      pt.p += pt.speed * dt;
+      if (pt.p >= 1) continue;
+      alive.push(pt);
+      const e = pt.e;
+      const mx = (e.a.x + e.m.x) / 2;
+      const x = bez(e.a.x, mx, mx, e.m.x, pt.p);
+      const y = bez(e.a.y, e.a.y, e.m.y, e.m.y, pt.p);
+      const alpha = pt.hot ? 0.95 : 0.55;
+      ctx.beginPath();
+      ctx.arc(x, y, pt.hot ? 2.4 : 1.8, 0, Math.PI * 2);
+      ctx.fillStyle = pt.hot ? 'rgba(255,186,94,' + alpha + ')' : 'rgba(140,200,255,' + alpha + ')';
+      ctx.fill();
+    }
+    st.parts = alive;
+
+    // 球
+    for (const n of st.nodes) {
+      const isAcc = n.kind === 'acc';
+      const g = ctx.createRadialGradient(n.x - n.r * 0.35, n.y - n.r * 0.35, n.r * 0.15, n.x, n.y, n.r);
+      if (isAcc) {
+        g.addColorStop(0, 'rgba(150,180,255,0.95)');
+        g.addColorStop(1, 'rgba(70,105,235,0.55)');
+      } else {
+        g.addColorStop(0, 'rgba(160,255,225,0.9)');
+        g.addColorStop(1, 'rgba(40,170,140,0.5)');
+      }
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+      if (n.running) {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.r + 3 + Math.sin(t * 3) * 1.6, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(61,220,151,' + (0.35 + 0.35 * Math.abs(Math.sin(t * 2))).toFixed(2) + ')';
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      }
+      // 标签 + 数值
+      ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+      ctx.textAlign = isAcc ? 'right' : 'left';
+      ctx.textBaseline = 'middle';
+      const lx = isAcc ? n.x - n.r - 7 : n.x + n.r + 7;
+      ctx.fillStyle = 'rgba(200,210,235,0.92)';
+      ctx.fillText(n.label.length > 8 ? n.label.slice(0, 8) + '…' : n.label, lx, n.y - 6);
+      ctx.fillStyle = 'rgba(150,165,195,0.75)';
+      ctx.font = '10px ui-monospace, Menlo, Consolas, monospace';
+      ctx.fillText(n.value.toFixed(2) + ' 分', lx, n.y + 7);
+    }
+
+    if (!st.reduceMotion) st.raf = requestAnimationFrame(draw);
+    else st.raf = 0;
+  };
+  flowAnim.raf = requestAnimationFrame(draw);
+}
+
+function bez(p0, p1, p2, p3, t) {
+  const u = 1 - t;
+  return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3;
 }
 
 async function loadDashboard() {

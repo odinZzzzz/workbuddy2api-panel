@@ -27,7 +27,7 @@ func TestMemoryVerdictPersist(t *testing.T) {
 	m.Observe(1, "怪我咯", "你好")
 	m.SetVerdict(1, "脑子慢但肯问")
 	d := m.Describe(1)
-	if !strings.Contains(d, "上次对他的点评") || !strings.Contains(d, "脑子慢但肯问") {
+	if !strings.Contains(d, "上次点评") || !strings.Contains(d, "脑子慢但肯问") {
 		t.Fatalf("描述里应带上次点评: %s", d)
 	}
 }
@@ -97,7 +97,7 @@ func TestAffinityVisible(t *testing.T) {
 	b.mem.Observe(1001, "怪我咯", "你好")
 	b.mem.AddAffinity(1001, 60)
 
-	if d := b.mem.Describe(1001); !strings.Contains(d, "好感度 60/100") || !strings.Contains(d, "还算识相") {
+	if d := b.mem.Describe(1001); !strings.Contains(d, "好感 60/100") || !strings.Contains(d, "还算识相") {
 		t.Errorf("描述里应带好感度与档位: %s", d)
 	}
 	ev := &Event{MessageType: "private", UserID: 1001, SelfID: 3467208422}

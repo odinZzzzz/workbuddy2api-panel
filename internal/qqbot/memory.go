@@ -132,33 +132,30 @@ func (m *Memory) Describe(uid int64) string {
 	if u == nil || (u.Count == 0 && len(u.Notes) == 0) {
 		return ""
 	}
+	// 压成一行：这段每轮都进 system，写得越长越贵，也越容易把语气带跑。
+	// 只保留「是谁 / 多熟 / 印象 / 上次点评」四件事，其余交给模型自己发挥。
 	var b strings.Builder
 	name := u.Nick
 	if name == "" {
 		name = "（无名）"
 	}
-	fmt.Fprintf(&b, "你记得这个凡人：%s，已见过 %d 次", name, u.Count)
-	if !u.FirstSeen.IsZero() {
-		fmt.Fprintf(&b, "，第一次是 %s", u.FirstSeen.Format("2006-01-02"))
+	fmt.Fprintf(&b, "【记忆】%s，第 %d 次说话", name, u.Count)
+	if u.Affinity > 0 {
+		fmt.Fprintf(&b, "，好感 %d/100（%s）", u.Affinity, AffinityTier(u.Affinity))
 	}
-	b.WriteString("。")
 	if len(u.Notes) > 0 {
-		b.WriteString("他之前说过：")
+		b.WriteString("。他说过：")
 		b.WriteString(strings.Join(u.Notes, "；"))
-		b.WriteString("。")
 	}
 	if line := u.ProfileLine(); line != "" {
-		b.WriteString("你对他的印象：")
+		b.WriteString("。印象：")
 		b.WriteString(line)
-		b.WriteString("。")
 	}
-	fmt.Fprintf(&b, "你对他的好感度 %d/100（%s）。", u.Affinity, AffinityTier(u.Affinity))
 	if u.Verdict != "" {
-		b.WriteString("你上次对他的点评是：")
+		b.WriteString("。上次点评：")
 		b.WriteString(u.Verdict)
-		b.WriteString("。")
 	}
-	b.WriteString("你要按龙王的性子接着对他说话（记得他，别当第一次见）。")
+	b.WriteString("。")
 	return b.String()
 }
 
