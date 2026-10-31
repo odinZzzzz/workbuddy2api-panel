@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -51,6 +52,10 @@ type Config struct {
 	// Live 运行期可变配置（面板在线改 api_key / soft_rate / 脱敏开关时立即生效）。
 	// nil 时回退静态字段（测试与裸用场景）。
 	Live *livecfg.Holder
+
+	// ModelDenyPath 模型黑名单落盘路径（空 = 纯内存，重启即清）。
+	// 由 main 按 state_file 同目录的 model_deny.json 传入。
+	ModelDenyPath string
 
 	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
 	PromptMode string
@@ -129,6 +134,14 @@ const notFoundCooldown = 60 * time.Second
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
 const ServiceName = "workbuddy2api"
 
+// maxClientBodyBytes 客户端请求体上限（256MB）。
+//
+// 背景：上游对齐时曾移除过 max_body_mb（截断 body 会让上游报 unmarshal 400，
+// 反而冤枉账号，issue #41）。但"完全不设上限"意味着单个超大 body 能直接 OOM 掉
+// 整个进程。折中：上限设到远超任何正常请求（多图 + 长上下文通常 <10MB），
+// 只在异常/恶意输入时生效，并且明确回 413 而不是截断。
+var maxClientBodyBytes int64 = 256 << 20
+
 // Handler 主路由。
 type Handler struct {
 	cfg     Config
@@ -156,7 +169,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), modelDeny: newModelDenyList(modelDenyTTL)}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), modelDeny: newModelDenyList(modelDenyTTL, cfg.ModelDenyPath)}
 	// 降级窗口：0 保留旧语义（到次日 00:00 CST），>0 为自愈窗口（见 degrade.go）。
 	h.degrade.SetTTL(cfg.PromptDegradeTTL)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -198,9 +211,37 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			h.cfg.RequestLog.Record(trace.event(status))
 		}()
-		h.mux.ServeHTTP(obs, r)
+		h.serveSafely(obs, r)
 		return
 	}
+	h.serveSafely(w, r)
+}
+
+// serveSafely 执行路由，并兜住 handler 里的 panic。
+//
+// 为什么必须有：Go 的 net/http 只会在每个连接上 recover 后**直接断开连接**——
+// 客户端拿到的是一次无响应的连接重置（有的 SDK 会当成网络错误无限重试），
+// 面板/监控也看不到任何错误。作为中转站，任何一处 nil map / 越界 / 第三方库
+// panic 都不该表现成"网络故障"，而应该是明确的 500 + 可检索的堆栈。
+// 注意：若响应头已发出（流式已开流），这里改不了状态码，只能记录并让连接收尾。
+func (h *Handler) serveSafely(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		// http.ErrAbortHandler 是 net/http 约定用来静默中断响应的哨兵值，不当作 bug。
+		if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+			return
+		}
+		log.Printf("ERR: [server] panic in %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+		if tw, ok := w.(*responseObserver); ok && tw.status != 0 {
+			// 已经开流：无法再写错误信封，直接终止本次响应。
+			return
+		}
+		writeOpenAIError(w, http.StatusInternalServerError, "internal_error",
+			"gateway internal error (panic); 已记录堆栈，请把时间点与 X-Request-Id 报给运维")
+	}()
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -683,9 +724,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
 	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
 	// 读 body 出错就地 400，不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
-	body, err := io.ReadAll(r.Body)
+	// 请求体上限（见 maxClientBodyBytes）：原来是无上限整读，单个超大 body 就能把
+	// 进程内存打穿——中转站不能留这种 OOM 缺口。上限设得远高于任何正常请求。
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxClientBodyBytes+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		return
+	}
+	if int64(len(body)) > maxClientBodyBytes {
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+			fmt.Sprintf("request body exceeds %d MB limit", maxClientBodyBytes>>20))
 		return
 	}
 	var peek struct {
@@ -1460,9 +1508,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		status = http.StatusBadRequest
 	}
+	// 可重试类错误补 Retry-After：没有它，SDK/客户端会立刻重试，在"号池冷却/限流"
+	// 场景下等于把请求量放大数倍再打回来（中转站最常见的自伤方式）。
+	// 400（如 model_unavailable）属确定性失败，不给 Retry-After——那会诱导无效重试。
+	if status == http.StatusServiceUnavailable || status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", retryAfterSeconds(status))
+	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
 	st.outcome = reqlog.OutcomeHTTPError
+}
+
+// retryAfterSeconds 返回给客户端建议的重试等待秒数。
+//
+// 取值依据：503 基本都是"号池暂时没有可用号"，池内软冷却是个位数量级，
+// 5s 足够避免重试风暴又不至于让用户等太久；429 是限流/配额，需要更长退避。
+func retryAfterSeconds(status int) string {
+	if status == http.StatusTooManyRequests {
+		return "30"
+	}
+	return "5"
 }
 
 // tokensPerSecond 计算吐字速率（token/s），返回 (速率, 是否有意义)。

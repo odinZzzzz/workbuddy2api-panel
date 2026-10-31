@@ -15,6 +15,10 @@ package server
 // TTL 取 1 小时：账号类型变更（比如试用转正）通常不会即时发生，但也不该永久拉黑。
 
 import (
+	"encoding/json"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -28,13 +32,65 @@ type modelDenyList struct {
 	mu    sync.Mutex
 	until map[string]time.Time
 	ttl   time.Duration
+	// path 落盘位置（空 = 纯内存，测试用）。
+	//
+	// 为什么必须落盘：黑名单是"上游明确说过这类账号没有该模型权限"的事实，
+	// 内存版一重启就清空 → /v1/models 又把不可用模型列出来，客户端再撞一次、
+	// 池子再被跑空一遍。落盘后重启仍生效，过期时间一并保存。
+	path string
 }
 
-func newModelDenyList(ttl time.Duration) *modelDenyList {
+func newModelDenyList(ttl time.Duration, path string) *modelDenyList {
 	if ttl <= 0 {
 		ttl = modelDenyTTL
 	}
-	return &modelDenyList{until: map[string]time.Time{}, ttl: ttl}
+	d := &modelDenyList{until: map[string]time.Time{}, ttl: ttl, path: path}
+	d.load()
+	return d
+}
+
+// load 从磁盘恢复黑名单（忽略已过期项与损坏文件——损坏就当空表，不阻塞启动）。
+func (d *modelDenyList) load() {
+	if d.path == "" {
+		return
+	}
+	raw, err := os.ReadFile(d.path)
+	if err != nil {
+		return
+	}
+	var saved map[string]time.Time
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		log.Printf("WARN: [server] 模型黑名单文件损坏，按空表启动: %v", err)
+		return
+	}
+	now := time.Now()
+	for k, until := range saved {
+		if now.Before(until) {
+			d.until[modelDenyKey(k)] = until
+		}
+	}
+}
+
+// save 原子落盘（temp + rename）：进程在写一半时被杀也不会留下半截 JSON。
+func (d *modelDenyList) save() {
+	if d.path == "" {
+		return
+	}
+	raw, err := json.Marshal(d.until)
+	if err != nil {
+		return
+	}
+	if dir := filepath.Dir(d.path); dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	tmp := d.path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		log.Printf("WARN: [server] 写模型黑名单失败: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, d.path); err != nil {
+		log.Printf("WARN: [server] 落盘模型黑名单失败: %v", err)
+	}
 }
 
 // key 归一化模型名：去掉 cn:/global: 前缀，统一小写。
@@ -57,6 +113,7 @@ func (d *modelDenyList) Deny(model string) {
 	d.mu.Lock()
 	d.until[k] = time.Now().Add(d.ttl)
 	d.mu.Unlock()
+	d.save()
 }
 
 // Denied 该模型是否处于拉黑期。

@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -348,6 +349,7 @@ func main() {
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 		RealmPriority: cfg.Pool.RealmPriority,
+		ModelDenyPath: stateSibling(cfg.StateFile, "model_deny.json"),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -409,8 +411,19 @@ func main() {
 		}
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	// TLS：配了证书就直接以 HTTPS 提供服务（最低 TLS 1.2），否则走明文——
+	// 公网部署请务必二选一：本进程 TLS，或前置反向代理终结 TLS。
+	scheme := "http"
+	if cert, key := cfg.Server.TLSCert, cfg.Server.TLSKey; cert != "" && key != "" {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		scheme = "https"
+	}
+	log.Printf("workbuddy2api listening on %s (%s, api_key=%v)，管理面板 %s://127.0.0.1%s/panel/",
+		cfg.Listen, scheme, cfg.APIKey != "", scheme, panelListenPath(cfg.Listen))
+	if scheme == "http" {
+		log.Printf("提示：当前为明文 HTTP，公网部署请加 TLS 反代或配置 server.tls_cert / server.tls_key")
+	}
+	if err := listenAndServe(srv, cfg.Server.TLSCert, cfg.Server.TLSKey); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}
 	// 等收尾协程完成（它负责 drain 在途请求），再退出进程。
@@ -627,4 +640,12 @@ func mergedJSON(m map[string]any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// listenAndServe 按是否配置证书选择 HTTPS / HTTP。
+func listenAndServe(srv *http.Server, cert, key string) error {
+	if cert != "" && key != "" {
+		return srv.ListenAndServeTLS(cert, key)
+	}
+	return srv.ListenAndServe()
 }

@@ -68,6 +68,14 @@ type Config struct {
 		ShutdownTimeout string `json:"shutdown_timeout"`
 		// ShutdownTimeoutDur 解析后的收尾窗口。
 		ShutdownTimeoutDur time.Duration `json:"-"`
+		// TLSCert / TLSKey 直接以 HTTPS 提供服务（PEM 路径）。
+		//
+		// 为什么需要：网关默认只监听明文 HTTP。公网部署时 api_key 与上游 access_token
+		// 都是明文过网，任何一跳都能读到——中转站的最低安全底线是"要么自己挂 TLS，
+		// 要么前面有反向代理终结 TLS"。两者都配（或都不配）才合法：只配一个是配置错误，
+		// 启动时直接报错，而不是静默降级成明文。
+		TLSCert string `json:"tls_cert"`
+		TLSKey  string `json:"tls_key"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -537,6 +545,10 @@ func (c *Config) normalize() error {
 		if c.Server.ShutdownTimeoutDur, err = parseDur("server.shutdown_timeout", st); err != nil {
 			return err
 		}
+	}
+	// TLS 必须成对配置：只给一个说明配置写错了，静默降级成明文比报错更危险。
+	if (strings.TrimSpace(c.Server.TLSCert) == "") != (strings.TrimSpace(c.Server.TLSKey) == "") {
+		return fmt.Errorf("server.tls_cert 与 server.tls_key 必须同时配置（当前只配了其中一个）")
 	}
 	if c.Server.ShutdownTimeoutDur <= 0 {
 		c.Server.ShutdownTimeoutDur = 15 * time.Second

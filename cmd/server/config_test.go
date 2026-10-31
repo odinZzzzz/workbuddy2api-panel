@@ -901,3 +901,34 @@ func TestShutdownTimeout(t *testing.T) {
 		t.Errorf("报错应带字段名与示例: %v", err)
 	}
 }
+
+// TLS 证书/私钥必须成对：只配一个要报错，而不是静默降级成明文。
+func TestTLSConfigMustBePaired(t *testing.T) {
+	dir := t.TempDir()
+	write := func(body string) string {
+		p := dir + "/c.json"
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// 只配 cert：必须报错
+	only := write(`{"api_key":"k","server":{"tls_cert":"/tmp/a.pem"}}`)
+	if _, err := Load(only); err == nil {
+		t.Fatal("只配 tls_cert 应报错（否则静默跑明文）")
+	}
+	// 只配 key：必须报错
+	onlyKey := write(`{"api_key":"k","server":{"tls_key":"/tmp/a.key"}}`)
+	if _, err := Load(onlyKey); err == nil {
+		t.Fatal("只配 tls_key 应报错")
+	}
+	// 成对：应当加载成功并保留字段
+	both := write(`{"api_key":"k","server":{"tls_cert":"/tmp/a.pem","tls_key":"/tmp/a.key"}}`)
+	c, err := Load(both)
+	if err != nil {
+		t.Fatalf("成对配置应加载成功: %v", err)
+	}
+	if c.Server.TLSCert == "" || c.Server.TLSKey == "" {
+		t.Errorf("TLS 字段未保留: %+v", c.Server)
+	}
+}

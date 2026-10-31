@@ -167,6 +167,30 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
 
+## 生产可靠性（中转站视角）
+
+把网关当"别人会依赖的中转站"时，下面这些是底线项。已实现（含回归测试）：
+
+| 项 | 行为 | 代码 |
+|---|---|---|
+| **panic 兜底** | handler 内 panic → 记录堆栈 + 返回 500 JSON（`internal_error`），不表现为"连接被重置"；已开流的响应只记录不篡改 | `handler.go: serveSafely` |
+| **可重试错误带 Retry-After** | 503（号池无可用号）→ `Retry-After: 5`；429（限流/配额）→ `30`。避免 SDK 立刻重试把流量放大 | `handler.go: retryAfterSeconds` |
+| **请求体上限** | 超过 256MB → `413 request_too_large`，而不是整读进内存把进程 OOM | `handler.go: maxClientBodyBytes` |
+| **TLS** | 配 `server.tls_cert` + `server.tls_key` 即直接提供 HTTPS（最低 TLS 1.2）；只配一个启动报错，不静默降级成明文 | `cmd/server/main.go: listenAndServe` |
+| **优雅退出** | SIGTERM 后停止接新请求，等在途请求收尾 `server.shutdown_timeout`（默认 15s），SSE 长流不被硬切 | `cmd/server/main.go` |
+| **探活语义** | `/healthz` 在"号池当前无法受理"时返回 503（与 chat 同口径），负载均衡不会把流量打进不可受理实例 | `handler.go: healthz` |
+| **客户端断开即取消上游** | 请求 ctx 一路传到上游调用，客户端断连立刻释放账号名额 | `handler.go` → `upstream.ChatStreamContext` |
+| **上游响应读取有界** | 错误体/辅助响应统一 `io.LimitReader(1<<20)`，不会因上游返回超大错误页撑爆内存 | `upstream/client.go` |
+| **鉴权常量时间** | api_key 比较走 SHA-256 + `subtle.ConstantTimeCompare`，不受时序攻击 | `internal/httpauth` |
+| **模型级权限拒绝不拖垮号池** | 11158 / 权限型 11102 → 拉黑该模型 + 从 `/v1/models` 移除 + 入口直接 400，不罚号不换号；黑名单**落盘**（`data/model_deny.json`），重启后仍生效 | `model_deny.go` |
+
+尚未实现（已知取舍，按需要再上）：
+
+- **SSE 心跳**：首字节等待期间不写 `: keepalive`。当前部署是客户端直连 7863（中间没有反代），不受
+  `proxy_read_timeout` 影响；若将来在前面挂 nginx/Cloudflare，需要补心跳或把超时调大。
+- **Prometheus 指标**：可观测性走面板 `/panel/api/*` 与请求归档（JSONL），没有 `/metrics` 端点。
+- **全局并发闸门**：有"单账号在途上限 + 令牌级 rpm/并发"，没有进程级总并发上限；单机单用户部署下够用。
+
 ## 🆚 与上游的差异
 
 本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,7 +15,7 @@ import (
 
 // 黑名单基本语义：拉黑、命中、过期、列表。
 func TestModelDenyListBasics(t *testing.T) {
-	d := newModelDenyList(time.Hour)
+	d := newModelDenyList(time.Hour, "")
 	if d.Denied("gemini-3.5-flash") {
 		t.Fatal("初始不该命中")
 	}
@@ -37,7 +38,7 @@ func TestModelDenyListBasics(t *testing.T) {
 	}
 
 	// 过期后自动失效
-	short := newModelDenyList(30 * time.Millisecond)
+	short := newModelDenyList(30*time.Millisecond, "")
 	short.Deny("x-model")
 	if !short.Denied("x-model") {
 		t.Fatal("刚拉黑应命中")
@@ -130,5 +131,45 @@ func TestChatDeniedModelFailsFast(t *testing.T) {
 	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(okBody)))
 	if rec2.Code == http.StatusBadRequest && strings.Contains(rec2.Body.String(), "model_not_allowed") {
 		t.Error("正常模型不该被拦")
+	}
+}
+
+// 黑名单必须能跨重启：否则每次发版后 /v1/models 又把不可用模型列出来，
+// 客户端再撞一次、号池再被跑空一遍。
+func TestModelDenyPersistsAcrossRestart(t *testing.T) {
+	path := t.TempDir() + "/model_deny.json"
+
+	// 第一次运行：拉黑然后"进程退出"
+	first := newModelDenyList(time.Hour, path)
+	first.Deny("global:gemini-3.5-flash")
+	if !first.Denied("gemini-3.5-flash") {
+		t.Fatal("同进程内应命中")
+	}
+
+	// 第二次运行：新实例从磁盘恢复
+	second := newModelDenyList(time.Hour, path)
+	if !second.Denied("gemini-3.5-flash") {
+		t.Fatal("重启后应仍然命中（否则 /v1/models 会重新列出不可用模型）")
+	}
+	if got := second.List(); len(got) != 1 {
+		t.Errorf("List=%v want 1 条", got)
+	}
+
+	// 过期项不该被恢复
+	third := newModelDenyList(time.Millisecond, path)
+	third.Deny("x-model")
+	time.Sleep(20 * time.Millisecond)
+	fourth := newModelDenyList(time.Hour, path)
+	if fourth.Denied("x-model") {
+		t.Error("已过期条目不该在重启后恢复")
+	}
+
+	// 文件损坏时按空表启动，不 panic、不阻塞
+	bad := t.TempDir() + "/bad.json"
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if newModelDenyList(time.Hour, bad).Denied("anything") {
+		t.Error("损坏文件应按空表处理")
 	}
 }
