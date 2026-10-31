@@ -1318,17 +1318,35 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
 
       <div class="box">
-        <header><h3>闸门（听觉）</h3><span class="grow"></span><span class="note">激活/静默是房间级：一个群被叫醒或被叫停，所有人共享</span></header>
+        <header><h3>闸门（听觉）</h3><span class="grow"></span><span class="note">激活/静默/冷静是房间级：一个群被叫醒或被叫停，所有人共享</span></header>
         <div class="pad">
           <div class="tok-form">
             <label class="fld"><span>激活期（秒）</span>
               <input id="qbActWin" type="number" min="0" placeholder="300" /></label>
             <label class="fld"><span>静默（秒）</span>
               <input id="qbSilence" type="number" min="0" placeholder="60" /></label>
+            <label class="fld"><span>冷静时长（秒）</span>
+              <input id="qbCalmSec" type="number" min="0" placeholder="300" /></label>
             <label class="fld wide"><span>激活词（逗号分隔）</span>
               <input id="qbActKw" type="text" placeholder="小八嘎,龙王,我去" /></label>
             <label class="fld wide"><span>中断词（逗号分隔）</span>
               <input id="qbIntKw" type="text" placeholder="闭嘴,退下" /></label>
+            <label class="fld wide"><span>冷静词（逗号分隔，需 @ 触发，优先级高于中断词）</span>
+              <input id="qbCalmKw" type="text" placeholder="冷静,安静点,别吵" /></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>bot 风控</h3><span class="grow"></span><span class="note">昵称命中特征即按 bot 处理：同一会话超轮数后高冷退场，冷却期内不再接话</span></header>
+        <div class="pad">
+          <div class="tok-form">
+            <label class="fld wide"><span>bot 昵称特征（逗号分隔，不区分大小写）</span>
+              <input id="qbBotPat" type="text" placeholder="bot,机器人,助手,gpt,ai" /></label>
+            <label class="fld"><span>同会话最多轮数</span>
+              <input id="qbBotRounds" type="number" min="0" placeholder="3" /></label>
+            <label class="fld"><span>退场冷却（秒）</span>
+              <input id="qbBotCool" type="number" min="0" placeholder="600" /></label>
           </div>
         </div>
       </div>
