@@ -67,6 +67,15 @@ type Config struct {
 	PersonaAltPrompt string `json:"persona_alt_prompt"`
 	// PersonaAltSeconds 龙王人格维持时长（秒），到期自动回到善良人格。
 	PersonaAltSeconds int `json:"persona_alt_seconds"`
+	// AngerThreshold 怒气上限/切换阈值（默认 100）。
+	AngerThreshold int `json:"anger_threshold"`
+	// AngerMildGain 轻度冒犯的怒气增量（默认 25）。
+	AngerMildGain int `json:"anger_mild_gain"`
+	// AngerDecay 正常/友善对话的怒气衰减（默认 12）。
+	AngerDecay int `json:"anger_decay"`
+	// MildKeywords 轻度冒犯词（阴阳怪气、轻微吐槽），攒怒气但不直接翻脸。
+	MildKeywords []string `json:"mild_keywords"`
+
 	// AttackKeywords 触发切龙王的关键词（被骂/挑衅）。
 	AttackKeywords []string `json:"attack_keywords"`
 
@@ -146,8 +155,13 @@ func Default() Config {
 		MaxReplyRunes:      1200,
 		TimeoutSeconds:     120,
 		PersonaAltSeconds:  600,
-		AttackKeywords: []string{"傻逼", "sb", "垃圾", "废物", "蠢", "弱智", "智障",
-			"白痴", "笨蛋", "你妈", "人工智障", "没用的东西", "狗东西", "滚蛋", "去死"},
+		AngerThreshold:     100,
+		AngerMildGain:      25,
+		AngerDecay:         12,
+		MildKeywords:       []string{"蠢", "垃圾", "sb", "笨蛋", "白痴", "没用", "烦人", "菜"},
+		// 只留明确的直接辱骂：蠢/垃圾/sb/笨蛋/白痴 这类容易误伤（"垃圾回收器"、
+		// "这设计真蠢"），一律不算攻击——宁可漏判，也不要动不动切龙王。
+		AttackKeywords: []string{"傻逼", "煞笔", "智障", "弱智", "你妈", "去死", "滚蛋", "狗东西", "人工智障", "蠢货"},
 		ToolsEnabled:   true,
 		MaxToolRounds:  3,
 		ProfileEnabled: true,
@@ -193,12 +207,23 @@ func (c *Config) normalize() {
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
 	}
+	if c.AngerThreshold <= 0 {
+		c.AngerThreshold = 100
+	}
+	if c.AngerMildGain <= 0 {
+		c.AngerMildGain = 25
+	}
+	if c.AngerDecay <= 0 {
+		c.AngerDecay = 12
+	}
+	if c.MildKeywords == nil {
+		c.MildKeywords = []string{"蠢", "垃圾", "sb", "笨蛋", "白痴", "没用", "烦人", "菜"}
+	}
 	if c.PersonaAltSeconds <= 0 {
 		c.PersonaAltSeconds = 600
 	}
 	if c.AttackKeywords == nil {
-		c.AttackKeywords = []string{"傻逼", "sb", "垃圾", "废物", "蠢", "弱智", "智障",
-			"白痴", "笨蛋", "你妈", "人工智障", "没用的东西", "狗东西", "滚蛋", "去死"}
+		c.AttackKeywords = []string{"傻逼", "煞笔", "智障", "弱智", "你妈", "去死", "滚蛋", "狗东西", "人工智障", "蠢货"}
 	}
 	if c.MaxToolRounds <= 0 {
 		c.MaxToolRounds = 3

@@ -315,7 +315,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(ps.Prompt) != "" {
 			prompt = ps.Prompt
 		}
-		log.Printf("[qqbot] persona=%s key=%s", ps.Mode, chatKey(&ev, false))
+		log.Printf("[qqbot] persona=%s anger=%d key=%s", ps.Mode, ps.Anger, chatKey(&ev, false))
 	}
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
