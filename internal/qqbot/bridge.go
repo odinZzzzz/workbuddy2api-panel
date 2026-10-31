@@ -37,8 +37,10 @@ type Bridge struct {
 }
 
 type chatMsg struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type session struct {
@@ -324,7 +326,7 @@ func (b *Bridge) allow(userID int64) bool {
 
 // reply 调网关拿回复并发出。
 func (b *Bridge) reply(ev *Event, key, name, text string) {
-	answer, err := b.chat(key, ev.UserID, text)
+	answer, err := b.chat(key, ev, text)
 	if err != nil {
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
@@ -365,58 +367,55 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 }
 
 // chat 走网关 /chat/completions（非流式），带会话历史。
-func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
+func (b *Bridge) chat(key string, ev *Event, userText string) (string, error) {
+	uid := ev.UserID
 	msgs := b.buildMessages(key, uid, userText)
-	payload := map[string]any{
-		"model":    b.cfg().Model,
-		"messages": msgs,
-		"stream":   false,
+
+	var tools *toolRegistry
+	if b.cfg().ToolsEnabled {
+		tools = b.buildTools()
 	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
+	rounds := b.cfg().MaxToolRounds
+	if rounds <= 0 {
+		rounds = 3
 	}
-	url := b.cfg().GatewayBase + "/chat/completions"
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(b.cfg().TimeoutSeconds)*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return "", err
+
+	answer := ""
+	for i := 0; i <= rounds; i++ {
+		msg, err := b.doChat(msgs, tools)
+		if err != nil {
+			return "", err
+		}
+		if len(msg.ToolCalls) == 0 || tools == nil {
+			answer = strings.TrimSpace(msg.Content)
+			break
+		}
+		// 把模型这次的工具请求写回对话，再逐条执行并回填结果
+		msgs = append(msgs, chatMsg{Role: "assistant", Content: msg.Content, ToolCalls: msg.ToolCalls})
+		for _, call := range msg.ToolCalls {
+			res, e := tools.exec(toolContext{ev: ev, b: b}, call)
+			if e != nil {
+				res = "执行失败：" + e.Error()
+				log.Printf("[qqbot] tool %s 失败: %v", call.Function.Name, e)
+			}
+			msgs = append(msgs, chatMsg{Role: "tool", Content: res, ToolCallID: call.ID})
+		}
+		if i == rounds {
+			// 轮数用尽：再要一次纯文本收尾，别把"我要调工具"当回复发出去
+			if msg2, e := b.doChat(msgs, nil); e == nil {
+				answer = strings.TrimSpace(msg2.Content)
+			}
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if b.cfg().GatewayKey != "" {
-		req.Header.Set("Authorization", "Bearer "+b.cfg().GatewayKey)
+	if strings.TrimSpace(answer) == "" {
+		answer = "……"
 	}
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("gateway %d: %s", resp.StatusCode, truncateRunes(string(body), 200))
-	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf("解析网关响应: %w", err)
-	}
-	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("网关返回空 choices")
-	}
-	answer := strings.TrimSpace(out.Choices[0].Message.Content)
 
 	// 聊成一轮 → 好感度 +1（封顶 100）
 	if b.mem != nil {
 		b.mem.AddAffinity(uid, AffinityPerChat)
 	}
-	// 抽「〔点评：…〕」存进记忆，并从**可见回复**里剥掉——点评是给系统记的内心活动，
-	// 每轮都甩给用户看会显得啰嗦（龙王嘴上刻薄，但没必要每句都附一行自我总结）。
+	// 抽「〔点评：…〕」存进记忆，并从**可见回复**里剥掉（点评是内心活动，不必每轮外发）
 	if v := extractVerdict(answer); v != "" {
 		if b.mem != nil {
 			b.mem.SetVerdict(uid, v)
@@ -425,9 +424,64 @@ func (b *Bridge) chat(key string, uid int64, userText string) (string, error) {
 			answer = strings.TrimSpace(stripped)
 		}
 	}
-	// 记入历史（只记成功的一轮）
 	b.appendHistory(key, userText, answer)
 	return answer, nil
+}
+
+// chatRespMsg 网关返回的 assistant 消息（含工具请求）。
+type chatRespMsg struct {
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls"`
+}
+
+// doChat 单次 chat/completions 调用；tools 非空时带上工具定义。
+func (b *Bridge) doChat(msgs []chatMsg, tools *toolRegistry) (chatRespMsg, error) {
+	var zero chatRespMsg
+	payload := map[string]any{
+		"model":    b.cfg().Model,
+		"messages": msgs,
+		"stream":   false,
+	}
+	if tools != nil && len(tools.defs) > 0 {
+		payload["tools"] = tools.defs
+		payload["tool_choice"] = "auto"
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return zero, err
+	}
+	url := b.cfg().GatewayBase + "/chat/completions"
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(b.cfg().TimeoutSeconds)*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return zero, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if b.cfg().GatewayKey != "" {
+		req.Header.Set("Authorization", "Bearer "+b.cfg().GatewayKey)
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return zero, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return zero, fmt.Errorf("gateway %d: %s", resp.StatusCode, truncateRunes(string(body), 200))
+	}
+	var out struct {
+		Choices []struct {
+			Message chatRespMsg `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return zero, fmt.Errorf("解析网关响应: %w", err)
+	}
+	if len(out.Choices) == 0 {
+		return zero, fmt.Errorf("网关返回空 choices")
+	}
+	return out.Choices[0].Message, nil
 }
 
 // buildMessages 组装请求消息：system + 历史 + 本轮。
@@ -794,19 +848,31 @@ func (b *Bridge) pickSticker() string {
 	return files[int(time.Now().UnixNano())%len(files)]
 }
 
-// matchesSticker 判断文本是否在要表情包。
+// matchesSticker 判断是不是"要库存表情"的**短指令**。
+//
+// 关键取舍：以前用子串匹配，结果"画一张鲸鱼娘表情包"也会命中"表情"→ 直接发库存图，
+// 模型永远收不到"想让你画"的请求。现在改成**精确匹配**（允许首尾标点/空格），
+// 并且凡是带"画"字的请求一律让给模型（它可以用 draw_sticker 工具现画）。
 func (b *Bridge) matchesSticker(text string) bool {
-	t := strings.ToLower(strings.TrimSpace(text))
+	t := stripDecorations(text)
 	if t == "" {
 		return false
 	}
+	if strings.Contains(t, "画") {
+		return false // 想画图 → 交给模型/工具，别用库存图糊弄
+	}
 	for _, kw := range b.cfg().StickerCommand {
-		kw = strings.ToLower(strings.TrimSpace(kw))
-		if kw != "" && strings.Contains(t, kw) {
+		if t == stripDecorations(kw) {
 			return true
 		}
 	}
 	return false
+}
+
+// stripDecorations 去掉首尾空白与常见标点/表情符号，用于短指令的精确比较。
+func stripDecorations(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.Trim(s, " \t\n\r，。！？!?~～、,.…：:；;\"'“”‘’()（）[]【】")
 }
 
 // sendSticker 发一张随机表情包（目录空则用文字兜底）。

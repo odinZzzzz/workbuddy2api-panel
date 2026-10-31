@@ -61,6 +61,11 @@ type Config struct {
 	ActivationKeywords []string `json:"activation_keywords"`
 	// ActivationWindowSeconds 激活期长度（秒），期间每说一句自动续期。
 	ActivationWindowSeconds int `json:"activation_window_seconds"`
+	// ToolsEnabled 是否给模型工具（自绘表情/发表情/戳一戳/查记忆/记笔记）；默认 true。
+	ToolsEnabled bool `json:"tools_enabled"`
+	// MaxToolRounds 单次对话内最多几轮工具调用（防死循环）。
+	MaxToolRounds int `json:"max_tool_rounds"`
+
 	// ProfileEnabled 是否拉群友画像（昵称/等级/签名/号位数）；默认 true。
 	ProfileEnabled bool `json:"profile_enabled"`
 
@@ -128,6 +133,8 @@ func Default() Config {
 		RatePerMinute:      6,
 		MaxReplyRunes:      1200,
 		TimeoutSeconds:     120,
+		ToolsEnabled:       true,
+		MaxToolRounds:      3,
 		ProfileEnabled:     true,
 		StickerCommand:     []string{"表情", "来个表情", "发表情"},
 		PokeBack:           true,
@@ -170,6 +177,9 @@ func (c *Config) normalize() {
 	c.OneBotAPI = strings.TrimRight(c.OneBotAPI, "/")
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
+	}
+	if c.MaxToolRounds <= 0 {
+		c.MaxToolRounds = 3
 	}
 	if c.StickerCommand == nil {
 		c.StickerCommand = []string{"表情", "来个表情", "发表情"}

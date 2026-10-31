@@ -34,11 +34,19 @@ func TestMatchesSticker(t *testing.T) {
 	cfg := Default()
 	cfg.StickerCommand = []string{"表情", "来个表情"}
 	b := New(cfg)
-	if !b.matchesSticker("来个表情") || !b.matchesSticker("发个 表情 看看") {
-		t.Error("应命中表情关键词")
+	if !b.matchesSticker("来个表情") || !b.matchesSticker("  来个表情！ ") {
+		t.Error("短指令应命中")
 	}
 	if b.matchesSticker("你好") {
 		t.Error("普通消息不该命中")
+	}
+	// 带"画"字的请求必须让给模型（否则 draw_sticker 永远没机会）
+	if b.matchesSticker("画一张鲸鱼娘表情包") || b.matchesSticker("帮我画个表情") {
+		t.Error("画图请求不该被库存表情规则截走")
+	}
+	// 长句里夹"表情"也不再命中（避免误触）
+	if b.matchesSticker("你刚才那个表情包挺好笑的") {
+		t.Error("长句不该命中短指令")
 	}
 }
 
