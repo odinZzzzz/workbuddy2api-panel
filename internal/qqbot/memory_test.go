@@ -42,7 +42,7 @@ func TestSummaryOf(t *testing.T) {
 
 	ev := &Event{MessageType: "group", GroupID: 1, UserID: 1001, SelfID: 3467208422}
 	got := b.summaryOf(ev, "", nil)
-	for _, want := range []string{"怪我咯", "1001", "见过 1 次", "龙王你好", "嘴硬心虚"} {
+	for _, want := range []string{"怪我咯", "见过 1 次", "龙王你好", "嘴硬心虚"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("总结缺 %q: %s", want, got)
 		}

@@ -353,7 +353,11 @@ func TestMemoryObserveDescribePersist(t *testing.T) {
 	m.Observe(1002, "别人", "我是路人")
 
 	d := m.Describe(941628696)
-	for _, want := range []string{"怪我咯", "941628696", "2 次", "昨天骂我"} {
+	// 用户要求：不要念 QQ 号，记忆里只留昵称
+	if strings.Contains(d, "941628696") {
+		t.Errorf("记忆片段不该出现 QQ 号: %s", d)
+	}
+	for _, want := range []string{"怪我咯", "2 次", "昨天骂我"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("记忆片段缺 %q: %s", want, d)
 		}

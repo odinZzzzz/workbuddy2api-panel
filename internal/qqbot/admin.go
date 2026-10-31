@@ -3,6 +3,7 @@ package qqbot
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -182,67 +183,53 @@ func (b *Bridge) adminState(w http.ResponseWriter, r *http.Request) {
 
 // adminSaveConfig POST /admin/api/config —— 保存并热生效（能热改的立刻生效）。
 func (b *Bridge) adminSaveConfig(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		SystemPrompt      *string  `json:"system_prompt"`
-		Model             *string  `json:"model"`
-		AllowedGroups     *[]int64 `json:"allowed_groups"`
-		AllowedUsers      *[]int64 `json:"allowed_users"`
-		NoAtGroups        *[]int64 `json:"no_at_groups"`
-		IgnoredUsers      *[]int64 `json:"ignored_users"`
-		RequireAtInGroup  *bool    `json:"require_at_in_group"`
-		RatePerMinute     *int     `json:"rate_per_minute"`
-		MaxReplyRunes     *int     `json:"max_reply_runes"`
-		MaxHistoryPairs   *int     `json:"max_history_pairs"`
-		SessionTTLMinutes *int     `json:"session_ttl_minutes"`
-		MemoryScope       *string  `json:"memory_scope"`
-		Enabled           *bool    `json:"enabled"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	// 通用合并：面板能改的字段远多于旧白名单（人设、激活词、知识库、图表字体…）。
+	// 之前只认 13 个字段，其它一律丢弃 → 面板点保存后回读还是旧值（"保存就还原"）。
+	// 现在把请求体当 patch，与当前配置做 JSON 层合并：只覆盖提交的键，其余保持不变。
+	var patch map[string]any
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&patch); err != nil {
 		writeAdminErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
+	if len(patch) == 0 {
+		writeAdminErr(w, http.StatusBadRequest, "empty patch")
+		return
+	}
 	cfg := b.currentConfig()
-	if in.SystemPrompt != nil {
-		cfg.SystemPrompt = *in.SystemPrompt
-	}
-	if in.Model != nil && strings.TrimSpace(*in.Model) != "" {
-		cfg.Model = strings.TrimSpace(*in.Model)
-	}
-	if in.AllowedGroups != nil {
-		cfg.AllowedGroups = *in.AllowedGroups
-	}
-	if in.AllowedUsers != nil {
-		cfg.AllowedUsers = *in.AllowedUsers
-	}
-	if in.NoAtGroups != nil {
-		cfg.NoAtGroups = *in.NoAtGroups
-	}
-	if in.IgnoredUsers != nil {
-		cfg.IgnoredUsers = *in.IgnoredUsers
-	}
-	if in.RequireAtInGroup != nil {
-		cfg.RequireAtInGroup = *in.RequireAtInGroup
-	}
-	if in.RatePerMinute != nil {
-		cfg.RatePerMinute = *in.RatePerMinute
-	}
-	if in.MaxReplyRunes != nil {
-		cfg.MaxReplyRunes = *in.MaxReplyRunes
-	}
-	if in.MaxHistoryPairs != nil {
-		cfg.MaxHistoryPairs = *in.MaxHistoryPairs
-	}
-	if in.SessionTTLMinutes != nil {
-		cfg.SessionTTLMinutes = *in.SessionTTLMinutes
-	}
-	if in.MemoryScope != nil && (*in.MemoryScope == "per_user" || *in.MemoryScope == "per_chat") {
-		cfg.MemoryScope = *in.MemoryScope
-	}
-	if in.Enabled != nil {
-		cfg.Enabled = *in.Enabled
-	}
-	cfg.normalize()
 
+	// 当前配置 → map → 合并 patch → 回结构体（未知键自然被忽略，已知键全部生效）
+	curRaw, err := json.Marshal(cfg)
+	if err != nil {
+		writeAdminErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(curRaw, &merged); err != nil {
+		writeAdminErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for k, v := range patch {
+		// 只接受配置里真实存在的键，避免写入垃圾字段
+		if _, ok := merged[k]; !ok {
+			continue
+		}
+		merged[k] = v
+	}
+	outRaw, err := json.Marshal(merged)
+	if err != nil {
+		writeAdminErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var next Config
+	if err := json.Unmarshal(outRaw, &next); err != nil {
+		writeAdminErr(w, http.StatusBadRequest, "config decode: "+err.Error())
+		return
+	}
+	// model 不允许被清空（清空等于停摆）
+	if strings.TrimSpace(next.Model) == "" {
+		next.Model = cfg.Model
+	}
+	cfg = next
 	b.applyConfig(cfg)
 	if err := b.saveConfig(); err != nil {
 		writeAdminErr(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())

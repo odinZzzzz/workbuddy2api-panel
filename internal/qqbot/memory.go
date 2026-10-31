@@ -137,7 +137,7 @@ func (m *Memory) Describe(uid int64) string {
 	if name == "" {
 		name = "（无名）"
 	}
-	fmt.Fprintf(&b, "你记得这个凡人：%s（QQ %d），已见过 %d 次", name, uid, u.Count)
+	fmt.Fprintf(&b, "你记得这个凡人：%s，已见过 %d 次", name, u.Count)
 	if !u.FirstSeen.IsZero() {
 		fmt.Fprintf(&b, "，第一次是 %s", u.FirstSeen.Format("2006-01-02"))
 	}

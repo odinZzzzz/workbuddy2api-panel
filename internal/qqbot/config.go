@@ -272,7 +272,7 @@ func (c *Config) normalize() {
 		c.SilenceSeconds = 60
 	}
 	if c.ActivationKeywords == nil {
-		c.ActivationKeywords = []string{"小八嘎", "龙王"}
+		c.ActivationKeywords = []string{"小八嘎", "龙王", "我去"}
 	}
 	if c.InterruptKeywords == nil {
 		c.InterruptKeywords = []string{"闭嘴", "退下", "别说了", "安静", "/stop"}

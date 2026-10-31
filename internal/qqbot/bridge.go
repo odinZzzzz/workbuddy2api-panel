@@ -266,10 +266,10 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	if others := otherAtTargets(atTargets, ev.SelfID); len(others) > 0 {
 		var names []string
 		for _, uid := range others {
-			names = append(names, itoa(uid))
+			names = append(names, b.nickOf(uid))
 		}
-		text = text + "（本条 @ 了 QQ " + strings.Join(names, "、") + "，如果要对" +
-			"这些人说话/总结，就用他们的 QQ 号）"
+		text = text + "（本条还 @ 了：" + strings.Join(names, "、") +
+			"，要提到他们就直呼其名，别念 QQ 号）"
 	}
 
 	// 表情包：命中关键词就发一张（不消耗模型额度）
@@ -551,6 +551,10 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 		compact := truncateRunes(strings.ReplaceAll(persona, "\n", " "), 160)
 		userText = "（人设提醒，务必遵守：" + compact + "）\n\n" + userText
 	}
+	// 把说话人的称呼告诉模型：否则它只能用"你"或念号码（用户明确要求别念 QQ 号）
+	if nick := b.nickOf(uid); nick != "" && nick != "那位" {
+		userText = "（说话人：" + nick + "）\n" + userText
+	}
 
 	system := strings.Join(parts, "\n\n")
 	if system != "" {
@@ -757,14 +761,14 @@ func (b *Bridge) summaryOf(ev *Event, arg string, atTargets []int64) string {
 	}
 	u, ok := b.mem.Lookup(target)
 	if !ok || (u.Count == 0 && len(u.Notes) == 0) {
-		return "嗤，一个本王毫无印象的蝼蚁（" + strconv.FormatInt(target, 10) + "）。"
+		return "嗤，一个本王毫无印象的蝼蚁。"
 	}
 	name := u.Nick
 	if name == "" {
 		name = "无名凡人"
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "嗤，%s（%d）：见过 %d 次", name, target, u.Count)
+	fmt.Fprintf(&sb, "嗤，%s：见过 %d 次", name, u.Count)
 	if !u.FirstSeen.IsZero() {
 		fmt.Fprintf(&sb, "，首见 %s", u.FirstSeen.Format("2006-01-02"))
 	}
@@ -1019,6 +1023,10 @@ const layoutGuide = `【改枪码】
   密码 → chart_password；制造/材料/子弹 → chart_market；活动 → chart_events。
 - 文字给结论和要点，图片给直观对比，两者不重复堆砌（图上有的，文字只提关键一条）。
 
+【称呼规则】
+- 称呼人一律用**群昵称或 QQ 昵称**，不要念 QQ 号（数字串在群里既难读又像查户口）。
+- 不知道对方叫什么就直接说「你」，别用「123456789」这种号码代称。
+
 【排版规则】
 - QQ 是**纯文本**，不支持任何富文本/Markdown：
   禁止 **加粗星号**、反引号、# 井号标题、| --- | 表格线、[]() 链接语法、> 引用、--- 分割线。
@@ -1038,4 +1046,15 @@ func (b *Bridge) kkrbOverview() (*KkrbOverview, error) {
 	}
 	ttl := time.Duration(b.cfg().KkrbCacheMinutes) * time.Minute
 	return kkrbSingleton.Overview(ttl)
+}
+
+// nickOf 取某个 QQ 的**称呼**（群昵称/QQ 昵称），取不到就给个模糊说法。
+// 用户明确要求：不要念别人的 QQ 号。
+func (b *Bridge) nickOf(uid int64) string {
+	if b.mem != nil {
+		if u, ok := b.mem.Lookup(uid); ok && strings.TrimSpace(u.Nick) != "" {
+			return u.Nick
+		}
+	}
+	return "那位"
 }
