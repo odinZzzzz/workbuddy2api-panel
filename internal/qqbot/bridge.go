@@ -190,6 +190,10 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(images) > 0 {
+		// 顺手收藏群聊表情（异步，失败静默；只存普通图片，mface 无图源会跳过）
+		go b.collectStickers(images)
+	}
+	if len(images) > 0 {
 		// 模型看不到图，但必须知道"有人发了图"，否则答非所问。
 		marker := "[图片×" + itoa(int64(len(images))) + "]"
 		if !strings.Contains(text, marker) {
@@ -965,6 +969,8 @@ func (b *Bridge) pickSticker() string {
 			files = append(files, filepath.Join(dir, e.Name()))
 		}
 	}
+	// 加上群聊里收藏的表情
+	files = append(files, collectedStickers(dir)...)
 	if len(files) == 0 {
 		return ""
 	}

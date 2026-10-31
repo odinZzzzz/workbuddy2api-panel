@@ -102,6 +102,12 @@ type Config struct {
 	// StickerTemplateDir 自定义 SVG 模板目录（同名 .svg 覆盖内置名画模板）。
 	StickerTemplateDir string `json:"sticker_template_dir"`
 
+	// DisableStickerCollect 关掉"收藏群聊表情"（默认 false = 开启）。
+	// 用反向布尔：正向 bool 在旧配置文件里缺键时零值是 false，会把功能默认关掉（踩过）。
+	DisableStickerCollect bool `json:"disable_sticker_collect"`
+	// StickerCollectMaxKB 收藏单张图片的大小上限（KB，默认 1024）。
+	StickerCollectMaxKB int `json:"sticker_collect_max_kb"`
+
 	// StickerDir 表情包目录（本地图片，随机挑一张发）；空 = 不支持发表情。
 	StickerDir string `json:"sticker_dir"`
 	// StickerCommand 发表情包的关键词（默认「表情」「来个表情」）。

@@ -351,6 +351,7 @@ keys: M700, M700改枪, M700配装, M700改枪码, M700码
 | `kkrb_enabled` / `kkrb_cache_minutes` | `true` / 10 | 实时数据源与缓存 |
 | `profile_enabled` | `true` | 是否拉群友画像（昵称/等级/签名/号位数） |
 | `sticker_dir` / `sticker_command` | — / `表情,来个表情,发表情` | 表情包目录与**短指令**（精确匹配，带「画」字让给模型） |
+| `disable_sticker_collect` / `sticker_collect_max_kb` | `false` / 1024 | **收藏群聊表情**：收到的图片自动存进 `sticker_dir/collected/`（内容哈希去重、限大小），`send_sticker` 会一起随机挑。用反向布尔是因为正向 bool 在旧配置缺键时零值会把功能默认关掉 |
 | `poke_back` / `poke_reply` | `true` / — | 被戳时回戳与回话 |
 | `chart_font` | simhei.ttf | 画图用的字体（`.ttc` 集合字体解析不了，要用 `.ttf`） |
 
