@@ -2,6 +2,7 @@ package qqbot
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -396,5 +397,67 @@ func TestChatKeyPerUser(t *testing.T) {
 	}
 	if chatKey(a, true) != "group:992511553:u:1" {
 		t.Errorf("会话键格式不符: %s", chatKey(a, true))
+	}
+}
+
+// 激活/静默是**房间级**：A 激活后，B 在同一群里说话也应被受理。
+// 回归背景：早期闸门键含 uid，A 喊了激活词、B 再说话仍是 idle，看起来像"激活了没反应"。
+func TestGateIsRoomScoped(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"嗤。"}}]}`)
+	}))
+	defer gw.Close()
+	ob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ok","retcode":0}`)
+	}))
+	defer ob.Close()
+
+	cfg := Default()
+	cfg.Enabled = true
+	cfg.GatewayBase = gw.URL
+	cfg.OneBotAPI = ob.URL
+	cfg.MemoryFile = ""
+	cfg.ProfileEnabled = false
+	cfg.ToolsEnabled = false
+	cfg.AllowedGroups = []int64{992511553}
+	cfg.NoAtGroups = []int64{992511553}
+	cfg.ActivationKeywords = []string{"小八嘎"}
+	b := New(cfg)
+	srv := httptest.NewServer(b.Handler())
+	defer srv.Close()
+
+	post := func(uid int64, nick, text string) {
+		body := fmt.Sprintf(`{"post_type":"message","message_type":"group","group_id":992511553,
+			"user_id":%d,"self_id":3467208422,"sender":{"nickname":%q},
+			"message":[{"type":"text","data":{"text":%q}}]}`, uid, nick, text)
+		resp, err := http.Post(srv.URL+"/onebot", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		resp.Body.Close()
+	}
+
+	post(1001, "甲", "小八嘎") // A 激活房间
+	time.Sleep(300 * time.Millisecond)
+	post(1002, "乙", "今天吃啥") // B 说话：房间已激活 → 应受理
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := calls
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls < 2 {
+		t.Fatalf("房间激活后，另一个用户的消息也应触发回复，实际只调用 %d 次", calls)
 	}
 }

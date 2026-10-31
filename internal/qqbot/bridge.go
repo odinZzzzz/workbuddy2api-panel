@@ -227,8 +227,13 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 
 	// 激活闸门只作用于群聊：私聊是"直接找上门"，再要求激活词等于把门焊死。
 	// 私聊仍受静默/冷静约束（用户自己叫停的场合），所以走 Decide 但忽略 idle 结果。
+	//
+	// 闸门作用域是**房间**（group:<gid>），不是「房间+人」：群里 A 喊了"小八嘎"，
+	// 龙王应当跟整个房间聊一会儿，而不是只有 A 说话才算数——按人隔离会让人觉得
+	// "激活了但没反应"（记忆/上下文才按人隔离，见 chatKey）。
 	if b.gate != nil {
-		d := b.gate.Decide(b.cfg(), key, text, atBot)
+		gateKey := chatKey(&ev, false)
+		d := b.gate.Decide(b.cfg(), gateKey, text, atBot)
 		// 私聊里 idle 视为放行（不需要激活词）；silent/calm/interrupted 仍然生效
 		if ev.MessageType == "private" && d.Reason == "idle" {
 			d.Allow = true
@@ -250,7 +255,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 			b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 				User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)),
 				Action: "gate_" + d.Reason})
-			log.Printf("[qqbot] gate: %s 不放行（%s）user=%d", key, d.Reason, ev.UserID)
+			log.Printf("[qqbot] gate: %s 不放行（%s）user=%d", gateKey, d.Reason, ev.UserID)
 			return
 		}
 	}
