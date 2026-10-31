@@ -75,11 +75,11 @@ type Config struct {
 
 	// PersonaDefaultPrompt 默认人格（善良热心好青年）的 system prompt。
 	PersonaDefaultPrompt string `json:"persona_default_prompt"`
-	// PersonaAltPrompt 备用人格（龙王）的 system prompt，被攻击时切换。
+	// PersonaAltPrompt 已下线（单人格：病娇龙王；字段保留仅兼容旧配置）。
 	PersonaAltPrompt string `json:"persona_alt_prompt"`
-	// PersonaAltSeconds 龙王人格维持时长（秒），到期自动回到善良人格。
+	// PersonaAltSeconds 已下线。
 	PersonaAltSeconds int `json:"persona_alt_seconds"`
-	// AngerThreshold 怒气上限/切换阈值（默认 100）。
+	// AngerThreshold 已下线。
 	AngerThreshold int `json:"anger_threshold"`
 	// AngerMildGain 轻度冒犯的怒气增量（默认 25）。
 	AngerMildGain int `json:"anger_mild_gain"`

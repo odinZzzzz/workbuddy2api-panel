@@ -247,9 +247,26 @@ NapCat 侧把**反向 WebSocket/HTTP 上报**指向 `http://127.0.0.1:8090/onebo
 | **激活闸门** | 群里默认只听「激活词」或 `@`；激活后进入滑动窗口，过期回到 idle | `activation_keywords` / `activation_window_seconds` |
 | **静默 / 冷静** | 「闭嘴」类词 → 静默 N 秒；`@`+冷静词 → 冷静更久。期间**任何消息都不处理** | `interrupt_keywords` / `silence_seconds` / `calm_keywords` / `calm_seconds` |
 | **作用域** | 闸门是**房间级**（`group:<gid>`）；上下文与记忆是**个人级**（`group:<gid>:u:<uid>`） | — |
-| **双人格** | 默认「善良热心好青年」；**怒气攒满 100** 才切「龙王」，友善对话每句 −12，掉到 50 以下自动回落 | `persona_default_prompt` / `persona_alt_prompt` / `anger_threshold` / `anger_mild_gain` / `anger_decay` |
+| **单人格** | 固定「病娇龙王」：偏执独占 + 暴躁黏人（自称本王、先损一句、吃醋、玩笑式威胁），正文 ≤80 字、收尾带〔点评〕。怒气/双人格切换已下线 | `persona_default_prompt` |
 | **bot 对话风控** | 识别到对方像机器人（昵称特征）→ 同一会话最多 3 轮，之后高冷退场 | `bot_patterns` / `bot_round_limit` / `bot_cooldown_seconds` |
 | **私聊** | 不受激活词限制（直接找上门），但仍受静默约束 | — |
+
+### 人设依从性（实测坑）
+
+模型对**消息位置**的敏感度远超预期，实测结论：
+
+| 人设放在 | 结果 |
+|---|---|
+| system 开头 | 被后面的排版/工具说明稀释 → 回「我是你的三角洲行动小助手…」 |
+| system 末尾 + 身份锚定 | 仍然不服从（会描述自己有哪些工具） |
+| **user 消息前缀** | ✅ 立刻恢复龙王腔（含「本王」/〔点评〕），数据类问题也照常调工具 |
+
+所以桥里会把压缩后的人设（≤160 字）拼在本轮 user 消息前面：`（人设提醒，务必遵守：…）`。
+system 里仍保留完整人设，两者不冲突。
+
+> 另一个易踩的坑：网关若跑在 `prompt.mode=custom`，会用自有提示词**替换掉客户端全部 system 消息**
+> （`internal/prompt.Rewrite` 会删除所有 system/developer 再插入自己的）；bot 要用人设必须
+> `prompt.mode=passthrough` 或 `append`。
 
 ### 记忆与好感度
 

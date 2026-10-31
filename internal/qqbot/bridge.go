@@ -34,7 +34,6 @@ type Bridge struct {
 	state    *adminState
 	gate     *Gate
 	botGuard *BotGuard
-	persona  *Persona
 	cfgPath  string
 }
 
@@ -73,7 +72,6 @@ func New(cfg Config) *Bridge {
 		state:    &adminState{startedAt: time.Now()},
 		gate:     NewGate(),
 		botGuard: NewBotGuard(),
-		persona:  NewPersona(),
 	}
 	br.cfgPtr.Store(&cp)
 	return br
@@ -309,15 +307,8 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// 顺手刷新画像（昵称/等级/签名/号位数）：异步、一天一次，失败静默。
 	b.refreshProfileAsync(ev.UserID)
-	// 双人格：默认善良好青年，被攻击才切龙王（按房间，到期自动回落）
+	// 单人格：恒用配置里的默认人格（病娇龙王；怒气/双人格切换已下线）
 	prompt := b.cfg().PersonaDefaultPrompt
-	if b.persona != nil {
-		ps := b.persona.Decide(b.cfg(), chatKey(&ev, false), text)
-		if strings.TrimSpace(ps.Prompt) != "" {
-			prompt = ps.Prompt
-		}
-		log.Printf("[qqbot] persona=%s anger=%d key=%s", ps.Mode, ps.Anger, chatKey(&ev, false))
-	}
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
 	go b.reply(&ev, key, name, text, atTargets, prompt)
@@ -526,29 +517,44 @@ func (b *Bridge) buildMessages(key string, uid int64, userText string) []chatMsg
 // （双人格切换时由调用方传入；空 = 用配置里的 SystemPrompt 兜底）。
 func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, personaPrompt string) []chatMsg {
 	out := make([]chatMsg, 0, 2*b.cfg().MaxHistoryPairs+2)
-	system := strings.TrimSpace(personaPrompt)
-	if system == "" {
-		system = strings.TrimSpace(b.cfg().SystemPrompt)
+
+	persona := strings.TrimSpace(personaPrompt)
+	if persona == "" {
+		persona = strings.TrimSpace(b.cfg().SystemPrompt)
 	}
-	// 把"你记得这个凡人"拼进 system：人设连续性靠它（同一人多轮之间记得住）。
+
+	// 组装顺序很重要：**人设放最后**。
+	// 实测：人设写在最前面时，模型会跟随后面的排版规则/工具说明，用"助手"口吻回答
+	// （"我是你的三角洲行动小助手…"）；挪到末尾后依从性明显提高（近因效应）。
+	var parts []string
 	if b.mem != nil {
 		if memo := b.mem.Describe(uid); memo != "" {
-			if system != "" {
-				system += "\n\n" + memo
-			} else {
-				system = memo
-			}
+			parts = append(parts, memo)
 		}
 	}
-	// 排版规则：知识类回答要分行，别把列表压成一句话（QQ 不渲染 Markdown，但换行有效）
-	system += "\n\n" + layoutGuide
-	// 预设知识库放**最后**（近因效应：模型对末尾内容依从性最高；之前放前面它当耳旁风）
+	parts = append(parts, layoutGuide)
 	if b.cfg().KBEnabled {
 		if kb := b.kbContext(userText); kb != "" {
-			system += "\n\n" + kb
+			parts = append(parts, kb)
 		}
 	}
+	if persona != "" {
+		parts = append(parts, persona)
+	}
+	parts = append(parts, "【身份锚定】你就是「龙王」，不是助手、不是机器人。以上所有规则都要用龙王的语气执行："+
+		"自称本王、先损一句、黏人又暴躁；数据类问题照常调工具拿真数据，但说话方式必须是龙王。")
+
+	// 人设「提醒」拼进本轮 user 消息（模型对 user 指令依从性最高）。
+	// 实测：只写在 system 里时，模型会跟随后面的工具/排版说明，用「助手」口吻回答；
+	// 同样的内容放到 user 前缀，立刻恢复龙王腔（含本王/点评）。
+	if persona != "" {
+		compact := truncateRunes(strings.ReplaceAll(persona, "\n", " "), 160)
+		userText = "（人设提醒，务必遵守：" + compact + "）\n\n" + userText
+	}
+
+	system := strings.Join(parts, "\n\n")
 	if system != "" {
+		log.Printf("[qqbot] sys head=%q len=%d", truncateRunes(system, 40), len([]rune(system)))
 		out = append(out, chatMsg{Role: "system", Content: system})
 	}
 	b.mu.Lock()
@@ -993,14 +999,6 @@ func otherAtTargets(at []int64, self int64) []int64 {
 		}
 	}
 	return out
-}
-
-// personaSnapshot 供后台展示双人格状态。
-func (b *Bridge) personaSnapshot() []PersonaView {
-	if b.persona == nil {
-		return nil
-	}
-	return b.persona.Snapshot()
 }
 
 // layoutGuide 排版规则（对所有回答生效）。
