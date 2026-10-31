@@ -165,6 +165,28 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return fmt.Sprintf("已画出柱状图（%d 条数据）并发到当前会话", len(in.Items)), nil
 		})
 
+	add("official_news", "查三角洲行动官网（df.qq.com）最新内容流（视频/赛事/干员档案等，带标题+日期+详情链接）。注意：官网「公告/新闻」列表走的是另一套组件、接口取不到，所以问「更新公告」时用它+官网链接一起回答，别编造公告内容。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			ttl := time.Duration(tc.b.cfg().KkrbCacheMinutes) * time.Minute
+			list, err := dfSingleton.News(ttl)
+			if err != nil {
+				return "", fmt.Errorf("查官网资讯失败: %w", err)
+			}
+			var sb strings.Builder
+			sb.WriteString("官网最新内容：\n")
+			for i, n := range list {
+				if i >= 6 {
+					break
+				}
+				fmt.Fprintf(&sb, "- [%s] %s（%s）\n", n.Type, n.Title, n.Date)
+				if n.URL != "" {
+					sb.WriteString("  " + n.URL + "\n")
+				}
+			}
+			return sb.String(), nil
+		})
+
 	add("chart_password", "把今日地图密码画成图片（图名 + 四位数字，方便照着抄）。有人问密码、密码门时配合 daily_password 一起发。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
