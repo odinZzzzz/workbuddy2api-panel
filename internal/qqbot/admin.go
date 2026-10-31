@@ -173,6 +173,7 @@ func (b *Bridge) adminState(w http.ResponseWriter, r *http.Request) {
 		"recent":    recent,
 		"memory":    mems,
 		"gate":      b.gateSnapshot(),
+		"persona":   b.personaSnapshot(),
 		"botguard":  b.botGuardSnapshot(),
 		"startedAt": started.Format(time.RFC3339),
 	}

@@ -33,6 +33,7 @@ type Bridge struct {
 	state    *adminState
 	gate     *Gate
 	botGuard *BotGuard
+	persona  *Persona
 	cfgPath  string
 }
 
@@ -71,6 +72,7 @@ func New(cfg Config) *Bridge {
 		state:    &adminState{startedAt: time.Now()},
 		gate:     NewGate(),
 		botGuard: NewBotGuard(),
+		persona:  NewPersona(),
 	}
 	br.cfgPtr.Store(&cp)
 	return br
@@ -306,9 +308,18 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// 顺手刷新画像（昵称/等级/签名/号位数）：异步、一天一次，失败静默。
 	b.refreshProfileAsync(ev.UserID)
+	// 双人格：默认善良好青年，被攻击才切龙王（按房间，到期自动回落）
+	prompt := b.cfg().PersonaDefaultPrompt
+	if b.persona != nil {
+		ps := b.persona.Decide(b.cfg(), chatKey(&ev, false), text)
+		if strings.TrimSpace(ps.Prompt) != "" {
+			prompt = ps.Prompt
+		}
+		log.Printf("[qqbot] persona=%s key=%s", ps.Mode, chatKey(&ev, false))
+	}
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
-	go b.reply(&ev, key, name, text, atTargets)
+	go b.reply(&ev, key, name, text, atTargets, prompt)
 }
 
 // allow 令牌桶限速：每用户每分钟 RatePerMinute 次（0 = 不限）。
@@ -341,8 +352,8 @@ func (b *Bridge) allow(userID int64) bool {
 }
 
 // reply 调网关拿回复并发出。
-func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64) {
-	answer, err := b.chat(key, ev, text, atTargets)
+func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64, prompt string) {
+	answer, err := b.chat(key, ev, text, atTargets, prompt)
 	if err != nil {
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
@@ -351,6 +362,7 @@ func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64) {
 	if strings.TrimSpace(answer) == "" {
 		return
 	}
+	log.Printf("[qqbot] reply → %s: %s", key, truncateRunes(strings.ReplaceAll(answer, "\n", " / "), 120))
 	if err := b.send(ev, answer); err != nil {
 		log.Printf("[qqbot] send failed key=%s: %v", key, err)
 	}
@@ -385,9 +397,9 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 }
 
 // chat 走网关 /chat/completions（非流式），带会话历史。
-func (b *Bridge) chat(key string, ev *Event, userText string, atTargets []int64) (string, error) {
+func (b *Bridge) chat(key string, ev *Event, userText string, atTargets []int64, prompt string) (string, error) {
 	uid := ev.UserID
-	msgs := b.buildMessages(key, uid, userText)
+	msgs := b.buildMessagesWithPrompt(key, uid, userText, prompt)
 
 	var tools *toolRegistry
 	if b.cfg().ToolsEnabled {
@@ -505,8 +517,17 @@ func (b *Bridge) doChat(msgs []chatMsg, tools *toolRegistry) (chatRespMsg, error
 
 // buildMessages 组装请求消息：system + 历史 + 本轮。
 func (b *Bridge) buildMessages(key string, uid int64, userText string) []chatMsg {
+	return b.buildMessagesWithPrompt(key, uid, userText, "")
+}
+
+// buildMessagesWithPrompt 同 buildMessages，但可指定本次使用的人格 prompt
+// （双人格切换时由调用方传入；空 = 用配置里的 SystemPrompt 兜底）。
+func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, personaPrompt string) []chatMsg {
 	out := make([]chatMsg, 0, 2*b.cfg().MaxHistoryPairs+2)
-	system := strings.TrimSpace(b.cfg().SystemPrompt)
+	system := strings.TrimSpace(personaPrompt)
+	if system == "" {
+		system = strings.TrimSpace(b.cfg().SystemPrompt)
+	}
 	// 把"你记得这个凡人"拼进 system：人设连续性靠它（同一人多轮之间记得住）。
 	if b.mem != nil {
 		if memo := b.mem.Describe(uid); memo != "" {
@@ -917,4 +938,12 @@ func otherAtTargets(at []int64, self int64) []int64 {
 		}
 	}
 	return out
+}
+
+// personaSnapshot 供后台展示双人格状态。
+func (b *Bridge) personaSnapshot() []PersonaView {
+	if b.persona == nil {
+		return nil
+	}
+	return b.persona.Snapshot()
 }

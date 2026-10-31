@@ -61,6 +61,15 @@ type Config struct {
 	ActivationKeywords []string `json:"activation_keywords"`
 	// ActivationWindowSeconds 激活期长度（秒），期间每说一句自动续期。
 	ActivationWindowSeconds int `json:"activation_window_seconds"`
+	// PersonaDefaultPrompt 默认人格（善良热心好青年）的 system prompt。
+	PersonaDefaultPrompt string `json:"persona_default_prompt"`
+	// PersonaAltPrompt 备用人格（龙王）的 system prompt，被攻击时切换。
+	PersonaAltPrompt string `json:"persona_alt_prompt"`
+	// PersonaAltSeconds 龙王人格维持时长（秒），到期自动回到善良人格。
+	PersonaAltSeconds int `json:"persona_alt_seconds"`
+	// AttackKeywords 触发切龙王的关键词（被骂/挑衅）。
+	AttackKeywords []string `json:"attack_keywords"`
+
 	// ToolsEnabled 是否给模型工具（自绘表情/发表情/戳一戳/查记忆/记笔记）；默认 true。
 	ToolsEnabled bool `json:"tools_enabled"`
 	// MaxToolRounds 单次对话内最多几轮工具调用（防死循环）。
@@ -136,12 +145,15 @@ func Default() Config {
 		RatePerMinute:      6,
 		MaxReplyRunes:      1200,
 		TimeoutSeconds:     120,
-		ToolsEnabled:       true,
-		MaxToolRounds:      3,
-		ProfileEnabled:     true,
-		StickerCommand:     []string{"表情", "来个表情", "发表情"},
-		PokeBack:           true,
-		PokeReply:          "戳什么戳？手痒就跪下。",
+		PersonaAltSeconds:  600,
+		AttackKeywords: []string{"傻逼", "sb", "垃圾", "废物", "蠢", "弱智", "智障",
+			"白痴", "笨蛋", "你妈", "人工智障", "没用的东西", "狗东西", "滚蛋", "去死"},
+		ToolsEnabled:   true,
+		MaxToolRounds:  3,
+		ProfileEnabled: true,
+		StickerCommand: []string{"表情", "来个表情", "发表情"},
+		PokeBack:       true,
+		PokeReply:      "戳什么戳？手痒就跪下。",
 	}
 }
 
@@ -180,6 +192,13 @@ func (c *Config) normalize() {
 	c.OneBotAPI = strings.TrimRight(c.OneBotAPI, "/")
 	if strings.TrimSpace(c.Model) == "" {
 		c.Model = "cn:deepseek-v4-flash"
+	}
+	if c.PersonaAltSeconds <= 0 {
+		c.PersonaAltSeconds = 600
+	}
+	if c.AttackKeywords == nil {
+		c.AttackKeywords = []string{"傻逼", "sb", "垃圾", "废物", "蠢", "弱智", "智障",
+			"白痴", "笨蛋", "你妈", "人工智障", "没用的东西", "狗东西", "滚蛋", "去死"}
 	}
 	if c.MaxToolRounds <= 0 {
 		c.MaxToolRounds = 3
