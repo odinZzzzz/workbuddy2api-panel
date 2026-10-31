@@ -187,6 +187,31 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return sb.String(), nil
 		})
 
+	add("gunsmith_code", "查改枪码（抖音博主 always聪聪 最新视频里的配置，覆盖 20+ 枪型）。weapon 传枪名或关键词，如 M700 / MK47 / M7。返回内容**原样输出**：变体名 + 码 + 视频链接，不要重排、不要改写码。",
+		obj(map[string]any{
+			"weapon": map[string]any{"type": "string", "description": "枪名或关键词，如 M700 / MK47；不传=列出全部"},
+		}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				Weapon string `json:"weapon"`
+			}
+			_ = json.Unmarshal(args, &in)
+			if text, ok := tc.b.gunsmithCard(in.Weapon); ok {
+				return text, nil
+			}
+			return "知识库里没有这把枪的码。可用 gunsmith_card_list 看收录了哪些枪。", nil
+		})
+
+	add("gunsmith_card_list", "列出知识库里收录了哪些枪型的改枪码（含每把枪的套数）。返回的是「- 枪名：N 套」列表，**原样输出**，不要重排成表格或合并列。",
+		obj(map[string]any{}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			text, ok := tc.b.gunsmithCard("")
+			if !ok {
+				return "知识库里还没有改枪码卡片", nil
+			}
+			return text, nil
+		})
+
 	add("chart_password", "把今日地图密码画成图片（图名 + 四位数字，方便照着抄）。有人问密码、密码门时配合 daily_password 一起发。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {

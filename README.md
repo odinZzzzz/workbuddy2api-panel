@@ -184,6 +184,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
 | **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
 | **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
+| **QQ 机器人桥** | `internal/qqbot`，纯 `net/http` 单二进制：NapCat/OneBot v11 → 网关。激活闸门（房间级）、双人格+怒气值、bot 对话风控、个人记忆与好感度、function calling 工具、知识库（`kb_dir` 热更新）、kkrb 实时数据、图文卡片与 SVG 自绘表情包、面板内管理视图。详见 [QQ 机器人](#-qq-机器人internalqqbot) |
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
 | **原生工具调用标记还原** | 上游（DeepSeek 系）的工具调用原生语法是带全角竖线的标记文本，**仅在请求声明了 `tools` 时**才被上游解析成结构化 `tool_calls`。实测 `tools` 声明在中转环节（Responses → chat/completions 等）丢失是常态，此时模型仍想调工具，标记就以纯文本落进 `content`——Codex 这类只执行结构化 `function_call` 的客户端会把它当普通正文写进会话历史，回合直接结束、工具一次都没跑。网关在出站响应里识别并还原成 `tool_calls`（流式与非流式都覆盖） |
@@ -208,6 +209,148 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
 
 > 上游仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本仓库与上游不再有同步关系，演进以本仓库为准。
+
+## 🤖 QQ 机器人（`internal/qqbot`）
+
+一个**纯 `net/http` 单二进制桥**，把 NapCat 的 OneBot v11 事件接到本网关的模型上。
+不引 WebSocket 库、不引框架，常驻内存约 4.5 MB，适合和网关同机部署。
+
+```
+QQ ──▶ NapCat（OneBot v11）──HTTP 事件──▶ qqbot 桥 ──/v1/chat/completions──▶ 本网关 ──▶ 上游
+                              ◀──HTTP 调用（发消息/图片/戳一戳）──┘
+```
+
+### 快速接入
+
+```bash
+# 1) 配置（最小可用）
+cp qqbot.json.example /opt/qqbot/qqbot.json   # 或直接写一份
+#   listen        127.0.0.1:8090       # 桥的 HTTP 入口（NapCat 反向上报到这里）
+#   onebot_api    http://127.0.0.1:8092 # NapCat 的 OneBot HTTP API
+#   gateway_base  http://127.0.0.1:7863/v1
+#   gateway_key   <网关 api_key>
+#   model         cn:deepseek-v4-flash
+#   allowed_groups / allowed_users      # 白名单，不填则谁都能用
+
+# 2) 运行（systemd）
+systemctl enable --now qqbot
+```
+
+NapCat 侧把**反向 WebSocket/HTTP 上报**指向 `http://127.0.0.1:8090/onebot`，
+并开启 HTTP API（默认 8092）。多个账号可各跑一个 NapCat 实例，用不同的
+`HOME` 与 `onebot11_<QQ号>.json` 隔离。
+
+### 行为规则
+
+| 规则 | 语义 | 配置键 |
+|---|---|---|
+| **激活闸门** | 群里默认只听「激活词」或 `@`；激活后进入滑动窗口，过期回到 idle | `activation_keywords` / `activation_window_seconds` |
+| **静默 / 冷静** | 「闭嘴」类词 → 静默 N 秒；`@`+冷静词 → 冷静更久。期间**任何消息都不处理** | `interrupt_keywords` / `silence_seconds` / `calm_keywords` / `calm_seconds` |
+| **作用域** | 闸门是**房间级**（`group:<gid>`）；上下文与记忆是**个人级**（`group:<gid>:u:<uid>`） | — |
+| **双人格** | 默认「善良热心好青年」；**怒气攒满 100** 才切「龙王」，友善对话每句 −12，掉到 50 以下自动回落 | `persona_default_prompt` / `persona_alt_prompt` / `anger_threshold` / `anger_mild_gain` / `anger_decay` |
+| **bot 对话风控** | 识别到对方像机器人（昵称特征）→ 同一会话最多 3 轮，之后高冷退场 | `bot_patterns` / `bot_round_limit` / `bot_cooldown_seconds` |
+| **私聊** | 不受激活词限制（直接找上门），但仍受静默约束 | — |
+
+### 记忆与好感度
+
+每个 QQ 号一份持久化记录（`data/users.json`）：昵称、发言次数、笔记、点评、
+好感度（`-100..100`，聊天 +1 / @ +2 / 打断 −5 / 冷静 −8，分档 厌恶→本王认了）、
+以及画像（QQ 等级 / 签名 / 性别 / 年龄 / 城市 / 号位数 / 头像）。
+记忆会拼进 system prompt，做到「同一个人多轮之间记得住」。
+
+### 工具（function calling）
+
+桥侧白名单注册，参数按 JSON Schema 解析；**发送类工具只作用于当前会话**，不给模型指定任意群/人的能力。
+
+| 工具 | 作用 |
+|---|---|
+| `daily_password` | 今日六图地图密码（kkrb 实时接口） |
+| `market_craft` / `market_material` / `market_ammo` | 制造利润 / 材料浮动 / 子弹兑换利润 |
+| `chart_password` / `chart_market` / `chart_events` / `draw_chart` | 把上面这些数据画成图（见「图文能力」） |
+| `official_news` | 官网内容流（视频/赛事/干员档案，带标题+日期+链接） |
+| `send_sticker` / `draw_sticker` / `poke_user` | 发表情包 / SVG 自绘表情包 / 戳一戳 |
+| `recall_user` / `remember_note` | 查对某人的记忆 / 追加笔记 |
+
+### 知识库（`kb_dir`）
+
+外部目录，`*.md` 即一张事实卡，**改完即时生效、无需重启**（按目录 mtime 重读）：
+
+```
+keys: M700, M700改枪, M700配装, M700改枪码, M700码
+---
+改枪码（来自抖音 @always聪聪 最新视频）：
+
+- 连发套件M700短管红点版：6LKJIG80EU90O684D8QL5
+- 连发套件M700标准管红点版：6LKJIMG0EU90O684D8QL5
+```
+
+命中关键词时正文会作为「权威资料」注入 system（最多 3 张卡，外部卡优先于内置卡）。
+
+**改枪码走工具、不靠注入**：`gunsmith_code(weapon)` / `gunsmith_card_list` 读 `kb_dir` 里的
+`改枪码-<枪名>.md` 卡片，由模型自己判断何时调用（不做关键词自动直出——那是命令式调度）。
+枪名匹配用**词边界 + 最长优先**，避免 `M7` 抢了 `M700` 的卡；工具返回的内容要求模型**原样输出**，
+不要重排或改写码。
+
+### 实时数据源
+
+| 来源 | 接口 | 说明 |
+|---|---|---|
+| **kkrb.net**（三角洲一图流） | `POST /getOVData` | **必须先 GET 页面拿 cookie**，裸 POST 回 `{"code":-101,"msg":"系统繁忙"}`；一次返回密码/制造/材料/子弹/活动五类数据，TTL 缓存 10 分钟 |
+| **df.qq.com 官网** | `apps.game.qq.com/cmc/cross?...&tagids=143148,143150` | 内容流；**必须带 tagids**，否则 `no data`。首页「公告/新闻」列表走腾讯 `fillnewsgicp` 组件，接口取不到 → 只给链接，不编造 |
+
+### 图文能力
+
+文字由**系统字体**（`chart_font`，默认 `/usr/share/fonts/chinese/simhei.ttf`）画到 PNG 上，
+图形用 SVG 渲染（`oksvg` + `rasterx`）。三种渲染器：
+
+- `RenderBarChart` —— 横排数据卡（图标 + 名字 + 大号数字 + 细比例条）
+- `RenderTiles` —— 网格卡（每日密码：图名 + 四位数字）
+- `RenderEventList` —— 活动日历（名称 + 时间 + 物品）
+
+配色取三角洲军绿 `#9cbf3b`（数字用深一档 `#7a992a`），冠军标记 `#ff8a00`。
+设计原则：**数字和名字是主角，进度条是配角**；统一配色、横排、留白收紧。
+
+> ⚠️ **oksvg 只实现 SVG2.0 子集**，而且不支持的元素是**静默跳过**（照样返回成功）。
+> 实测：`<text>` 与 `<g transform>` 完全不渲染，`clipPath` 被忽略。
+> 所以模型自绘表情包时必须只用 path/circle/ellipse/rect/polygon/polyline/line，
+> 文字另画。渲染后会数非透明像素，几乎空白就把原因回给模型让它重画。
+
+### 管理入口
+
+- `GET /admin`：桥自带的最小后台（token 或 loopback 鉴权），看闸门 / 人格 / 记忆 / 最近动作
+- 面板「QQ bot」视图：经网关代理（`panel.qqbot_admin_url`，默认 `http://127.0.0.1:8095`），
+  走同一个 `api_key` 鉴权，可改配置、忘掉某人的记忆
+
+### 常用配置项
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `false` | 总开关 |
+| `model` | — | 使用的模型（支持 `auto:<model>` 跨区域路由） |
+| `max_reply_runes` | 300 | 回复硬上限（按字符） |
+| `rate_per_minute` | 8 | 每人每分钟消息上限 |
+| `tools_enabled` / `max_tool_rounds` | `true` / 3 | 工具调用开关与最大轮数 |
+| `kb_enabled` / `kb_dir` | `true` / 空 | 知识库开关与目录 |
+| `kkrb_enabled` / `kkrb_cache_minutes` | `true` / 10 | 实时数据源与缓存 |
+| `profile_enabled` | `true` | 是否拉群友画像（昵称/等级/签名/号位数） |
+| `sticker_dir` / `sticker_command` | — / `表情,来个表情,发表情` | 表情包目录与**短指令**（精确匹配，带「画」字让给模型） |
+| `poke_back` / `poke_reply` | `true` / — | 被戳时回戳与回话 |
+| `chart_font` | simhei.ttf | 画图用的字体（`.ttc` 集合字体解析不了，要用 `.ttf`） |
+
+### 运维
+
+- **日志**：`journalctl -u qqbot -f`。关键行：`persona=... anger=...`、`kb hit=N`、
+  `kb_direct →`、`tool: <name>`、`gate: ... 不放行（reason）`。
+- **知识库热更新**：往 `kb_dir` 丢 `.md` 即可，桥会按目录 mtime 重读，**不用重启**。
+- **改枪码增量同步**：见技能 `douyin-gunsmith`（抓抖音博主作品描述 → 配对提取 → 落成知识卡）。
+  只抓库里没有的视频、逐条随机 3~9 秒、遇验证码即停。
+
+### 已知限制
+
+- **全量作品抓不到**：抖音主页滚动上限 20~60 条；作品列表 API 被 `ArgusSecurityPlugin` 拦
+  （要 uifid + a_bogus）；老版 `iesdouyin v2` 返回空。只能增量累积。
+- **官网公告列表取不到**：见上表，只给链接不编造。
+- **模型不适合转述会失效的码**：已改为确定性直出，见「知识库」一节。
 
 ## 架构总览
 

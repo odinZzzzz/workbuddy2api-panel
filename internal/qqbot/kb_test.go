@@ -60,7 +60,7 @@ func TestFormatKkrbUpdated(t *testing.T) {
 }
 
 // 改枪码直出：枪名必须词边界匹配（M7 不能命中 M700），没提枪名时给汇总卡。
-func TestKbDirectGunMatch(t *testing.T) {
+func TestGunsmithCardMatch(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, body string) {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -77,19 +77,19 @@ func TestKbDirectGunMatch(t *testing.T) {
 	b := New(c)
 
 	// M7 必须拿到 M7 的卡，不能是 M700
-	if got, ok := b.kbDirect("M7 改枪码"); !ok || !strings.Contains(got, "M7-CODE-AAAA") {
+	if got, ok := b.gunsmithCard("M7 改枪码"); !ok || !strings.Contains(got, "M7-CODE-AAAA") {
 		t.Errorf("M7 应命中 M7 卡，实际 ok=%v got=%.60s", ok, got)
 	}
 	// M700 拿 M700
-	if got, ok := b.kbDirect("M700 改枪码"); !ok || !strings.Contains(got, "M700-CODE-BBBB") {
+	if got, ok := b.gunsmithCard("M700 改枪码"); !ok || !strings.Contains(got, "M700-CODE-BBBB") {
 		t.Errorf("M700 应命中 M700 卡，实际 ok=%v got=%.60s", ok, got)
 	}
-	// 不提枪名 → 汇总卡
-	if got, ok := b.kbDirect("有改枪码吗"); !ok || !strings.Contains(got, "目前收录") {
+	// 不传枪名 → 汇总卡
+	if got, ok := b.gunsmithCard(""); !ok || !strings.Contains(got, "目前收录") {
 		t.Errorf("泛问应给汇总，实际 ok=%v got=%.60s", ok, got)
 	}
-	// 完全无关 → 不抢答
-	if _, ok := b.kbDirect("今天天气如何"); ok {
-		t.Error("无关消息不该直出")
+	// 未收录的枪 → 不返回卡片
+	if _, ok := b.gunsmithCard("K416"); ok {
+		t.Error("未收录的枪不该返回卡片")
 	}
 }

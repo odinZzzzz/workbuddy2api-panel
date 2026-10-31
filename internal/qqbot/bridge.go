@@ -309,18 +309,6 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	// 顺手刷新画像（昵称/等级/签名/号位数）：异步、一天一次，失败静默。
 	b.refreshProfileAsync(ev.UserID)
-	// 改枪码这类"会失效的码"直接发知识卡原文，不经过模型（模型会加戏/拒答）
-	if card, ok := b.kbDirect(text); ok {
-		out := stripMarkdown(card)
-		b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
-			User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "kb_direct"})
-		log.Printf("[qqbot] kb_direct → %s: %s", key, truncateRunes(strings.ReplaceAll(out, "\n", " / "), 160))
-		if err := b.send(&ev, truncateRunes(out, 600)); err != nil {
-			log.Printf("[qqbot] kb_direct send failed: %v", err)
-		}
-		return
-	}
-
 	// 双人格：默认善良好青年，被攻击才切龙王（按房间，到期自动回落）
 	prompt := b.cfg().PersonaDefaultPrompt
 	if b.persona != nil {
@@ -1019,9 +1007,9 @@ func (b *Bridge) personaSnapshot() []PersonaView {
 //
 // 背景：QQ 不渲染 Markdown，但**换行有效**。之前把"六张图的密码"压成一句话，
 // 群友得逐字找；分行后一眼扫完。规则只针对"列表类信息"，闲聊仍保持 1~3 句。
-const layoutGuide = `【改枪码的来源】
-- 改枪码**只认【参考资料】里的「改枪码-<枪名>」卡片**（抖音博主 always聪聪 最新视频）。
-- 卡片里没有这把枪，就直说「聪聪最近的视频里没有 XX 的码」，别编、也别拿别的来源凑。
+const layoutGuide = `【改枪码】
+- 问「XX 改枪码 / XX 怎么改」→ 调 gunsmith_code(weapon="XX")；问「有哪些枪有码」→ gunsmith_card_list。
+- 工具没返回就直说没收录，别编码、别拿别的来源凑。
 
 【时效性数据必须查工具】
 - 每日密码、改枪码、制造利润、材料价格这类**会随版本/日期变化**的数据，
