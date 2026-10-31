@@ -606,3 +606,34 @@ func TestSanitizeChannelGateTriggers(t *testing.T) {
 		t.Errorf("净化不幂等：%q -> %q", got, again)
 	}
 }
+
+// GUI 段措辞漂移 + 全角 ＠：这两条来自对 0.2.0-rc.2 内核与在线 README 的码点级核对，
+// 老规则（要求 "whose URL the runtime context names."）在新形态上会漏，钉住它们。
+func TestSanitizeDriftedGuiForms(t *testing.T) {
+	// 新形态：…Web GUI at ${webUrl}（Harness 甚至被 purge 成 DeepSeek Web GUI）
+	for _, in := range []string{
+		"You are interacting with the user through the DeepSeek Web GUI at http://127.0.0.1:43120.",
+		"You are interacting with the user through the DeepSeek\u200b Harness Web GUI at http://127.0.0.1:43120.",
+	} {
+		got := sanitizeText(in)
+		if strings.Contains(got, "Web GUI at") || strings.Contains(got, "127.0.0.1") {
+			t.Errorf("漂移形态没被中性化：%q", got)
+		}
+		if !strings.Contains(got, "runtime context") {
+			t.Errorf("应换成中性句：%q", got)
+		}
+	}
+
+	// 全角 ＠ 也要换（网关会把全角折回半角再判定）
+	full := "Tokens prefixed with \uFF20 are paths the user explicitly referenced."
+	if got := sanitizeText(full); strings.Contains(got, "\uFF20") {
+		t.Errorf("全角 ＠ 没被替换：%q", got)
+	}
+
+	// GUI URL 段（漂移后没有 Harness 词）
+	urlSeg := `Current Web GUI URL: "http://127.0.0.1:43120".`
+	// 注意：中性句本身也含 "GUI URL" 字样，所以只断言原 URL 与 "Current …" 前缀消失
+	if got := sanitizeText(urlSeg); strings.Contains(got, "43120") || strings.Contains(got, "Current") {
+		t.Errorf("GUI URL 段没被中性化：%q", got)
+	}
+}

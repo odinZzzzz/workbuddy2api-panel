@@ -103,6 +103,11 @@ var sanitizeRewrites = [][2]string{
 // 位置跑一次自动机。实测 80KB 文本：canon 级 40µs，(?i) 级 548-879µs。
 // ci 版本同时充当「规则到底是什么」的唯一规范，canon 只是它的快路投影。
 const (
+	// sanitizeInv 不可见分隔符全家桶：Go 的 \s 只含 [\t\n\f\r ]，
+	// 不含 U+00A0/U+200B，而网关对「零宽字符插在词间」照样判定，
+	// 所以每条句式规则都显式吃这一族（实测 200B/200C/200D/2060/FEFF 都在野外）。
+	sanitizeInv = `[\s\p{Zs}\x{200B}\x{200C}\x{200D}\x{2060}\x{FEFF}]*`
+
 	// sanitizeDshIdentityPat 自我介绍句式 + 品牌归属。
 	//
 	// 三个必须保留的边界：
@@ -127,8 +132,14 @@ const (
 	// 都会失配）。选语义损失最小的改法：只把 A 句尾的语序换掉，一个词都不删 ——
 	// 品牌全名保留，句子意思完全不变，也不像插入不可见字符那样在提示词里留下
 	// 无法 diff 的痕迹。
+	// 实测漂移：老版是 `…through the DeepSeek\u200B Harness Web GUI whose URL the runtime
+	// context names.`，新版内核已改成 `…through the DeepSeek Harness Web GUI at ${webUrl}.`，
+	// 甚至本会话 system 里连 Harness 都被 purge 成 `…through the DeepSeek Web GUI at …`。
+	// 所以品牌段必须**整体可选**，只锚 "Web GUI" 这个稳定词，否则新形态会漏。
 	sanitizeDshGuiPat = `(You are interacting with the user through the ` +
-		`DeepSeek[ \t]+Harness[ \t]+Web[ \t]+GUI) whose URL the runtime context names\.`
+		`(?:DeepSeek` + sanitizeInv + `(?:Harness` + sanitizeInv + `)?)?Web` + sanitizeInv + `GUI)` +
+		`(?:` + sanitizeInv + `whose URL the runtime context names\.|` +
+		sanitizeInv + `at[^\n]{0,200}?\.)?`
 
 	// sanitizeBrandPat 品牌词缩减：`DeepSeek Harness` 单独出现放行，但与 GUI 描述句
 	// （this page / this GUI / this app）连续出现时命中同一套校验；缩成 `DeepSeek`
@@ -136,13 +147,14 @@ const (
 	// `deepseek_harness`、`/opt/deepseek-harness/app` 这类路径与标识符必须原样保留。
 	// 品牌词里可能夹零宽空格（U+200B）：官方发布版就是 `DeepSeek\u200B Harness`。
 	// 只吃空格/制表符/零宽空格，路径与标识符（deepseek-harness）必须原样保留。
-	sanitizeBrandPat = `DeepSeek[ \t\x{200B}]+Harness`
+	sanitizeBrandPat = `DeepSeek` + sanitizeInv + `Harness`
 
 	// sanitizeGuiURLPat GUI 段的 B 句（`Current ... Web GUI URL: "http://..."`）。
 	// README 实测：A 句+B 句连续出现才判定，B 句在 system 尾部（偏移 6552 左右），
 	// 只修开头的做法够不到它。
-	sanitizeGuiURLPat = `Current[ \t\x{200B}]+DeepSeek[ \t\x{200B}]+Harness[ \t\x{200B}]+` +
-		`Web[ \t\x{200B}]+GUI[ \t\x{200B}]+URL:[^\n"]*("[^"\n]*")?\.?`
+	sanitizeGuiURLPat = `Current` + sanitizeInv + `(?:DeepSeek` + sanitizeInv +
+		`(?:Harness` + sanitizeInv + `)?)?Web` + sanitizeInv + `GUI` + sanitizeInv +
+		`URL:?[^\n]*`
 
 	// sanitizeAtTokenHint / sanitizeGuiURLHint 探针（全小写，必须是匹配文本的子串）
 	sanitizeAtTokenHint = "prefixed with"
@@ -199,7 +211,7 @@ const maskSentenceLayer = maskIdentity | maskGui | maskBrand | maskAtToken | mas
 // 与规则的同步关系由 sanitize_probe_test.go 的对拍用例钉住。
 const (
 	sanitizeBrandHint  = "harness"
-	sanitizeGuiHint    = "whose url the runtime context names"
+	sanitizeGuiHint    = "gui"
 	sanitizeYouAreHint = "you are"
 )
 
@@ -272,10 +284,13 @@ func probeMask(text string) sanitizeMask {
 			if foldAt(text, i, sanitizeBrandHint) {
 				m |= maskBrand
 			}
-		case 'w':
+		case 'g':
+			// GUI 段探针（"gui"）：措辞已漂移，不能再靠 "whose url the runtime context names"
+			// 这种旧尾巴做探针，只认稳定词 GUI 本身。
 			if foldAt(text, i, sanitizeGuiHint) {
 				m |= maskGui
 			}
+		case 'w':
 			if foldAt(text, i, sanitizeGuiURLHint) {
 				m |= maskGuiURL
 			}
@@ -360,8 +375,11 @@ func sanitizeTextScoped(text string, identity bool) string {
 	}
 	// @ 文件引用句：上游对「Tokens prefixed with @ are paths…」这类句式判定，
 	// 真机 A/B 结论是**去掉任意一个 @ 就 200**。这里把 @ 换成 (at)，语义不变。
-	if mask&maskAtToken != 0 && strings.Contains(text, "@") {
+	if mask&maskAtToken != 0 {
+		// 决定性字形是**第一个 @**（索引 21），网关只认半角；全角 ＠ 会被折回半角再判定，
+		// 所以两种都换。只改字形、不删词，语义不变。
 		text = strings.ReplaceAll(text, "@", "(at)")
+		text = strings.ReplaceAll(text, "\uFF20", "(at)")
 	}
 	// 快路只吃规范形态：重探一次，仍有残留才动用 (?i) 正则。
 	// 命中路径多付一次探测（~70µs/80KB），换掉三次全量 (?i) 扫描（~2ms）。
