@@ -1995,7 +1995,7 @@ func TestExpiringNowMatchesReminderSemantics(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	now := time.Now()
 	// 窗口内有积分，但最早批次元数据被清零（SetCreditsDetailed 的清理分支）
-	p.SetCreditsDetailed("u1", 100, 100, 60, time.Time{}, 0)
+	p.SetCreditsDetailed("u1", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 60, EarliestAt: time.Time{}, EarliestRemaining: 0})
 	p.mu.Lock()
 	e := p.byUID["u1"]
 	got := expiringNow(e, now)
@@ -2017,9 +2017,9 @@ func TestPickPrefersEarliestExpiryDay(t *testing.T) {
 	p.Add(&auth.Auth{UID: "later"})
 	p.Add(&auth.Auth{UID: "none"})
 	now := time.Now()
-	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(24*time.Hour), 100)
-	p.SetCreditsDetailed("later", 100, 100, 100, now.Add(72*time.Hour), 100)
-	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("soon", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: now.Add(24 * time.Hour), EarliestRemaining: 100})
+	p.SetCreditsDetailed("later", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: now.Add(72 * time.Hour), EarliestRemaining: 100})
+	p.SetCreditsDetailed("none", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 0, EarliestAt: time.Time{}, EarliestRemaining: 0})
 
 	got := p.Pick()
 	if got == nil || got.UID != "soon" {
@@ -2035,8 +2035,8 @@ func TestPickExpirySameDaySharesLoad(t *testing.T) {
 	p.Add(&auth.Auth{UID: "a2"})
 	now := time.Now()
 	at := now.Add(48 * time.Hour)
-	p.SetCreditsDetailed("a1", 100, 100, 100, at, 100)
-	p.SetCreditsDetailed("a2", 100, 100, 100, at, 100)
+	p.SetCreditsDetailed("a1", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: at, EarliestRemaining: 100})
+	p.SetCreditsDetailed("a2", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: at, EarliestRemaining: 100})
 
 	seen := map[string]bool{}
 	for i := 0; i < 30; i++ {
@@ -2062,8 +2062,8 @@ func TestPickPreferExpiringOffKeepsAllCandidates(t *testing.T) {
 	p.Add(&auth.Auth{UID: "soon"})
 	p.Add(&auth.Auth{UID: "none"})
 	now := time.Now()
-	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(time.Hour), 100)
-	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("soon", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 100, EarliestAt: now.Add(time.Hour), EarliestRemaining: 100})
+	p.SetCreditsDetailed("none", CreditsSnapshot{Remain: 100, Total: 100, Expiring: 0, EarliestAt: time.Time{}, EarliestRemaining: 0})
 
 	seen := map[string]bool{}
 	for i := 0; i < 40; i++ {
