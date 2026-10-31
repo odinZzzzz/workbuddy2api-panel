@@ -504,3 +504,24 @@ func TestStripMarkdownTable(t *testing.T) {
 	}
 	_ = want
 }
+
+// 动作/神态描写（整行括号）要删掉，行内的括号说明要保留。
+func TestStripStageDirections(t *testing.T) {
+	in := "（把下巴搁在你肩头，声音闷闷的）\n\n本王今天心情不好。\n（笑了⼀声，不太客气）"
+	got := stripStageDirections(in)
+	if strings.Contains(got, "下巴") || strings.Contains(got, "笑了一声") {
+		t.Errorf("动作描写没删干净: %q", got)
+	}
+	if !strings.Contains(got, "本王今天心情不好") {
+		t.Errorf("正文被误删: %q", got)
+	}
+	// 行内括号保留（改枪码卡片里的「（4100 费）」不能删）
+	keep := "M7堤风均衡改（4100 费）：6LFV5F40EU90O684D8QL5"
+	if stripStageDirections(keep) != keep {
+		t.Errorf("行内括号不该删: %q", stripStageDirections(keep))
+	}
+	// 空输入不 panic
+	if stripStageDirections("") != "" {
+		t.Error("空输入应返回空")
+	}
+}

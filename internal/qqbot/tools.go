@@ -71,39 +71,6 @@ func (b *Bridge) buildTools() *toolRegistry {
 		return m
 	}
 
-	add("draw_sticker", "自己画一张表情包并发到当前会话（SVG 源码，≤64KB）。只在真的想发表情时调用。"+stickerStyleGuide,
-		obj(map[string]any{
-			"svg": map[string]any{"type": "string", "description": "完整 SVG 源码，必须以 <svg 开头，含 xmlns"},
-		}, "svg"),
-		func(tc toolContext, args json.RawMessage) (string, error) {
-			var in struct {
-				SVG string `json:"svg"`
-			}
-			if err := json.Unmarshal(args, &in); err != nil {
-				return "", fmt.Errorf("参数解析失败: %w", err)
-			}
-			png, err := RenderSVG(in.SVG, 256)
-			if err != nil {
-				return "", err
-			}
-			// 空白自纠：渲染成功但几乎没内容，通常是用到了不支持的 <text>/<g transform>/clipPath。
-			// 把原因回给模型，它可以在同一轮里改对再画（比静默发出一张空白图好得多）。
-			if ink, e := inkPixels(png); e == nil && ink < 300 {
-				return "", fmt.Errorf("画出来几乎空白（非透明像素 %d）。"+
-					"检查是否用了不支持的 <text>、<g transform>、clipPath——这些不会渲染；"+
-					"请只用 path/circle/ellipse/rect/polygon/polyline/line，坐标写绝对坐标", ink)
-			}
-			path, err := tc.b.SaveGeneratedSticker(png)
-			if err != nil {
-				return "", err
-			}
-			if err := tc.b.sendImage(tc.ev, path); err != nil {
-				return "", err
-			}
-			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_sticker"})
-			return "已把自绘表情包发到当前会话", nil
-		})
-
 	add("daily_password", "查三角洲行动今日地图密码（零号大坝/长弓溪谷/巴克什/航天基地/潮汐监狱/AZ3）。数据来自 kkrb.net 实时接口，有 10 分钟缓存。有人问密码、密码门、今天密码时调用。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
@@ -420,6 +387,28 @@ func (b *Bridge) buildTools() *toolRegistry {
 				return "", err
 			}
 			return tc.b.TemplateSource(in.Name)
+		})
+
+	add("send_face", "发一个 QQ 原生表情（比表情包轻，客户端原生渲染）。name 传中文名或 id，例如 白眼/发怒/调皮/微笑/抠鼻/亲亲。可用："+faceNames(),
+		obj(map[string]any{
+			"name": map[string]any{"type": "string", "description": "表情中文名或数字 id，如 白眼 / 12"},
+		}, "name"),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			id, err := resolveFace(in.Name)
+			if err != nil {
+				return "", err
+			}
+			if err := tc.b.sendFace(tc.ev, id); err != nil {
+				return "", err
+			}
+			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "face"})
+			return "表情已发出", nil
 		})
 
 	add("send_sticker", "从表情库里随机发一张表情包到当前会话。",

@@ -372,8 +372,14 @@ func (b *Bridge) reply(ev *Event, key, name, text string, atTargets []int64, pro
 		log.Printf("[qqbot] chat failed key=%s user=%s: %v", key, name, err)
 		answer = "（模型暂时不可用，稍后再试）"
 	}
+	answer = stripStageDirections(answer)
 	answer = stripMarkdown(answer)
-	answer = truncateRunes(answer, b.cfg().MaxReplyRunes)
+	// 含分享码的回复**不截断**：码被切掉一位就等于废码（用户反馈过 "6L…"）。
+	if codePattern.MatchString(answer) {
+		log.Printf("[qqbot] 回复含分享码，跳过截断（原长 %d 字）", len([]rune(answer)))
+	} else {
+		answer = truncateRunes(answer, b.cfg().MaxReplyRunes)
+	}
 	if strings.TrimSpace(answer) == "" {
 		return
 	}
@@ -890,6 +896,21 @@ func (b *Bridge) handlePoke(ev *Event) {
 	}
 }
 
+// sendFace 发一个 QQ 原生表情（face 段，不占图片带宽）。
+func (b *Bridge) sendFace(ev *Event, id string) error {
+	action := "send_private_msg"
+	payload := map[string]any{"message": []map[string]any{
+		{"type": "face", "data": map[string]string{"id": id}},
+	}}
+	if ev.MessageType == "group" {
+		action = "send_group_msg"
+		payload["group_id"] = ev.GroupID
+	} else {
+		payload["user_id"] = ev.UserID
+	}
+	return b.callAction(action, payload)
+}
+
 // sendPoke 调 OneBot 的戳一戳动作。
 func (b *Bridge) sendPoke(ev *Event) error {
 	action := "friend_poke"
@@ -1033,30 +1054,21 @@ func otherAtTargets(at []int64, self int64) []int64 {
 //
 // 背景：QQ 不渲染 Markdown，但**换行有效**。之前把"六张图的密码"压成一句话，
 // 群友得逐字找；分行后一眼扫完。规则只针对"列表类信息"，闲聊仍保持 1~3 句。
-const layoutGuide = `【改枪码】
-- 问「XX 改枪码 / XX 怎么改」→ 调 gunsmith_code(weapon="XX")；问「有哪些枪有码」→ gunsmith_card_list。
-- 工具没返回就直说没收录，别编码、别拿别的来源凑。
+const layoutGuide = `【回复长度】
+- 闲聊：**一句话，≤20 字**。不铺垫、不解释、不复述问题、不问「还需要什么」。
+- 数据类（密码/改枪码/行情/活动）：照工具内容列清单，不加废话。
 
-【时效性数据必须查工具】
-- 每日密码、改枪码、制造利润、材料价格这类**会随版本/日期变化**的数据，
-  **必须调用工具取最新**，禁止凭记忆或"我觉得应该是"来回答 —— 记错了就是坑人。
-- 工具返回什么就照着说；工具失败就直说"现在取不到，稍后再试"，不要自己编一串。
+【排版】
+- 纯文本，禁 Markdown（星号、反引号、井号、表格竖线）。
+- 列表每行一条：名称：值。
 
-【配图优先】
-- 涉及**每日密码、制造利润、材料价格、活动时间、改枪码**这类"能一眼看完的数据"，除文字外要顺手画图：
-  密码 → chart_password；制造/材料/子弹 → chart_market；活动 → chart_events。
-- 文字给结论和要点，图片给直观对比，两者不重复堆砌（图上有的，文字只提关键一条）。
+【称呼】用群昵称或 QQ 昵称，别念 QQ 号。
 
-【排版规则】
-- QQ 是**纯文本**，不支持任何富文本/Markdown：
-  禁止 **加粗星号**、反引号、# 井号标题、| --- | 表格线、[]() 链接语法、> 引用、--- 分割线。
-  这些符号会**原样显示**成噪音，一个都不要用。
-- 要强调就用中文符号：「【】」「：」「·」，或者换个说法，不要靠符号。
-- 列表类信息（密码、价格、点位、材料、步骤、多个选项）**必须每行一条**，不要用顿号压成一句话。
-- 每行格式：名称：值（必要时补一句极短说明），行首用「·」或「-」都可以，但整条消息要统一。
-- 第一行给一句结论/总数，列表跟在下面；末尾一句话补充（如刷新时间），不要重复列表内容。
-- 工具返回的列表要**原样保留分行**，不要自己压平或改写顺序。
-- 非列表内容仍然保持 1~3 句短句，别为了排版硬拆行。
+【数据】密码/改枪码/行情必须调工具取真值；取不到就说取不到，别编。
+【码必须完整】改枪码/分享码要**一位不差地原样输出**，禁止用「…」「等等」省略或缩写，
+码少一位就导入失败。多套码就分行列全。
+
+【表情】偶尔 send_face 或 emoji，别每句都发。
 `
 
 // kkrbOverview 取 kkrb 概览数据（统一缓存入口，供各市场工具复用）。
@@ -1110,3 +1122,30 @@ func toPayloadMessages(msgs []chatMsg) []map[string]any {
 	}
 	return out
 }
+
+// stageLine 整行都是（…）或(…)——那种"（把下巴搁在你肩头，声音闷闷的）"的动作描写。
+var stageLine = regexp.MustCompile(`^\s*[（(][^）)]{0,200}[）)]\s*$`)
+
+// stripStageDirections 删掉整行的括号动作描写，只留对话。
+//
+// 用户明确不要这种"设定/神态"部分：龙王说话就说话，别演。
+// 只删**整行**括号，行内的（4100 费）这类说明保留。
+func stripStageDirections(s string) string {
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		if stageLine.MatchString(ln) {
+			continue
+		}
+		out = append(out, ln)
+	}
+	res := strings.Join(out, "\n")
+	// 删行后可能留下连续空行，压成一个
+	for strings.Contains(res, "\n\n\n") {
+		res = strings.ReplaceAll(res, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(res)
+}
+
+// codePattern 匹配游戏分享码（16+ 位大写字母数字，且含字母）。
+var codePattern = regexp.MustCompile(`\b[A-Z0-9]{14,}\b`)

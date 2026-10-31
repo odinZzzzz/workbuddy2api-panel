@@ -2,7 +2,6 @@ package qqbot
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -55,48 +54,6 @@ func TestRenderSVGGuards(t *testing.T) {
 	}
 	if len(out) == 0 {
 		t.Fatal("空结果")
-	}
-}
-
-// 工具注册表：draw_sticker 应渲染并发送图片。
-func TestToolDrawSticker(t *testing.T) {
-	var mu sync.Mutex
-	var sent []string
-	ob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		sent = append(sent, r.URL.Path+" "+string(body))
-		mu.Unlock()
-		_, _ = io.WriteString(w, `{"status":"ok","retcode":0}`)
-	}))
-	defer ob.Close()
-
-	cfg := Default()
-	cfg.OneBotAPI = ob.URL
-	cfg.StickerDir = t.TempDir()
-	cfg.ProfileEnabled = false
-	b := New(cfg)
-	tools := b.buildTools()
-	ev := &Event{MessageType: "private", UserID: 941628696, SelfID: 3467208422}
-
-	args, _ := json.Marshal(map[string]string{"svg": sampleSVG})
-	res, err := tools.exec(toolContext{ev: ev, b: b}, ToolCall{
-		ID: "c1", Type: "function",
-		Function: struct {
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-		}{Name: "draw_sticker", Arguments: string(args)},
-	})
-	if err != nil {
-		t.Fatalf("draw_sticker: %v", err)
-	}
-	if !strings.Contains(res, "已把自绘表情包") {
-		t.Errorf("返回文案不对: %s", res)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(sent) != 1 || !strings.Contains(sent[0], "/send_private_msg") || !strings.Contains(sent[0], `"type":"image"`) {
-		t.Fatalf("应发出一条图片消息: %v", sent)
 	}
 }
 
