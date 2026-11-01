@@ -208,7 +208,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
 | **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
 | **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
-| **QQ 机器人桥** | `internal/qqbot`，纯 `net/http` 单二进制：NapCat/OneBot v11 → 网关。激活闸门（房间级）、双人格+怒气值、bot 对话风控、个人记忆与好感度、function calling 工具、知识库（`kb_dir` 热更新）、kkrb 实时数据、图文卡片与 SVG 自绘表情包、面板内管理视图。详见 [QQ 机器人](#-qq-机器人internalqqbot) |
+| **QQ 机器人桥** | `internal/qqbot`，纯 `net/http` 单二进制：NapCat/OneBot v11 → 网关。激活闸门（房间级）、双人格+怒气值、bot 对话风控、个人记忆与好感度、function calling 工具、知识库（`kb_dir` 热更新）、kkrb 实时数据、图文卡片、**鲸鱼娘官方立绘（`send_pet`）**、模板/自绘图（`draw_sticker`）、面板内管理视图。详见 [QQ 机器人](#-qq-机器人internalqqbot) |
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
 | **原生工具调用标记还原** | 上游（DeepSeek 系）的工具调用原生语法是带全角竖线的标记文本，**仅在请求声明了 `tools` 时**才被上游解析成结构化 `tool_calls`。实测 `tools` 声明在中转环节（Responses → chat/completions 等）丢失是常态，此时模型仍想调工具，标记就以纯文本落进 `content`——Codex 这类只执行结构化 `function_call` 的客户端会把它当普通正文写进会话历史，回合直接结束、工具一次都没跑。网关在出站响应里识别并还原成 `tool_calls`（流式与非流式都覆盖） |
@@ -306,11 +306,15 @@ system 里仍保留完整人设，两者不冲突。
 | 工具 | 作用 |
 |---|---|
 | `daily_password` | 今日六图地图密码（kkrb 实时接口） |
-| `market_craft` / `market_material` / `market_ammo` | 制造利润 / 材料浮动 / 子弹兑换利润 |
-| `chart_password` / `chart_market` / `chart_events` / `draw_chart` | 把上面这些数据画成图（见「图文能力」） |
+| `market(kind)` | 市场数据：`kind=craft` 制造推荐 / `material` 材料价格浮动 / `ammo` 子弹利润与热门（三者已合并为一个工具，省 schema） |
+| `draw_chart` / `chart_password` / `chart_market` / `chart_events` | 把上面这些数据画成图（见「图文能力」） |
 | `official_news` | 官网内容流（视频/赛事/干员档案，带标题+日期+链接） |
-| `send_sticker` / `draw_sticker` / `poke_user` | 发表情包 / SVG 自绘表情包 / 戳一戳 |
+| `send_pet` | **发元气鲸鱼娘官方立绘**（见「鲸鱼娘立绘」）——表情/情绪图优先用它，比画图快且好看 |
+| `send_sticker` / `draw_sticker` / `poke_user` | 发表情包 / 自绘图（模板直出或自绘 SVG） / 戳一戳 |
+| `list_sticker_templates` / `get_sticker_template` | 列模板 / 取模板**画法规格**（不给源码，防模型照抄） |
+| `send_face` | 发 QQ 原生表情（中文名或 id） |
 | `recall_user` / `remember_note` | 查对某人的记忆 / 追加笔记 |
+| `gunsmith_code(weapon)` / `gunsmith_card_list` / `add_gunsmith_code` | 读/投稿改枪码 |
 
 ### 知识库（`kb_dir`）
 
@@ -355,6 +359,41 @@ keys: M700, M700改枪, M700配装, M700改枪码, M700码
 > 实测：`<text>` 与 `<g transform>` 完全不渲染，`clipPath` 被忽略。
 > 所以模型自绘表情包时必须只用 path/circle/ellipse/rect/polygon/polyline/line，
 > 文字另画。渲染后会数非透明像素，几乎空白就把原因回给模型让它重画。
+> 另两个实测坑已在渲染层自动兜住：`rgb()/rgba()` 颜色函数会**整份解析失败**
+> （归一化成 `#hex` + 对应 `*opacity`）；`<svg width="100%">` 会报
+> `ParseFloat: parsing "100%"`（按 viewBox 换算成绝对值）。
+
+### 鲸鱼娘立绘（`send_pet`）
+
+复用官方美术资源，不靠模型画（模型画不出官方画风，实测必然走样）：
+
+- **来源**：[dsh-whale-musume](https://github.com/Sutera-Diffusus/dsh-whale-musume)（MIT），
+  42 张状态立绘收在 `internal/qqbot/pet/*.webp`（`go:embed`，二进制内自带，附 LICENSE）。
+- **状态**：27 个对外状态（`greet` / `angry` / `meme-cry` / `blush` / `meme-smug` /
+  `meme-shock` / `meme-heart` / `sleep` / `work-slack` / `curious` / `celebrate` …），
+  另有 60+ 中文别名（生气 / 哭 / 害羞 / 摸鱼 / 比心 / 得意 / 震惊 …），传哪个都行。
+- **直连**：文本含"鲸鱼"主体 + 画图动词 / ≥2 字情绪词时**不过模型**，按情绪直接发图
+  （`WhaleArtIntent`）；单字情绪不触发，避免"鲸鱼好吃吗"被"吃"误伤。
+- **叠加装饰**（`deco` / `text`，原画一个像素都不改）：
+  `blush` 腮红、`frame` 圆角边框、`heart` 爱心、`star` 星星、`text` 底部字幕
+  （用 `chart_font` 字体；字幕条在无字体环境退化为纯色条）。
+- **发送**：webp → PNG → 本地落盘 → **base64 内联**发出。内联是因为 NapCat 走文件路径
+  发图经常 10s 不回调（`Timeout: NTEvent ... sendMsg`），表现为"图发不出去"。
+
+> 不做**改色**：`pet_recolor.go` 的实现（含肤色保护）保留但暂不启用——
+> 用户要求立绘保持官方配色。要做主题色变体时接回即可。
+
+### 自绘图（`draw_sticker`）
+
+两条路：
+
+- `template=<名>`：直接用现成 SVG 模板出图（当前 9 个：`wave` / `starry` / `scream` /
+  `pearl` / `angry` / `deadpan` / `smug` / `sunset-lake` / `cat-portrait`），别自己重画；
+  可传 `hue` 微调色调。
+- `svg=<源码>`：画新东西。会先取模板**画法规格**参考（禁止照抄），且有
+  **质量闸门**——插图模式形状数 < 30 直接打回让模型补齐分层，不把简陋图发出去
+  （`sticker` 模式豁免）。
+- 导出按 viewBox **比例**（最长边 512），横构图不会被拉成正方形。
 
 ### 面板加载优化
 
