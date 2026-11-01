@@ -3,6 +3,7 @@ package qqbot
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -959,7 +960,17 @@ func (b *Bridge) sendPoke(ev *Event) error {
 }
 
 // sendImage 发一张图（本地文件路径或 URL，NapCat 都接受）。
+// maxInlineImageBytes 走 base64 内联发送的图片上限（再大就退回文件路径）。
+const maxInlineImageBytes = 8 << 20
+
 func (b *Bridge) sendImage(ev *Event, ref string) error {
+	// 本地文件优先走 base64 内联。
+	// 为什么：NapCat 走文件路径发图时，QQ 侧 NodeIKernelMsgService/sendMsg 经常
+	// 10s 不回调 → `Timeout: NTEvent ... sendMsg`，表现就是"图发不出去"
+	// （线上实测：同一张图，路径发送超时，base64 正常）。
+	if data, err := readLocalImage(ref); err == nil && len(data) > 0 && len(data) <= maxInlineImageBytes {
+		ref = "base64://" + base64.StdEncoding.EncodeToString(data)
+	}
 	action := "send_private_msg"
 	payload := map[string]any{"message": []map[string]any{
 		{"type": "image", "data": map[string]string{"file": ref}},
@@ -1186,4 +1197,16 @@ func safeGo(what string, fn func()) {
 		}()
 		fn()
 	}()
+}
+
+// readLocalImage 读本地图片文件；ref 是 URL 或非本地路径时返回错误（调用方保持原样发送）。
+func readLocalImage(ref string) ([]byte, error) {
+	if strings.Contains(ref, "://") {
+		return nil, fmt.Errorf("not a local path")
+	}
+	st, err := os.Stat(ref)
+	if err != nil || st.IsDir() || st.Size() > maxInlineImageBytes {
+		return nil, fmt.Errorf("not inlineable")
+	}
+	return os.ReadFile(ref)
 }

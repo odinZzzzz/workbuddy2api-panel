@@ -15,7 +15,7 @@ import (
 // 规格里不该出现可照抄的 SVG 源码。
 func TestDescribeSVGIsSpecNotSource(t *testing.T) {
 	b := New(Default())
-	src, err := b.TemplateSource("whale-girl")
+	src, err := b.TemplateSource("cat-portrait")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,9 +32,9 @@ func TestDescribeSVGIsSpecNotSource(t *testing.T) {
 	if !strings.Contains(spec, "不要照抄") {
 		t.Error("规格应明确要求不要照抄")
 	}
-	// 应列出关键部件名（模型据此分层）
-	if !strings.Contains(spec, "wlgHead") {
-		t.Errorf("规格应列出部件结构: %s", spec[:120])
+	// 应给出可执行的量化信息
+	if !strings.Contains(spec, "形状数") {
+		t.Errorf("规格应含形状数: %s", spec[:120])
 	}
 }
 

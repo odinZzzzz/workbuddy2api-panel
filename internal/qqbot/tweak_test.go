@@ -9,7 +9,7 @@ import (
 
 func TestApplyTweakChangesColorsNotStructure(t *testing.T) {
 	b := New(Default())
-	src, err := b.TemplateSource("whale-girl")
+	src, err := b.TemplateSource("cat-portrait")
 	if err != nil {
 		t.Fatal(err)
 	}

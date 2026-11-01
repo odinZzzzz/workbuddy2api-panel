@@ -65,28 +65,6 @@ func TestAspectSize(t *testing.T) {
 	}
 }
 
-// 鲸鱼娘模板必须真的能渲染（回归：曾整份解析失败）。
-func TestWhaleGirlRenders(t *testing.T) {
-	b := New(Default())
-	src, err := b.TemplateSource("whale-girl")
-	if err != nil {
-		t.Fatalf("取不到鲸鱼娘模板: %v", err)
-	}
-	png, w, h, err := RenderSVGAuto(src, 512)
-	if err != nil {
-		t.Fatalf("鲸鱼娘渲染失败: %v", err)
-	}
-	if w <= h {
-		t.Errorf("鲸鱼娘是横构图，导出应为 512x272 类，实际 %dx%d", w, h)
-	}
-	if ink, e := inkPixels(png); e != nil || ink < 3000 {
-		t.Errorf("鲸鱼娘应有充足内容（ink=%d, err=%v）", ink, e)
-	}
-	if strings.Contains(src, "rgba(") {
-		t.Log("源文件含 rgba（渲染层已归一化，符合预期）")
-	}
-}
-
 // 百分比 width/height 必须被归一化：oksvg 解析 "100%" 会报 ParseFloat 错误。
 func TestNormalizeSVGSize(t *testing.T) {
 	src := `<svg viewBox="0 0 320 170" width="100%" height="100%">`

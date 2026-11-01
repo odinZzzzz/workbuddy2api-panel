@@ -15,7 +15,7 @@ func TestDumpTweaks(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := New(Default())
-	src, err := b.TemplateSource("whale-girl")
+	src, err := b.TemplateSource("cat-portrait")
 	if err != nil {
 		t.Fatal(err)
 	}

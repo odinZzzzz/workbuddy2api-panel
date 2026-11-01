@@ -461,15 +461,37 @@ func (b *Bridge) buildTools() *toolRegistry {
 	// 每个请求都要为它付 token，而模型只在真要画时才需要。改为由
 	// list_sticker_templates / get_sticker_template 的结果下发（见下方两个工具）。
 	// 描述里只留最容易翻车的三条硬规则。
-	add("draw_sticker", "画一张图并发到当前会话。两种用法："+
-		"①要现成角色/场景（鲸鱼娘、橘猫、湖景）→ 传 template=模板名，直接用那张资源出图，别自己重画；"+
-		"想换个色调就加 hue/sat/light 微调（如紫色鲸鱼娘：template=whale-girl, hue=40）；"+
-		"②要画新东西 → 传 svg 源码自己画（先 list_sticker_templates 取参考规格，禁止照抄）。",
+	// send_pet：直接发元气鲸鱼娘官方立绘（dsh-whale-musume，MIT）。
+	// 为什么不让模型画：用户明确"直接复用资源，用原来的图"——这些是现成美术资产，
+	// 质量/还原度都远超手绘 SVG；bot 只负责"听懂情绪 → 选对状态 → 发出去"。
+	add("send_pet", "发鲸鱼娘立绘。state 可传键名或中文（生气/哭/害羞/摸鱼/比心…），不传=greet。常用键："+
+		"greet/angry/meme-cry/blush/meme-smug/meme-shock/meme-heart/sleep/work-slack/curious/celebrate",
+		obj(map[string]any{
+			"state": map[string]any{"type": "string", "description": "状态键或中文"},
+		}),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				State string `json:"state"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			st := strings.TrimSpace(in.State)
+			if st == "" {
+				st = "greet"
+			}
+			canonical, ok := resolvePetState(st)
+			if !ok {
+				return "", fmt.Errorf("没有「%s」这个状态，可选："+PetStateNames(), st)
+			}
+			return tc.b.sendPetImage(tc.ev, canonical)
+		})
+
+	add("draw_sticker", "画图发到会话。①现成图→只传 template（可用 hue/sat/light 调色）；②画新东西→传 svg。",
 		obj(map[string]any{
 			"template": map[string]any{"type": "string", "description": "现成模板名（whale-girl=鲸鱼娘/cat-portrait=橘猫/sunset-lake=湖景等）。传了就无需 svg"},
 			"svg":      map[string]any{"type": "string", "description": "自绘 SVG 源码（不传 template 时必填），必须以 <svg 开头，含 xmlns"},
 			"mode":     map[string]any{"type": "string", "description": "sticker=表情贴纸（6~10形状）；illustration=插图（40~90形状，默认）"},
-			"state":    map[string]any{"type": "string", "description": "whale-girl 状态：idle/sleep 打盹/work 敲电脑/cry/happy/angry/sing/spout 喷水/shy"},
 			"hue":      map[string]any{"type": "number", "description": "色相偏移（度，-180~180），换色调用：蓝→紫传 40"},
 			"sat":      map[string]any{"type": "number", "description": "饱和度倍数（0.5 淡 ~ 1.5 艳，默认 1）"},
 			"light":    map[string]any{"type": "number", "description": "配色微调：明度偏移（-0.3 更暗 ~ +0.3 更亮，默认 0）"},
@@ -479,7 +501,6 @@ func (b *Bridge) buildTools() *toolRegistry {
 				Template string  `json:"template"`
 				SVG      string  `json:"svg"`
 				Mode     string  `json:"mode"`
-				State    string  `json:"state"`
 				Hue      float64 `json:"hue"`
 				Sat      float64 `json:"sat"`
 				Light    float64 `json:"light"`
@@ -493,11 +514,6 @@ func (b *Bridge) buildTools() *toolRegistry {
 				src, err := tc.b.TemplateSource(name)
 				if err != nil {
 					return "", fmt.Errorf("模板 %s 不存在，先 list_sticker_templates 看有哪些", name)
-				}
-				// 鲸鱼娘状态：同一份美术资源，物理裁掉不需要的状态组（渲染器不跑 CSS）。
-				stateName := ""
-				if name == "whale-girl" {
-					src, stateName = WhaleGirlState(src, in.State)
 				}
 				// 复用资源 + 微调：结构/线条/构图全保留，只改配色。
 				// 这样质量与参考图完全一致，观感却是新的（重画必然走样）。
@@ -517,14 +533,10 @@ func (b *Bridge) buildTools() *toolRegistry {
 					return "", err
 				}
 				tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "template_" + name})
-				extra := ""
-				if stateName != "" && stateName != "idle" {
-					extra = "（" + stateName + "）"
-				}
 				if msg := DescribeTweak(tw); msg != "无调整" {
-					return "已把「" + name + "」" + extra + "按 " + msg + " 调整后发出", nil
+					return "已把「" + name + "」按 " + msg + " 调整后发出", nil
 				}
-				return "已把「" + name + "」" + extra + "这张图发出去", nil
+				return "已把「" + name + "」这张图发出去", nil
 			}
 			if strings.TrimSpace(in.SVG) == "" {
 				return "", fmt.Errorf("要么传 template 用现成图，要么传 svg 自己画")

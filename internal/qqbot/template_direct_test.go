@@ -8,12 +8,12 @@ import (
 	"testing"
 )
 
-// template=whale-girl 应直接渲染并尝试发图（测试环境无 OneBot 会发送失败，
+// template=cat-portrait 应直接渲染并尝试发图（测试环境无 OneBot 会发送失败，
 // 但绝不能因为"参数缺失"或"太简陋"被挡）。
 func TestDrawStickerTemplateDirect(t *testing.T) {
 	b := New(Default())
 	tools := b.buildTools()
-	args, _ := json.Marshal(map[string]string{"template": "whale-girl"})
+	args, _ := json.Marshal(map[string]string{"template": "cat-portrait"})
 	out, err := tools.exec(toolContext{ev: &Event{}, b: b}, ToolCall{
 		Function: struct {
 			Name      string `json:"name"`
@@ -28,8 +28,8 @@ func TestDrawStickerTemplateDirect(t *testing.T) {
 		t.Logf("渲染完成，发送阶段失败（测试环境无 OneBot，符合预期）: %v", err)
 		return
 	}
-	if !strings.Contains(out, "whale-girl") {
-		t.Errorf("应报告发出了 whale-girl，实际 %s", out)
+	if !strings.Contains(out, "cat-portrait") {
+		t.Errorf("应报告发出了 cat-portrait，实际 %s", out)
 	}
 }
 
