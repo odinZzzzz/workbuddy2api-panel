@@ -21,28 +21,27 @@ func TestExtractVerdict(t *testing.T) {
 	}
 }
 
-// 点评入库后，下次描述会带上（人设连续性）。
-func TestMemoryVerdictPersist(t *testing.T) {
+// 点评功能已下线：即便旧数据里有 Verdict，Describe 也不应输出。
+func TestMemoryVerdictNotOutput(t *testing.T) {
 	m, _ := OpenMemory("", 3)
 	m.Observe(1, "怪我咯", "你好")
 	m.SetVerdict(1, "脑子慢但肯问")
 	d := m.Describe(1)
-	if !strings.Contains(d, "上次点评") || !strings.Contains(d, "脑子慢但肯问") {
-		t.Fatalf("描述里应带上次点评: %s", d)
+	if strings.Contains(d, "点评") || strings.Contains(d, "脑子慢但肯问") {
+		t.Fatalf("描述里不应再含点评: %s", d)
 	}
 }
 
-// 总结指令：有记忆→按模板汇总（含次数/原话/点评）；无记忆→明确说没印象。
+// 总结指令：有记忆→按模板汇总（含次数/原话/好感度）；无记忆→明确说没印象。
 func TestSummaryOf(t *testing.T) {
 	cfg := Default()
 	cfg.MemoryFile = "" // 纯内存
 	b := New(cfg)
 	b.mem.Observe(1001, "怪我咯", "龙王你好")
-	b.mem.SetVerdict(1001, "嘴硬心虚")
 
 	ev := &Event{MessageType: "group", GroupID: 1, UserID: 1001, SelfID: 3467208422}
 	got := b.summaryOf(ev, "", nil)
-	for _, want := range []string{"怪我咯", "见过 1 次", "龙王你好", "嘴硬心虚"} {
+	for _, want := range []string{"怪我咯", "见过 1 次", "龙王你好"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("总结缺 %q: %s", want, got)
 		}

@@ -502,15 +502,11 @@ func (b *Bridge) chat(key string, ev *Event, userText string, atTargets []int64,
 	if b.mem != nil {
 		b.mem.AddAffinity(uid, AffinityPerChat)
 	}
-	// 抽「〔点评：…〕」存进记忆，并从**可见回复**里剥掉（点评是内心活动，不必每轮外发）
-	if v := extractVerdict(answer); v != "" {
-		// 本条若 @ 了别人，点评很可能是针对被 @ 的那个人的，别写进说话人记忆里
-		if b.mem != nil && len(otherAtTargets(atTargets, ev.SelfID)) == 0 {
-			b.mem.SetVerdict(uid, v)
-		}
-		if stripped := stripVerdict(answer); strings.TrimSpace(stripped) != "" {
-			answer = strings.TrimSpace(stripped)
-		}
+	// 点评已下线（用户要求去掉）：不抽取、不入库、不写进记忆。
+	// 但模型受旧人设惯性仍可能吐出「〔点评：…〕」，这里**照旧剥离不外发**——
+	// 只留 stripVerdict 这一步，extractVerdict/SetVerdict 不再调用。
+	if stripped := stripVerdict(answer); strings.TrimSpace(stripped) != "" {
+		answer = strings.TrimSpace(stripped)
 	}
 	b.appendHistory(key, userText, answer)
 	return answer, nil
@@ -615,7 +611,7 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 
 	// 人设「提醒」拼进本轮 user 消息（模型对 user 指令依从性最高）。
 	// 实测：只写在 system 里时，模型会跟随后面的工具/排版说明，用「助手」口吻回答；
-	// 同样的内容放到 user 前缀，立刻恢复龙王腔（含本王/点评）。
+	// 同样的内容放到 user 前缀，立刻恢复龙王腔。
 	if persona != "" {
 		// 完整人设提醒（截断到 160 rune）：模型对 user 前缀的依从性明显高于 system，
 		// 只给"短句别演"这类标记时，前几轮还能装住，后面就滑回助手口吻。
@@ -818,7 +814,7 @@ func extractVerdict(s string) string {
 // summaryOf 生成「本王记得这个人什么」的总结（不走模型，零额度消耗）。
 //
 // 目标解析优先级：@ 的第一个人 > 参数里的数字 QQ > 说话人自己。
-// 为什么不用模型生成：这类查询是纯事实汇总（见过几次/说过什么/上次点评），
+// 为什么不用模型生成：这类查询是纯事实汇总（见过几次/说过什么/好感度），
 // 用模板拼既准确又省钱，还能保证不编造。
 func (b *Bridge) summaryOf(ev *Event, arg string, atTargets []int64) string {
 	target := int64(0)
@@ -860,7 +856,7 @@ func (b *Bridge) summaryOf(ev *Event, arg string, atTargets []int64) string {
 	}
 	fmt.Fprintf(&sb, "好感度 %d/100（%s）。", u.Affinity, AffinityTier(u.Affinity))
 	if u.Verdict != "" {
-		sb.WriteString("本王上次点评：")
+		sb.WriteString("本王上次印象：")
 		sb.WriteString(u.Verdict)
 		sb.WriteString("。")
 	}

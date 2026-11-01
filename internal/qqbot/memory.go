@@ -31,7 +31,7 @@ type UserMemory struct {
 	LastSeen  time.Time `json:"last_seen"`
 	Count     int       `json:"count"`
 	Notes     []string  `json:"notes,omitempty"`
-	// Verdict 上一次对这个人下的点评（每轮收尾那句"〔点评：…〕"），下次说话会带上。
+	// Verdict 兼容旧数据的点评字段；已不再生成、不参与 Describe 输出。
 	Verdict string `json:"verdict,omitempty"`
 	// Affinity 好感度 -100~100：低=更刻薄，高=勉强认可。由确定性规则增减（不调模型）。
 	Affinity int `json:"affinity,omitempty"`
@@ -133,7 +133,7 @@ func (m *Memory) Describe(uid int64) string {
 		return ""
 	}
 	// 压成一行：这段每轮都进 system，写得越长越贵，也越容易把语气带跑。
-	// 只保留「是谁 / 多熟 / 印象 / 上次点评」四件事，其余交给模型自己发挥。
+	// 只保留「是谁 / 多熟 / 印象」三件事，其余交给模型自己发挥。
 	var b strings.Builder
 	name := u.Nick
 	if name == "" {
@@ -151,10 +151,7 @@ func (m *Memory) Describe(uid int64) string {
 		b.WriteString("。印象：")
 		b.WriteString(line)
 	}
-	if u.Verdict != "" {
-		b.WriteString("。上次点评：")
-		b.WriteString(u.Verdict)
-	}
+	// 点评不再写进记忆描述（用户要求去掉）：保留 Verdict 字段只为兼容旧数据，不参与输出。
 	b.WriteString("。")
 	return b.String()
 }
@@ -203,7 +200,7 @@ func (m *Memory) Count() int {
 	return len(m.users)
 }
 
-// SetVerdict 记录对某个人的点评（覆盖上一次）。
+// SetVerdict 保留以兼容旧调用；点评功能已下线，新回复不再产出点评。
 func (m *Memory) SetVerdict(uid int64, verdict string) {
 	verdict = strings.TrimSpace(verdict)
 	if uid == 0 || verdict == "" {

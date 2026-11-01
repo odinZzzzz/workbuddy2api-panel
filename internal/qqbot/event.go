@@ -131,7 +131,7 @@ func stripCQ(s string) string {
 
 // Command 解析内置指令；返回 (指令名, 参数, 是否是指令)。
 //
-// 支持：/help /clear /new /model /ping /summary(/whois) 以及中文「总结」「点评一下」。
+// 支持：/help /clear /new /model /ping /summary(/whois) 以及中文「总结」。
 // 其余一律当聊天内容。
 func Command(text string) (name, arg string, ok bool) {
 	t := strings.TrimSpace(text)
@@ -139,7 +139,7 @@ func Command(text string) (name, arg string, ok bool) {
 		return "", "", false
 	}
 	// 中文指令：允许不带斜杠（群里没人爱打斜杠）
-	for _, zh := range []string{"总结", "点评一下"} {
+	for _, zh := range []string{"总结"} {
 		if strings.HasPrefix(t, zh) {
 			return "/summary", strings.TrimSpace(strings.TrimPrefix(t, zh)), true
 		}

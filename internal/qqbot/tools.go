@@ -608,7 +608,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return "已戳对方一下", nil
 		})
 
-	add("recall_user", "查你对某个人的记忆（次数/原话/点评/好感度/画像）。默认查当前说话人；要看别人就传 uid（本条消息 @ 的人）。",
+	add("recall_user", "查你对某个人的记忆（次数/原话/印象/好感度/画像）。默认查当前说话人；要看别人就传 uid（本条消息 @ 的人）。",
 		obj(map[string]any{
 			"uid": map[string]any{"type": "integer", "description": "要查的 QQ 号；不传=当前说话人"},
 		}),
