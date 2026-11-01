@@ -345,7 +345,7 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 		b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 			User: ev.UserID, Nick: name, Runes: len([]rune(text)), Action: "whale_art_" + st})
 		safeGo("whale-art", func() {
-			if _, err := b.sendPetImage(&ev, st); err != nil {
+			if _, err := b.sendPetImageTweaked(&ev, st, Tweak{}, whaleArtDeco(text)); err != nil {
 				log.Printf("[qqbot] 鲸鱼娘立绘发送失败 state=%s: %v", st, err)
 				if serr := b.send(&ev, "图没发出去，网卡住了。"); serr != nil {
 					log.Printf("[qqbot] 兜底文案也失败: %v", serr)

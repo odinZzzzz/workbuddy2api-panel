@@ -466,10 +466,9 @@ func (b *Bridge) buildTools() *toolRegistry {
 	// 质量/还原度都远超手绘 SVG；bot 只负责"听懂情绪 → 选对状态 → 发出去"。
 	add("send_pet", "发鲸鱼娘立绘。state 键或中文，不传=greet。常用："+
 		"greet/angry/meme-cry/blush/meme-smug/meme-shock/meme-heart。"+
-		"hue 换色，deco 加装饰（blush/frame/heart/star），text 字幕",
+		"deco 加装饰（blush/frame/heart/star），text 加字幕",
 		obj(map[string]any{
 			"state": map[string]any{"type": "string", "description": "状态键或中文"},
-			"hue":   map[string]any{"type": "number", "description": "色相偏移（度）"},
 			"deco":  map[string]any{"type": "string", "description": "逗号分隔：blush/frame/heart/star"},
 			"text":  map[string]any{"type": "string", "description": "底部字幕"},
 		}),
@@ -493,11 +492,8 @@ func (b *Bridge) buildTools() *toolRegistry {
 			if !ok {
 				return "", fmt.Errorf("没有「%s」这个状态，可选："+PetStateNames(), st)
 			}
-			sat := in.Sat
-			if sat <= 0 {
-				sat = 1
-			}
-			tw := Tweak{Hue: in.Hue, Sat: sat, Light: in.Light, SkipGray: true}
+			// 用户要求：立绘保持原配色，不做改色（叠加照旧）。
+			tw := Tweak{}
 			deco := Deco{Caption: strings.TrimSpace(in.Text)}
 			for _, item := range strings.Split(in.Deco, ",") {
 				switch strings.ToLower(strings.TrimSpace(item)) {

@@ -17,6 +17,9 @@ import (
 )
 
 // RecolorPNG 对 PNG 做 HSL 调整，返回新 PNG 字节。
+//
+// 暂不启用：用户明确"别改色了，保持配色就行"，send_pet 已不再调用它。
+// 保留实现与测试（含肤色保护），将来若要做主题色变体可直接接回。
 // hueDeg 色相偏移（度）；satScale 饱和度倍数（1=不变）；lightDelta 明度偏移（-1~1）。
 // 低饱和像素（接近灰/白/黑，如眼白、深色描边）默认跳过，避免线稿发脏。
 func RecolorPNG(pngBytes []byte, hueDeg, satScale, lightDelta float64) ([]byte, error) {

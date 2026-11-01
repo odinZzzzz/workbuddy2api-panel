@@ -12,6 +12,7 @@ import (
 	"embed"
 	"fmt"
 	"image/png"
+	"regexp"
 	"strings"
 
 	xwebp "golang.org/x/image/webp"
@@ -314,4 +315,28 @@ func (b *Bridge) sendPetImageTweaked(ev *Event, canonical string, tw Tweak, deco
 		return "已把鲸鱼娘「" + canonical + "」按 " + strings.Join(notes, "、") + " 处理后发出", nil
 	}
 	return "已把鲸鱼娘「" + canonical + "」发出去", nil
+}
+
+// whaleArtDeco 从"要鲸鱼娘图"的话里解析叠加装饰。
+// 只认明确的关键词，不猜：边框 / 爱心 / 星星 / 腮红 / 写上XX。
+var whaleCaptionRe = regexp.MustCompile(`(?:写上|字幕|文字)["“”]?([^，,。"]{1,12})`)
+
+func whaleArtDeco(text string) Deco {
+	d := Deco{}
+	if strings.Contains(text, "边框") || strings.Contains(text, "加框") {
+		d.Frame = true
+	}
+	if strings.Contains(text, "爱心") {
+		d.Heart = true
+	}
+	if strings.Contains(text, "星星") {
+		d.Star = true
+	}
+	if strings.Contains(text, "腮红") {
+		d.Blush = true
+	}
+	if m := whaleCaptionRe.FindStringSubmatch(text); m != nil {
+		d.Caption = strings.TrimSpace(m[1])
+	}
+	return d
 }
