@@ -461,21 +461,46 @@ func (b *Bridge) buildTools() *toolRegistry {
 	// 每个请求都要为它付 token，而模型只在真要画时才需要。改为由
 	// list_sticker_templates / get_sticker_template 的结果下发（见下方两个工具）。
 	// 描述里只留最容易翻车的三条硬规则。
-	add("draw_sticker", "自己画一张表情包并发到当前会话（SVG 源码，≤64KB）。"+
-		"先 list_sticker_templates 挑接近的参考（结果里带绘制规范），get_sticker_template 取它的**画法规格**，"+
-		"照着规格自己重画；禁止原样照抄模板。硬规则：不用 <text>/<g transform>/clipPath；"+
-		"五官必须在脸轮廓内；只能用 path/circle/ellipse/rect/polygon/polyline/line。",
+	add("draw_sticker", "画一张图并发到当前会话。两种用法："+
+		"①要现成角色/场景（鲸鱼娘、橘猫、湖景）→ 只传 template=模板名，直接用那张资源出图，别自己重画；"+
+		"②要画新东西 → 传 svg 源码自己画（先 list_sticker_templates 取参考规格，禁止照抄）。",
 		obj(map[string]any{
-			"svg":  map[string]any{"type": "string", "description": "完整 SVG 源码，必须以 <svg 开头，含 xmlns"},
-			"mode": map[string]any{"type": "string", "description": "sticker=表情贴纸（6~10形状）；illustration=插图（40~90形状，默认）"},
-		}, "svg"),
+			"template": map[string]any{"type": "string", "description": "现成模板名（whale-girl=鲸鱼娘/cat-portrait=橘猫/sunset-lake=湖景等）。传了就无需 svg"},
+			"svg":      map[string]any{"type": "string", "description": "自绘 SVG 源码（不传 template 时必填），必须以 <svg 开头，含 xmlns"},
+			"mode":     map[string]any{"type": "string", "description": "sticker=表情贴纸（6~10形状）；illustration=插图（40~90形状，默认）"},
+		}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			var in struct {
-				SVG  string `json:"svg"`
-				Mode string `json:"mode"`
+				Template string `json:"template"`
+				SVG      string `json:"svg"`
+				Mode     string `json:"mode"`
 			}
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			// ① 现成模板直出：用户点名要"鲸鱼娘"这类具体角色时，就该直接用那张资源，
+			// 而不是让模型照着规格重新猜一遍（既慢又必然走样）。
+			if name := strings.TrimSpace(in.Template); name != "" {
+				src, err := tc.b.TemplateSource(name)
+				if err != nil {
+					return "", fmt.Errorf("模板 %s 不存在，先 list_sticker_templates 看有哪些", name)
+				}
+				png, _, _, err := RenderSVGAuto(src, 512)
+				if err != nil {
+					return "", err
+				}
+				path, err := tc.b.SaveGeneratedSticker(png)
+				if err != nil {
+					return "", err
+				}
+				if err := tc.b.sendImage(tc.ev, path); err != nil {
+					return "", err
+				}
+				tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "template_" + name})
+				return "已把「" + name + "」这张图发出去", nil
+			}
+			if strings.TrimSpace(in.SVG) == "" {
+				return "", fmt.Errorf("要么传 template 用现成图，要么传 svg 自己画")
 			}
 			// 质量闸门（插图模式）：形状数太少 = 一张"色块拼图"，发出去只会被说丑。
 			// 打回让模型补齐分层，而不是把半成品发给用户。
