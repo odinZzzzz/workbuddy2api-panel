@@ -339,6 +339,21 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	prompt := b.cfg().PersonaDefaultPrompt
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, At: atBot, Runes: len([]rune(text)), Action: "replied"})
+	// 要鲸鱼娘的图：直接发官方立绘，不过模型。
+	// 用户明确要求"参考立绘"——模型画不出官方画风，直接发才是忠实的做法。
+	if st, ok := WhaleArtIntent(text); ok {
+		b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+			User: ev.UserID, Nick: name, Runes: len([]rune(text)), Action: "whale_art_" + st})
+		safeGo("whale-art", func() {
+			if _, err := b.sendPetImage(&ev, st); err != nil {
+				log.Printf("[qqbot] 鲸鱼娘立绘发送失败 state=%s: %v", st, err)
+				if serr := b.send(&ev, "图没发出去，网卡住了。"); serr != nil {
+					log.Printf("[qqbot] 兜底文案也失败: %v", serr)
+				}
+			}
+		})
+		return
+	}
 	safeGo("reply", func() { b.reply(&ev, key, name, text, atTargets, prompt, visionURLs) })
 }
 

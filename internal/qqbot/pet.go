@@ -80,7 +80,7 @@ var petAliases = map[string]string{
 	"摸鱼": "work-slack", "偷懒": "work-slack", "划水": "work-slack",
 	"咖啡": "daily-coffee", "喝茶": "daily-coffee",
 	"吃": "daily-eat", "干饭": "daily-eat", "饿": "daily-eat",
-	"好奇": "curious", "看看": "curious",
+	"好奇": "curious",
 	"发呆": "abstract", "放空": "abstract", "无语": "abstract",
 	"跑": "running", "奔跑": "running", "冲": "running",
 	"深夜": "night", "熬夜": "night",
@@ -156,5 +156,162 @@ func (b *Bridge) sendPetImage(ev *Event, canonical string) (string, error) {
 		return "", err
 	}
 	b.state.note(RecentEvent{Type: "tool", Group: ev.GroupID, User: ev.UserID, Action: "pet_" + canonical})
+	return "已把鲸鱼娘「" + canonical + "」发出去", nil
+}
+
+// ── 意图识别：要鲸鱼娘的图 ─────────────────────────────────────
+//
+// 为什么要代码直连、而不是交给模型决定：模型自己画必然走样（用户已多次反馈），
+// 而"参考立绘"这件事机器做不到——最忠实的做法就是**直接发官方立绘**。
+// 所以这里做确定性判断：只要在要鲸鱼娘的图，就按情绪选状态发图，全程不过模型。
+
+var whaleSubjectWords = []string{"鲸鱼娘", "鲸鱼", "鲸娘"}
+
+var whaleDrawVerbs = []string{
+	"画", "来一张", "整一张", "发一张", "生成", "看看她", "看看鲸",
+	"立绘", "表情", "图片", "图", "照片",
+}
+
+// WhaleArtIntent 判断"要鲸鱼娘的图"，返回立绘状态。
+// 第二个返回值为 false 表示不是这类请求（交给正常对话流程）。
+func WhaleArtIntent(text string) (string, bool) {
+	t := strings.TrimSpace(text)
+	if t == "" || strings.HasPrefix(t, "/") {
+		return "", false
+	}
+	hasSubject := false
+	for _, w := range whaleSubjectWords {
+		if strings.Contains(t, w) {
+			hasSubject = true
+			break
+		}
+	}
+	if !hasSubject {
+		return "", false
+	}
+	// 有"画/图/立绘"这类动词：只要提到鲸鱼娘就是要图，情绪缺省 greet。
+	for _, v := range whaleDrawVerbs {
+		if strings.Contains(t, v) {
+			st, _ := moodFromText(t)
+			return st, true
+		}
+	}
+	// 没动词，但带了明确情绪词（≥2 字）：也算要图，如"鲸鱼娘睡觉""鲸鱼娘比心"。
+	// 单字情绪（"吃"）不算——"鲸鱼好吃吗"这种闲聊不该触发。
+	if mood, found := strongMood(t); found {
+		return mood, true
+	}
+	return "", false
+}
+
+// moodFromText 挑最匹配的情绪。
+//
+// 评分 = 离"鲸鱼"这个主体词的字符距离最近者优先，同距离取更长的别名。
+// 为什么不是简单的"长键优先"：'给我看看摸鱼的鲸鱼娘' 里 "看看"(泛动词) 和
+// "摸鱼"(真情绪) 等长，先匹配到谁全看排序——按邻近度就稳定选对（摸鱼贴着鲸鱼娘）。
+func moodFromText(text string) (string, bool) {
+	if c, ok := bestMood(text, 0); ok {
+		return c, true
+	}
+	return "greet", false
+}
+
+// strongMood 只认长度 ≥2 的情绪词（中文单字多为泛词，容易误伤）。
+func strongMood(text string) (string, bool) {
+	return bestMood(text, 2)
+}
+
+// bestMood 按"离主体词最近"挑选情绪；minRunes 限制别名最短长度（0 = 不限）。
+func bestMood(text string, minRunes int) (string, bool) {
+	subjectAt := -1
+	for _, w := range whaleSubjectWords {
+		if i := strings.Index(text, w); i >= 0 {
+			if subjectAt < 0 || i < subjectAt {
+				subjectAt = i
+			}
+		}
+	}
+	bestState, bestDist, bestLen := "", 1<<30, 0
+	for _, k := range sortedAliasKeys() {
+		if minRunes > 0 && len([]rune(k)) < minRunes {
+			continue
+		}
+		i := strings.Index(text, k)
+		if i < 0 {
+			continue
+		}
+		dist := 0
+		if subjectAt >= 0 {
+			dist = i - subjectAt
+			if dist < 0 {
+				dist = -dist
+			}
+		}
+		c, ok := resolvePetState(k)
+		if !ok {
+			continue
+		}
+		// 更近优先；同距离取更长别名（"生气" 胜过 "气"）
+		if dist < bestDist || (dist == bestDist && len([]rune(k)) > bestLen) {
+			bestState, bestDist, bestLen = c, dist, len([]rune(k))
+		}
+	}
+	if bestState == "" {
+		return "", false
+	}
+	return bestState, true
+}
+
+// sortedAliasKeys 别名按长度降序。
+func sortedAliasKeys() []string {
+	keys := make([]string, 0, len(petAliases))
+	for k := range petAliases {
+		keys = append(keys, k)
+	}
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if len([]rune(keys[j])) > len([]rune(keys[i])) {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	return keys
+}
+
+// sendPetImageTweaked 立绘 + 程序化改色（位图 HSL）。
+// 语义级重绘需要 img2img 模型；换配色不需要——直接改像素，画面内容零损失。
+func (b *Bridge) sendPetImageTweaked(ev *Event, canonical string, tw Tweak, deco Deco) (string, error) {
+	pngBytes, err := petPNG(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !tw.Empty() {
+		if out, rerr := RecolorPNG(pngBytes, tw.Hue, tw.Sat, tw.Light); rerr == nil {
+			pngBytes = out
+		}
+	}
+	if !deco.Empty() {
+		if out, derr := ApplyDeco(pngBytes, deco, b.cfg().ChartFont); derr == nil {
+			pngBytes = out
+		}
+	}
+	path, err := b.SaveGeneratedSticker(pngBytes)
+	if err != nil {
+		return "", err
+	}
+	if err := b.sendImage(ev, path); err != nil {
+		return "", err
+	}
+	b.state.note(RecentEvent{Type: "tool", Group: ev.GroupID, User: ev.UserID, Action: "pet_" + canonical})
+	var notes []string
+	if msg := DescribeTweak(tw); msg != "无调整" {
+		notes = append(notes, msg)
+	}
+	if d := deco.Describe(); d != "" {
+		notes = append(notes, d)
+	}
+	if len(notes) > 0 {
+		return "已把鲸鱼娘「" + canonical + "」按 " + strings.Join(notes, "、") + " 处理后发出", nil
+	}
 	return "已把鲸鱼娘「" + canonical + "」发出去", nil
 }

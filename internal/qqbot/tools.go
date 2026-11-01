@@ -464,14 +464,23 @@ func (b *Bridge) buildTools() *toolRegistry {
 	// send_pet：直接发元气鲸鱼娘官方立绘（dsh-whale-musume，MIT）。
 	// 为什么不让模型画：用户明确"直接复用资源，用原来的图"——这些是现成美术资产，
 	// 质量/还原度都远超手绘 SVG；bot 只负责"听懂情绪 → 选对状态 → 发出去"。
-	add("send_pet", "发鲸鱼娘立绘。state 可传键名或中文（生气/哭/害羞/摸鱼/比心…），不传=greet。常用键："+
-		"greet/angry/meme-cry/blush/meme-smug/meme-shock/meme-heart/sleep/work-slack/curious/celebrate",
+	add("send_pet", "发鲸鱼娘立绘。state 键或中文，不传=greet。常用："+
+		"greet/angry/meme-cry/blush/meme-smug/meme-shock/meme-heart。"+
+		"hue 换色，deco 加装饰（blush/frame/heart/star），text 字幕",
 		obj(map[string]any{
 			"state": map[string]any{"type": "string", "description": "状态键或中文"},
+			"hue":   map[string]any{"type": "number", "description": "色相偏移（度）"},
+			"deco":  map[string]any{"type": "string", "description": "逗号分隔：blush/frame/heart/star"},
+			"text":  map[string]any{"type": "string", "description": "底部字幕"},
 		}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			var in struct {
-				State string `json:"state"`
+				State string  `json:"state"`
+				Hue   float64 `json:"hue"`
+				Sat   float64 `json:"sat"`
+				Light float64 `json:"light"`
+				Deco  string  `json:"deco"`
+				Text  string  `json:"text"`
 			}
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", fmt.Errorf("参数解析失败: %w", err)
@@ -484,16 +493,33 @@ func (b *Bridge) buildTools() *toolRegistry {
 			if !ok {
 				return "", fmt.Errorf("没有「%s」这个状态，可选："+PetStateNames(), st)
 			}
-			return tc.b.sendPetImage(tc.ev, canonical)
+			sat := in.Sat
+			if sat <= 0 {
+				sat = 1
+			}
+			tw := Tweak{Hue: in.Hue, Sat: sat, Light: in.Light, SkipGray: true}
+			deco := Deco{Caption: strings.TrimSpace(in.Text)}
+			for _, item := range strings.Split(in.Deco, ",") {
+				switch strings.ToLower(strings.TrimSpace(item)) {
+				case "blush":
+					deco.Blush = true
+				case "frame":
+					deco.Frame = true
+				case "heart":
+					deco.Heart = true
+				case "star":
+					deco.Star = true
+				}
+			}
+			return tc.b.sendPetImageTweaked(tc.ev, canonical, tw, deco)
 		})
 
-	add("draw_sticker", "画图发到会话。①现成图→只传 template（可用 hue/sat/light 调色）；②画新东西→传 svg。",
+	add("draw_sticker", "画图发到会话。①现成图→只传 template（hue 调色）；②画新东西→传 svg。",
 		obj(map[string]any{
 			"template": map[string]any{"type": "string", "description": "现成模板名（whale-girl=鲸鱼娘/cat-portrait=橘猫/sunset-lake=湖景等）。传了就无需 svg"},
 			"svg":      map[string]any{"type": "string", "description": "自绘 SVG 源码（不传 template 时必填），必须以 <svg 开头，含 xmlns"},
 			"mode":     map[string]any{"type": "string", "description": "sticker=表情贴纸（6~10形状）；illustration=插图（40~90形状，默认）"},
 			"hue":      map[string]any{"type": "number", "description": "色相偏移（度，-180~180），换色调用：蓝→紫传 40"},
-			"sat":      map[string]any{"type": "number", "description": "饱和度倍数（0.5 淡 ~ 1.5 艳，默认 1）"},
 			"light":    map[string]any{"type": "number", "description": "配色微调：明度偏移（-0.3 更暗 ~ +0.3 更亮，默认 0）"},
 		}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
