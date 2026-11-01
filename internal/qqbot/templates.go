@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -34,6 +35,16 @@ var templateDesc = map[string]string{
 	"starry": "星月夜（梵高）：旋转星空+月亮+柏树+小村，适合「失眠」「浪漫」「发疯」",
 	"scream": "呐喊（蒙克）：橙红扭曲天空+桥上惊恐的人，适合「崩溃」「救命」「破防」",
 	"pearl":  "戴珍珠耳环的少女（维米尔）：深色背景+侧脸+珍珠，适合「回眸」「不服」「高冷」",
+	// ── 角色插图模板 ──
+	// 鲸鱼娘来自 dsh-whale-lap（Linzr-lly，MIT License）的 assets/whale-girl.svg，
+	// 原图靠外部 CSS 驱动动效；这里已清理成静态可渲染版（去 <text>、动画专用隐藏部件、
+	// 把 transform 烘进坐标），并作为"角色插图"的质量基准：320×170 横构图、约 80 个形状、
+	// 同色系 7 级明度阶、1.5~2.5px 细描边。
+	"whale-girl": "鲸鱼娘角色插图（手绘风）：蓝发 7 阶明度+细描边+腮红+气鼓鼓小嘴+泡泡星星，适合「可爱」「二次元」「陪我」",
+	// ── 插图系模板：用户要"像普通图片"，就得有场景/主体/光影/层次。
+	// 形状数 40~120 个、渲染 512px 以上；表情模板只适合"要个表情"的场合。
+	"sunset-lake":  "黄昏湖景插图：紫橙渐变天空+落日+多层山影+水面倒影+芦苇剪影，适合「安静」「收工」「风景」",
+	"cat-portrait": "橘猫半身像插图：柔光背景+绒毛渐变+琥珀眼+胡须+胸前白毛，适合「猫」「可爱」「陪我」",
 	// ── 表情系模板（不是名画）：日常对话里"生气/无语/得意"出现频率最高，
 	// 而模型凭空画这三种最容易崩（眉毛画成飘在脸外的黑棍、五官糊成一团）。
 	// 给一张结构正确的底稿，模型只需改配色/换五官细节就能出成品。
@@ -95,4 +106,81 @@ func templateNamesCSV(list []TemplateInfo) string {
 		names = append(names, t.Name)
 	}
 	return strings.Join(names, " / ")
+}
+
+// ── 模板"画法规格"提取 ──────────────────────────────────────────────
+// 为什么需要：原来 get_sticker_template 直接返回 SVG 源码，模型拿到就原样照抄
+// （线上实测：三次输出 sha256 与模板逐字节相同）——那不是"学会画"，那是复制粘贴。
+// 现在只给**规格**：画布、部件结构、配色明度阶、线宽、形状数。模型只能照着规格
+// 自己重画，没有可抄的源码。
+
+// DescribeSVG 把一份 SVG 提炼成可读的画法规格。
+func DescribeSVG(src string) string {
+	var sb strings.Builder
+	// 画布
+	if m := svgViewBoxRe.FindStringSubmatch(src); m != nil {
+		sb.WriteString("画布：viewBox=\"" + m[1] + "\"。\n")
+	}
+	// 部件（带 id 的组）
+	ids := svgGroupIDRe.FindAllStringSubmatch(src, -1)
+	if len(ids) > 0 {
+		names := make([]string, 0, len(ids))
+		for _, it := range ids {
+			names = append(names, it[1])
+		}
+		sb.WriteString("部件（先画谁后画谁就按这个顺序）：" + strings.Join(names, " → ") + "\n")
+	}
+	// 元素计数
+	sb.WriteString("形状数：")
+	parts := []string{}
+	for _, tag := range []string{"path", "ellipse", "circle", "rect", "polygon", "polyline", "line"} {
+		if n := len(svgTagRe(tag).FindAllString(src, -1)); n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d 个", tag, n))
+		}
+	}
+	sb.WriteString(strings.Join(parts, "、") + "\n")
+	// 配色：按出现次数排序的前 8 个颜色
+	sb.WriteString("配色（按用量排序，靠前的就是主色）：")
+	colors := map[string]int{}
+	for _, c := range svgHexColorRe.FindAllString(src, -1) {
+		colors[strings.ToLower(c)]++
+	}
+	type cc struct {
+		hex string
+		n   int
+	}
+	var list []cc
+	for k, v := range colors {
+		list = append(list, cc{k, v})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].n > list[j].n })
+	if len(list) > 8 {
+		list = list[:8]
+	}
+	cs := make([]string, 0, len(list))
+	for _, c := range list {
+		cs = append(cs, c.hex)
+	}
+	sb.WriteString(strings.Join(cs, " ") + "\n")
+	// 线宽
+	widths := svgStrokeWidthRe.FindAllStringSubmatch(src, -1)
+	if len(widths) > 0 {
+		ws := []string{}
+		for _, w := range widths {
+			ws = append(ws, w[1])
+		}
+		sb.WriteString("线宽：" + strings.Join(ws, " / ") + "\n")
+	}
+	sb.WriteString("\n以上是**画法规格**，不是源码。不要照抄任何一行 SVG——按这套结构、配色阶和线宽自己重画。\n")
+	return sb.String()
+}
+
+var (
+	svgGroupIDRe     = regexp.MustCompile(`<g[^>]*id="([^"]+)"`)
+	svgHexColorRe    = regexp.MustCompile(`#[0-9a-fA-F]{6}\b`)
+	svgStrokeWidthRe = regexp.MustCompile(`stroke-width="([\d.]+)"`)
+)
+
+func svgTagRe(tag string) *regexp.Regexp {
+	return regexp.MustCompile(`<` + tag + `[\s/>]`)
 }

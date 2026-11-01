@@ -396,7 +396,8 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return sb.String(), nil
 		})
 
-	add("get_sticker_template", "取某个模板的完整 SVG 源码。拿到后改配色/换表情/加元素，再用 draw_sticker 画出来。",
+	add("get_sticker_template", "取某个模板的**画法规格**（画布/部件结构/配色阶/线宽/形状数），不是源码。"+
+		"拿到后按这个规格自己重画——不要照抄模板。",
 		obj(map[string]any{
 			"name": map[string]any{"type": "string", "description": "模板名，如 wave / starry / scream / pearl"},
 		}, "name"),
@@ -411,7 +412,8 @@ func (b *Bridge) buildTools() *toolRegistry {
 			if err != nil {
 				return "", err
 			}
-			return stickerStyleGuide + "\n【模板源码】\n" + src, nil
+			// 只给规格、不给源码：给源码的下场是模型原样照抄（线上三次 sha 与模板相同）。
+			return stickerStyleGuide + "\n【参考模板的画法规格】\n" + DescribeSVG(src), nil
 		})
 
 	add("send_face", "发 QQ 原生表情。name 传中文名或 id。常用："+faceNames(),
@@ -460,26 +462,42 @@ func (b *Bridge) buildTools() *toolRegistry {
 	// list_sticker_templates / get_sticker_template 的结果下发（见下方两个工具）。
 	// 描述里只留最容易翻车的三条硬规则。
 	add("draw_sticker", "自己画一张表情包并发到当前会话（SVG 源码，≤64KB）。"+
-		"先 list_sticker_templates 挑最接近的模板（结果里带完整绘制规范），get_sticker_template 取源码，"+
-		"改配色/换五官再画；没有合适的才凭空画。硬规则：不用 <text>/<g transform>/clipPath；"+
+		"先 list_sticker_templates 挑接近的参考（结果里带绘制规范），get_sticker_template 取它的**画法规格**，"+
+		"照着规格自己重画；禁止原样照抄模板。硬规则：不用 <text>/<g transform>/clipPath；"+
 		"五官必须在脸轮廓内；只能用 path/circle/ellipse/rect/polygon/polyline/line。",
 		obj(map[string]any{
-			"svg": map[string]any{"type": "string", "description": "完整 SVG 源码，必须以 <svg 开头，含 xmlns"},
+			"svg":  map[string]any{"type": "string", "description": "完整 SVG 源码，必须以 <svg 开头，含 xmlns"},
+			"mode": map[string]any{"type": "string", "description": "sticker=表情贴纸（6~10形状）；illustration=插图（40~90形状，默认）"},
 		}, "svg"),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			var in struct {
-				SVG string `json:"svg"`
+				SVG  string `json:"svg"`
+				Mode string `json:"mode"`
 			}
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", fmt.Errorf("参数解析失败: %w", err)
 			}
-			png, err := RenderSVG(in.SVG, 256)
+			// 质量闸门（插图模式）：形状数太少 = 一张"色块拼图"，发出去只会被说丑。
+			// 打回让模型补齐分层，而不是把半成品发给用户。
+			// 阈值 30：参考图（鲸鱼娘）约 80 个形状，我们自绘猫约 90 个，30 是下限。
+			if strings.ToLower(strings.TrimSpace(in.Mode)) != "sticker" {
+				if n := countSVGShapes(in.SVG); n < 30 {
+					return "", fmt.Errorf("这张图只有 %d 个形状，还是太简陋（插图需要 40~90 个）。请按分层补齐再画：背景渐变 → 远景剪影 → 主体分结构（头/耳/口鼻/眼分开）→ 侧面阴影（同色系深色 + opacity 0.2）→ 细节（眼睛=白眼球+虹膜+瞳孔+两个高光）→ 高光椭圆 → 氛围（光斑/投影）。不要只画一个大圆加几个点", n)
+				}
+			}
+
+			// 512 最长边导出、按 viewBox 比例（横构图不会被拉扁）。
+			// 插图（60~90 形状）在 256 会糊成色块，512 才能存住细节。
+			const side = 512
+			png, outW, outH, err := RenderSVGAuto(in.SVG, side)
 			if err != nil {
 				return "", err
 			}
 			// 空白自纠：渲染成功但几乎没内容，通常是用到了不支持的 <text>/<g transform>/clipPath。
 			// 把原因回给模型，它可以在同一轮里改对再画（比静默发出一张空白图好得多）。
-			if ink, e := inkPixels(png); e == nil && ink < 300 {
+			// 阈值按面积缩放：256² 时定 300 像素，512² 就等比放大到 ~1200。
+			minInk := 300 * (outW * outH) / (256 * 256)
+			if ink, e := inkPixels(png); e == nil && ink < minInk {
 				return "", fmt.Errorf("画出来几乎空白（非透明像素 %d）。"+
 					"检查是否用了不支持的 <text>、<g transform>、clipPath——这些不会渲染；"+
 					"请只用 path/circle/ellipse/rect/polygon/polyline/line，坐标写绝对坐标", ink)

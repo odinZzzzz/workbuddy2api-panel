@@ -18,7 +18,7 @@ func TestDumpTemplates(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		png, err := RenderSVG(src, 256)
+		png, _, _, err := RenderSVGAuto(src, 512)
 		if err != nil {
 			t.Logf("%s: %v", tp.Name, err)
 			continue
