@@ -142,7 +142,7 @@ func RenderSVGTo(svg string, w, h int) ([]byte, error) {
 				err = fmt.Errorf("渲染 SVG 失败: %v", r)
 			}
 		}()
-		icon, e := oksvg.ReadIconStream(strings.NewReader(normalizeSVGColors(svg)), oksvg.WarnErrorMode)
+		icon, e := oksvg.ReadIconStream(strings.NewReader(normalizeSVGSize(normalizeSVGColors(svg))), oksvg.WarnErrorMode)
 		if e != nil {
 			err = fmt.Errorf("解析 SVG: %w", e)
 			return
@@ -192,7 +192,7 @@ func RenderSVG(svg string, side int) ([]byte, error) {
 				err = fmt.Errorf("渲染 SVG 失败: %v", r)
 			}
 		}()
-		icon, e := oksvg.ReadIconStream(strings.NewReader(normalizeSVGColors(svg)), oksvg.WarnErrorMode)
+		icon, e := oksvg.ReadIconStream(strings.NewReader(normalizeSVGSize(normalizeSVGColors(svg))), oksvg.WarnErrorMode)
 		if e != nil {
 			err = fmt.Errorf("解析 SVG: %w", e)
 			return
@@ -342,4 +342,40 @@ func countSVGShapes(src string) int {
 		n += len(svgTagRe(tag).FindAllString(src, -1))
 	}
 	return n
+}
+
+// svgPercentSizeRe 匹配 width/height 的百分比写法（"100%"、"50%"）。
+var svgPercentSizeRe = regexp.MustCompile(`(width|height)="([\d.]+)%"`)
+
+// normalizeSVGSize 把 <svg> 上的百分比宽高换成按 viewBox 算的绝对值。
+//
+// 为什么需要：oksvg 解析 `width="100%"` 会报
+// `strconv.ParseFloat: parsing "100%": invalid syntax`，并中断该元素处理——
+// 表现是**图里某些层静默丢失**（不是整份报错那么好发现）。模型很爱写 100%。
+func normalizeSVGSize(svg string) string {
+	if !strings.Contains(svg, "%") {
+		return svg
+	}
+	w, h := 0, 0
+	if m := svgViewBoxRe.FindStringSubmatch(svg); m != nil {
+		if f := strings.Fields(m[1]); len(f) == 4 {
+			w, _ = strconv.Atoi(strings.Split(f[2], ".")[0])
+			h, _ = strconv.Atoi(strings.Split(f[3], ".")[0])
+		}
+	}
+	if w <= 0 || h <= 0 {
+		return svg
+	}
+	return svgPercentSizeRe.ReplaceAllStringFunc(svg, func(m string) string {
+		sub := svgPercentSizeRe.FindStringSubmatch(m)
+		if len(sub) < 3 {
+			return m
+		}
+		pct, _ := strconv.ParseFloat(sub[2], 64)
+		base := w
+		if sub[1] == "height" {
+			base = h
+		}
+		return sub[1] + `="` + strconv.Itoa(int(float64(base)*pct/100)) + `"`
+	})
 }

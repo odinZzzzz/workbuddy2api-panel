@@ -1,5 +1,6 @@
-<!-- 来源：dsh-whale-lap（Linzr-lly），MIT License；已清理为静态可渲染版 -->
-<svg id="wlgGirl" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 170" width="100%" height="100%" aria-hidden="true">
+<!-- 来源：dsh-whale-lap（Linzr-lly），MIT License。
+     静态可渲染版：清掉文本节点/transform/百分比尺寸；状态组由代码按 state 裁剪。 -->
+<svg id="wlgGirl" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 170" width="320" height="170" aria-hidden="true">
   <!--
     趴趴鲸鱼娘 whale-girl.svg
     趴在对话框上沿的二次元鲸鱼娘：头枕双手、鲸尾上翘、头顶喷水孔。
@@ -45,10 +46,10 @@
     <path d="M244 145 C 261 147 273 142 281 131 C 288 121 293 112 299 105" fill="none" stroke="#cdeeff" stroke-width="11" stroke-linecap="round" opacity=".9"/>
   </g>
   
-    <path d="M306 98 C294 93 286 80 293 65 C299 56 308 60 310 70 C311 77 310 88 306 98 Z" fill="#8ecdf7" stroke="#5f9ad0" stroke-width="1.5"/>
-    <path d="M306 98 C318 94 326 82 319 67 C313 58 304 62 302 72 C301 79 302 90 306 98 Z" fill="#8ecdf7" stroke="#5f9ad0" stroke-width="1.5"/>
-    <path d="M303 90 C298 86 295 79 297 72 Z" fill="none" stroke="#d8f0ff" stroke-width="3" stroke-linecap="round"/>
-    <path d="M309 91 C313 87 316 81 315 73 Z" fill="none" stroke="#d8f0ff" stroke-width="3" stroke-linecap="round"/>
+    <path d="M 306 98 C 294 93 286 80 293 65 C 299 56 308 60 310 70 C 311 77 310 88 306 98 Z" fill="#8ecdf7" stroke="#5f9ad0" stroke-width="1.5"/>
+    <path d="M 306 98 C 318 94 326 82 319 67 C 313 58 304 62 302 72 C 301 79 302 90 306 98 Z" fill="#8ecdf7" stroke="#5f9ad0" stroke-width="1.5"/>
+    <path d="M 303 90 C 298 86 295 79 297 72" fill="none" stroke="#d8f0ff" stroke-width="3" stroke-linecap="round"/>
+    <path d="M 309 91 C 313 87 316 81 315 73" fill="none" stroke="#d8f0ff" stroke-width="3" stroke-linecap="round"/>
   
 
   <!-- ======== 身体（裙摆+鲸鱼肚皮） ======== -->
@@ -91,7 +92,10 @@
       </g>
     </g>
     <!-- 闭眼（睡觉/被拎起来时显示） -->
-    
+    <g id="wlgEyesClosed" fill="none" stroke="#1e8fe0" stroke-width="3.5" stroke-linecap="round">
+      <path d="M69 86 Q 78 94 87 86"/>
+      <path d="M109 86 Q 118 94 127 86"/>
+    </g>
 
     <!-- 眉毛 -->
     <g id="wlgBrows" fill="none" stroke="#8ad0ff" stroke-width="3" stroke-linecap="round" opacity=".85">
@@ -127,7 +131,13 @@
 
     <!-- 头顶喷水孔 + 喷泉（鲸鱼娘的本体特征！） -->
     <ellipse id="wlgBlow" cx="122" cy="33" rx="6.5" ry="3" fill="#6fafe0" stroke="#4f8fc8" stroke-width="1.5"/>
-    
+    <g id="wlgSpout">
+      <path d="M122 31 C 120 22 121 14 126 8" fill="none" stroke="#9fd4f7" stroke-width="4.5" stroke-linecap="round"/>
+      <ellipse cx="127" cy="7" rx="6" ry="3" fill="#bfe6ff"/>
+      <circle cx="118" cy="11" r="2.2" fill="#9fd4f7"/>
+      <circle cx="134" cy="15" r="1.8" fill="#9fd4f7"/>
+      <circle cx="125" cy="3" r="2.4" fill="#bfe6ff"/>
+    </g>
   </g>
 
   <!-- ======== 手臂（枕着下巴） ======== -->
@@ -141,17 +151,38 @@
   </g>
 
   <!-- ======== 笔记本电脑（工作模式出现） ======== -->
-  
+  <g id="wlgLaptop">
+    <ellipse cx="160" cy="150" rx="44" ry="4" fill="rgba(20,50,100,.14)"/>
+    <rect x="124" y="138" width="72" height="7" rx="2.5" fill="#e3ecf5" stroke="#b9c8d8" stroke-width="1.5"/>
+    <rect x="130" y="120" width="60" height="18" rx="2.5" fill="#2c3e54" stroke="#b9c8d8" stroke-width="1"/>
+    <rect x="132" y="122" width="56" height="14" fill="#0f2b45"/>
+    <rect x="134" y="124" width="26" height="2" fill="#4fd6a8"/>
+    <rect x="134" y="128" width="18" height="2" fill="#ffd98a"/>
+    <rect x="134" y="132" width="22" height="2" fill="#7cc4f7"/>
+    <g id="wlgTypeHands">
+      <ellipse cx="144" cy="141" rx="4.5" ry="4" fill="#ffe9de" stroke="#f6c9b8" stroke-width="1.5"/>
+      <ellipse cx="160" cy="141" rx="4.5" ry="4" fill="#ffe9de" stroke="#f6c9b8" stroke-width="1.5"/>
+    </g>
+  </g>
 
   <!-- 工作时的小汗滴 / 难过时的眼泪 -->
   <path id="wlgSweat" d="M150 58 C 146 64 146 68 150 70 C 154 68 154 64 150 58 Z" fill="#7cc4f7" stroke="#5f9ad0" stroke-width="1"/>
   <path id="wlgTear" d="M136 89 C 132 94 132 98 136 100 C 140 98 140 94 136 89 Z" fill="#7cc4f7" stroke="#5f9ad0" stroke-width="1"/>
 
   <!-- 开心时的音符 -->
-  
+  <g id="wlgNote" fill="#ff9ecb">
+      <ellipse cx="150" cy="52" rx="4" ry="3"/>
+      <rect x="153" y="36" width="2" height="16"/>
+      <ellipse cx="163" cy="45" rx="3.4" ry="2.6"/>
+      <rect x="165.6" y="31" width="2" height="14"/>
+    </g>
 
   <!-- 睡觉 Zzz -->
-  
+  <g id="wlgZzz" fill="#7fc2f2">
+      <path d="M150 34 L158 34 L150 42 L158 42" stroke="#7fc2f2" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M160 24 L170 24 L160 34 L170 34" stroke="#7fc2f2" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M172 12 L184 12 L172 24 L184 24" stroke="#7fc2f2" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
 
   <!-- 泡泡（慢悠悠往上飘） -->
   <g id="wlgBubbles" fill="#bfe6ff">
@@ -165,17 +196,17 @@
 
   <!-- 星星闪片 -->
   <g id="wlgSparkles" fill="#ffd98a">
-    <g>
-      <path d="M0 -4.6 L1.4 -1.4 L4.6 0 L1.4 1.4 L0 4.6 L-1.4 1.4 L-4.6 0 L-1.4 -1.4 Z"/>
-    </g>
-    <g>
-      <path d="M0 -4.6 L1.4 -1.4 L4.6 0 L1.4 1.4 L0 4.6 L-1.4 1.4 L-4.6 0 L-1.4 -1.4 Z"/>
-    </g>
-    <g>
-      <path d="M0 -4.6 L1.4 -1.4 L4.6 0 L1.4 1.4 L0 4.6 L-1.4 1.4 L-4.6 0 L-1.4 -1.4 Z"/>
-    </g>
-    <g>
-      <path d="M0 -4.6 L1.4 -1.4 L4.6 0 L1.4 1.4 L0 4.6 L-1.4 1.4 L-4.6 0 L-1.4 -1.4 Z"/>
-    </g>
+    
+      <path d="M 56 27.4 L 57.4 30.6 L 60.6 32 L 57.4 33.4 L 56 36.6 L 54.6 33.4 L 51.4 32 L 54.6 30.6 Z"/>
+    
+    
+      <path d="M 142 40.78 L 142.98 43.02 L 145.22 44 L 142.98 44.98 L 142 47.22 L 141.02 44.98 L 138.78 44 L 141.02 43.02 Z"/>
+    
+    
+      <path d="M 262 73.86 L 263.26 76.74 L 266.14 78 L 263.26 79.26 L 262 82.14 L 260.74 79.26 L 257.86 78 L 260.74 76.74 Z"/>
+    
+    
+      <path d="M 26 113.24 L 26.84 115.16 L 28.76 116 L 26.84 116.84 L 26 118.76 L 25.16 116.84 L 23.24 116 L 25.16 115.16 Z"/>
+    
   </g>
 </svg>

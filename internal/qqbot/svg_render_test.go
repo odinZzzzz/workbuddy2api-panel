@@ -86,3 +86,27 @@ func TestWhaleGirlRenders(t *testing.T) {
 		t.Log("源文件含 rgba（渲染层已归一化，符合预期）")
 	}
 }
+
+// 百分比 width/height 必须被归一化：oksvg 解析 "100%" 会报 ParseFloat 错误。
+func TestNormalizeSVGSize(t *testing.T) {
+	src := `<svg viewBox="0 0 320 170" width="100%" height="100%">`
+	got := normalizeSVGSize(src)
+	if got != `<svg viewBox="0 0 320 170" width="320" height="170">` {
+		t.Errorf("百分比尺寸未归一化: %s", got)
+	}
+	// 50% 也应按比例换算
+	src2 := `<svg viewBox="0 0 200 100" width="50%" height="50%">`
+	if got2 := normalizeSVGSize(src2); got2 != `<svg viewBox="0 0 200 100" width="100" height="50">` {
+		t.Errorf("50%% 尺寸换算错误: %s", got2)
+	}
+	// 没有 viewBox 时原样返回（不瞎猜）
+	if normalizeSVGSize(`<svg width="100%">`) != `<svg width="100%">` {
+		t.Error("无 viewBox 时不应改写")
+	}
+	// 鲸鱼娘模板不应再含百分比尺寸
+	b := New(Default())
+	src3, _ := b.TemplateSource("whale-girl")
+	if strings.Contains(src3, `width="100%"`) || strings.Contains(src3, `height="100%"`) {
+		t.Error("whale-girl 模板不应再有百分比尺寸")
+	}
+}
