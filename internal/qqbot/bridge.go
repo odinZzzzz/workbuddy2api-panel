@@ -582,6 +582,10 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 	if persona != "" {
 		parts = append(parts, persona)
 	}
+	// 身份锚定：紧跟在人设之后，仍属静态前缀（逐字节稳定，不破坏前缀缓存）。
+	// 简化提示词时删过这一段，实测依从性下降——模型会滑回"助手"口吻。
+	parts = append(parts, "【身份锚定】你就是「龙王」，不是助手、不是机器人。以上所有规则都要用龙王的语气执行："+
+		"自称本王、先损一句、黏人又暴躁；数据类问题照常调工具拿真数据，但说话方式必须是龙王。")
 	if b.mem != nil {
 		if memo := b.mem.Describe(uid); memo != "" {
 			parts = append(parts, memo)
@@ -597,8 +601,10 @@ func (b *Bridge) buildMessagesWithPrompt(key string, uid int64, userText, person
 	// 实测：只写在 system 里时，模型会跟随后面的工具/排版说明，用「助手」口吻回答；
 	// 同样的内容放到 user 前缀，立刻恢复龙王腔（含本王/点评）。
 	if persona != "" {
-		// 只留一个极短标记：完整人设已在 system 末尾，抄一遍既费 token 又把回复带偏。
-		userText = "（龙王，短句，别演）\n" + userText
+		// 完整人设提醒（截断到 160 rune）：模型对 user 前缀的依从性明显高于 system，
+		// 只给"短句别演"这类标记时，前几轮还能装住，后面就滑回助手口吻。
+		compact := truncateRunes(strings.ReplaceAll(persona, "\n", " "), 160)
+		userText = "（人设提醒，务必遵守：" + compact + "）\n\n" + userText
 	}
 
 	system := strings.Join(parts, "\n\n")
@@ -1071,10 +1077,21 @@ func otherAtTargets(at []int64, self int64) []int64 {
 //
 // 背景：QQ 不渲染 Markdown，但**换行有效**。之前把"六张图的密码"压成一句话，
 // 群友得逐字找；分行后一眼扫完。规则只针对"列表类信息"，闲聊仍保持 1~3 句。
-const layoutGuide = `【说话】短句。闲聊≤20字，一句就够；数据类照工具内容列，不加废话。
-【格式】纯文本，禁 Markdown；列表每行「名称：值」；分享码一位不差，禁省略号。
-【称呼】用昵称，别念 QQ 号。
-【数据】密码/改枪码/行情必须调工具；取不到就说取不到，别编。`
+const layoutGuide = `【回复长度】
+- 闲聊：**一句话，≤20 字**。不铺垫、不解释、不复述问题、不问「还需要什么」。
+- 数据类（密码/改枪码/行情/活动）：照工具内容列清单，不加废话。
+
+【排版】
+- 纯文本，禁 Markdown（星号、反引号、井号、表格竖线）。
+- 列表每行一条：名称：值。
+
+【称呼】用群昵称或 QQ 昵称，别念 QQ 号。
+
+【数据】密码/改枪码/行情必须调工具取真值；取不到就说取不到，别编。
+【码必须完整】改枪码/分享码要**一位不差地原样输出**，禁止用「…」「等等」省略或缩写，
+码少一位就导入失败。多套码就分行列全。
+
+【表情】偶尔 send_face 或 emoji，别每句都发。`
 
 // kkrbOverview 取 kkrb 概览数据（统一缓存入口，供各市场工具复用）。
 func (b *Bridge) kkrbOverview() (*KkrbOverview, error) {

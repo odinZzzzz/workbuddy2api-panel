@@ -443,6 +443,44 @@ func (b *Bridge) buildTools() *toolRegistry {
 			return "已发一张表情包", nil
 		})
 
+	// draw_sticker（画板）：SVG 自绘表情包。曾在一次"砍 schema"里被删掉，
+	// 但 bridge 的"带'画'字让给模型"分支和 get_sticker_template 都还指着它——
+	// 删掉后模型只能干说"我不会画"，工具链是断的。恢复时保留完整绘制规范
+	// （stickerStyleGuide）：没有它模型会写出 <text>/<g transform> 这类渲染不出来的东西，
+	// 白画一张空图再重试，比多占 schema 更亏。
+	add("draw_sticker", "自己画一张表情包并发到当前会话（SVG 源码，≤64KB）。只在真的想发表情时调用。"+stickerStyleGuide,
+		obj(map[string]any{
+			"svg": map[string]any{"type": "string", "description": "完整 SVG 源码，必须以 <svg 开头，含 xmlns"},
+		}, "svg"),
+		func(tc toolContext, args json.RawMessage) (string, error) {
+			var in struct {
+				SVG string `json:"svg"`
+			}
+			if err := json.Unmarshal(args, &in); err != nil {
+				return "", fmt.Errorf("参数解析失败: %w", err)
+			}
+			png, err := RenderSVG(in.SVG, 256)
+			if err != nil {
+				return "", err
+			}
+			// 空白自纠：渲染成功但几乎没内容，通常是用到了不支持的 <text>/<g transform>/clipPath。
+			// 把原因回给模型，它可以在同一轮里改对再画（比静默发出一张空白图好得多）。
+			if ink, e := inkPixels(png); e == nil && ink < 300 {
+				return "", fmt.Errorf("画出来几乎空白（非透明像素 %d）。"+
+					"检查是否用了不支持的 <text>、<g transform>、clipPath——这些不会渲染；"+
+					"请只用 path/circle/ellipse/rect/polygon/polyline/line，坐标写绝对坐标", ink)
+			}
+			path, err := tc.b.SaveGeneratedSticker(png)
+			if err != nil {
+				return "", err
+			}
+			if err := tc.b.sendImage(tc.ev, path); err != nil {
+				return "", err
+			}
+			tc.b.state.note(RecentEvent{Type: "tool", Group: tc.ev.GroupID, User: tc.ev.UserID, Action: "drawn_sticker"})
+			return "已把自绘表情包发到当前会话", nil
+		})
+
 	add("poke_user", "戳一戳当前跟你说话的人（QQ 的戳一戳动作）。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {

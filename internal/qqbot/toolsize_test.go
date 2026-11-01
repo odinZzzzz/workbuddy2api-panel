@@ -13,7 +13,11 @@ func TestToolSchemaBudget(t *testing.T) {
 	b := New(c)
 	defs := b.buildTools().defs
 	raw, _ := json.Marshal(defs)
-	const budget = 5200 // 字符；压完描述后实测 ~4.9k
+	// 预算 6500 字符：4.9k 是"只有短描述"时的水位；draw_sticker（画板）带一份
+	// 525 字符的 SVG 绘制规范，是唯一一个"长描述物有所值"的工具——少了它模型会写
+	// <text>/<g transform> 这类渲染不出来的元素，白画一张空图再重试，比占 schema 更亏。
+	// 其余工具仍要求短描述：新增工具若把预算顶穿，先想清楚值不值。
+	const budget = 6500
 	if len(raw) > budget {
 		t.Fatalf("工具 schema %d 字符，超预算 %d（每个工具的描述都要短，别把使用说明写进 schema）", len(raw), budget)
 	}
