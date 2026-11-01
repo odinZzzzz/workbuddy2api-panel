@@ -13,8 +13,8 @@ func TestBuiltinTemplatesRender(t *testing.T) {
 		t.Fatalf("内置模板应有 4 个以上，实际 %d", len(list))
 	}
 	for _, tp := range list {
-		if !strings.Contains(strings.Join([]string{"wave", "starry", "scream", "pearl"}, ","), tp.Name) {
-			continue // 跳过外部目录里的自定义模板
+		if strings.HasPrefix(tp.Desc, "自定义模板") {
+			continue // 外部目录里的自定义模板由用户负责
 		}
 		src, err := b.TemplateSource(tp.Name)
 		if err != nil {

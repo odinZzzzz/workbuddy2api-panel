@@ -390,6 +390,9 @@ func (b *Bridge) buildTools() *toolRegistry {
 			for _, tp := range tc.b.ListTemplates() {
 				sb.WriteString("- " + tp.Name + "：" + tp.Desc + "\n")
 			}
+			// 规范随结果下发：模型挑模板时一并拿到"怎么画才不丑"，而不必每个请求
+			// 都把这 1KB 塞进 tool schema（那是常驻成本，这个是按需成本）。
+			sb.WriteString(stickerStyleGuide)
 			return sb.String(), nil
 		})
 
@@ -404,7 +407,11 @@ func (b *Bridge) buildTools() *toolRegistry {
 			if err := json.Unmarshal(args, &in); err != nil {
 				return "", err
 			}
-			return tc.b.TemplateSource(in.Name)
+			src, err := tc.b.TemplateSource(in.Name)
+			if err != nil {
+				return "", err
+			}
+			return stickerStyleGuide + "\n【模板源码】\n" + src, nil
 		})
 
 	add("send_face", "发 QQ 原生表情。name 传中文名或 id。常用："+faceNames(),
@@ -448,7 +455,14 @@ func (b *Bridge) buildTools() *toolRegistry {
 	// 删掉后模型只能干说"我不会画"，工具链是断的。恢复时保留完整绘制规范
 	// （stickerStyleGuide）：没有它模型会写出 <text>/<g transform> 这类渲染不出来的东西，
 	// 白画一张空图再重试，比多占 schema 更亏。
-	add("draw_sticker", "自己画一张表情包并发到当前会话（SVG 源码，≤64KB）。只在真的想发表情时调用。"+stickerStyleGuide,
+	// 注意：完整的绘制规范（stickerStyleGuide，1KB）**不放进 schema**——
+	// 每个请求都要为它付 token，而模型只在真要画时才需要。改为由
+	// list_sticker_templates / get_sticker_template 的结果下发（见下方两个工具）。
+	// 描述里只留最容易翻车的三条硬规则。
+	add("draw_sticker", "自己画一张表情包并发到当前会话（SVG 源码，≤64KB）。"+
+		"先 list_sticker_templates 挑最接近的模板（结果里带完整绘制规范），get_sticker_template 取源码，"+
+		"改配色/换五官再画；没有合适的才凭空画。硬规则：不用 <text>/<g transform>/clipPath；"+
+		"五官必须在脸轮廓内；只能用 path/circle/ellipse/rect/polygon/polyline/line。",
 		obj(map[string]any{
 			"svg": map[string]any{"type": "string", "description": "完整 SVG 源码，必须以 <svg 开头，含 xmlns"},
 		}, "svg"),

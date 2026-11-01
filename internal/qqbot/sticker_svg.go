@@ -37,15 +37,31 @@ import (
 //
 // 所以规范里最要紧的两条是：**别写文字**、**别用 transform 分组**（坐标要自己算好）。
 const stickerStyleGuide = `
-画布：viewBox="0 0 256 256"，背景铺满整块。
+画布：viewBox="0 0 256 256"，背景铺满整块（渐变或纯色）。
 只能用的元素：path、circle、ellipse、rect（可用 rx 圆角）、polygon、polyline、line。
 只能用的属性：fill、stroke、stroke-width、stroke-linecap、stroke-dasharray、opacity、
   fill-opacity、linearGradient/radialGradient（用 url(#id) 引用）、<use href="#id">。
 **禁止**：<text>（渲染不出来）、<g transform>（整组不画）、clipPath/mask/filter、<style>/CSS、外部图片。
 所有坐标直接算成绝对坐标（没有 transform 可用）。
-画风：粗描边（stroke-width 6~12）+ 纯色/渐变填充 + 大脸 + 少元素（5~15 个形状），
-  靠眼睛形状/眉毛角度/嘴型/汗滴/怒气符号表达情绪，不靠文字。
-配色：主色 + 对比色 + 一个强调色，深色描边（#1b2330 之类）保证小图也清楚。
+
+【构图硬规则】照着做就不会丑：
+- 脸是主体：圆心 (128,132)、半径 86，描边 #1b2330、stroke-width 10。
+- 五官必须落在脸内：任一点到圆心距离 ≤ 74。绝对不要让眉毛/标记横穿脸轮廓线
+  （穿出去就成"飘在脸外的黑棍"，这是最常见的丑法）。
+- 情绪标记（怒火、汗滴、星星）放四角（如 208,56 / 210,66 / 50,72），与脸留 10px 间隙。
+- 形状总数 6~10 个，别堆细节：QQ 里实际只显示约 150px，细节全糊。
+- 眉毛：stroke-width 13~14 + stroke-linecap="round" 的直线或弧线；眼睛：实心圆 r≈12~13
+  + 白色高光小圆 r≈4.5（左上偏 4~5px）；嘴：一条 path（张嘴填深色 + 两个白三角当牙，
+  笑嘴用 stroke 弧线）。
+
+【配色】三色原则，多必脏：
+- 底色深（#4a1512 / #15101f / #5c7188），让脸跳出来。
+- 脸亮（#ffe98c→#f2b116 或 #ffffff→#e7ecf3 的渐变）。
+- 描边与五官统一 #1b2330，别用纯黑、别中途换色。
+- 一个强调色（#ff4d3d 怒 / #7ec8f2 汗 / #ffe27a 星），只出现在标记上。
+
+【流程】要画表情时：先 list_sticker_templates 看有没有接近的；有就 get_sticker_template
+取源码，改配色/换五官/加标记再画；确实没有合适的才凭空画。
 `
 
 // inkPixels 数非透明像素（判断"画出来了没有"）。
