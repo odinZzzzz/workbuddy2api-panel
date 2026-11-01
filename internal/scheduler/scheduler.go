@@ -638,6 +638,9 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 	var wg sync.WaitGroup
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	// 并发上限：账号多时不要一次打出去几十个 RPC（上游会当成异常流量限流，
+	// 反而拖慢整轮）。6 路并发在个位数账号下等于全并行，账号多时又能兜住。
+	sem := make(chan struct{}, 6)
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -649,6 +652,8 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		wg.Add(1)
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			snap, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)

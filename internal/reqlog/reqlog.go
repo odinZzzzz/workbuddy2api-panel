@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -530,17 +531,31 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 	// 顺序——同一秒内连续轮转写出的多个文件 mtime 经常完全相同（Linux 文件时间戳粒度粗），
 	// os.ReadDir 的字典序又会把装着最早事件的基准文件 requests-<day>.jsonl 排在
 	// requests-<day>.N.jsonl 之后；目录被整体拷贝 / 恢复备份后 mtime 更不可信。
+	// 按「日期分组、从新到旧、文件内从尾往前」读，凑够 limit 就停。
+	//
+	// 以前是：把 retention 期内**所有**归档文件整读 + 每条 JSON 都反序列化 +
+	// 全量排序后再截断。7 天 retention + 正常流量下就是几十万条记录，一次请求
+	// 10s 起步（面板「请求日志」实测 600 条要 10.6s）。而这个接口要的只是
+	// "最近 N 条"，完全没必要碰老数据：
+	//   - 文件名带日期（requests-YYYY-MM-DD.jsonl[.N]），日期序可靠；
+	//   - 同一天内后缀越大越新；
+	//   - 文件内按写入顺序追加，所以从文件尾往前扫就是时间倒序。
+	// 停止条件：某一天读完后已凑够 limit —— 更早的日期不可能包含更新的记录。
 	var out []Event
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
-			continue
+	for _, day := range archiveDaysDesc(entries) {
+		for _, name := range day.filesDesc() {
+			if len(out) >= limit {
+				break
+			}
+			rows, err := readFileTail(filepath.Join(w.cfg.Dir, name), filter, limit-len(out))
+			if err != nil {
+				return out, err
+			}
+			out = append(out, rows...)
 		}
-		rows, err := readFile(filepath.Join(w.cfg.Dir, name), filter)
-		if err != nil {
-			return out, err
+		if len(out) >= limit {
+			break
 		}
-		out = append(out, rows...)
 	}
 	// 契约：按事件时间倒序返回最近 limit 条（同一时刻用 Stable 保留落盘先后）。
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
@@ -548,6 +563,189 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// archiveDay 某一天的全部归档文件（含轮转后缀）。
+type archiveDay struct {
+	day   string
+	files []archiveFile // 已排序：后缀大的（新的）在前
+}
+
+type archiveFile struct {
+	name string
+	seq  int // 后缀数字；无后缀 = 0（当天最早的那个文件）
+}
+
+func (d archiveDay) filesDesc() []string {
+	out := make([]string, 0, len(d.files))
+	for _, f := range d.files {
+		out = append(out, f.name)
+	}
+	return out
+}
+
+// archiveDaysDesc 把归档文件按日期分组，返回日期从新到旧的组。
+//
+// 文件名格式：requests-YYYY-MM-DD.jsonl（当天基准文件）与
+// requests-YYYY-MM-DD.N.jsonl（大小轮转）。日期部分可直接字典序比较。
+func archiveDaysDesc(entries []os.DirEntry) []archiveDay {
+	byDay := map[string]*archiveDay{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		rest := strings.TrimSuffix(strings.TrimPrefix(name, "requests-"), ".jsonl")
+		day, seq := rest, 0
+		if i := strings.LastIndex(rest, "."); i > 0 {
+			day = rest[:i]
+			if n, err := strconv.Atoi(rest[i+1:]); err == nil {
+				seq = n
+			}
+		}
+		g := byDay[day]
+		if g == nil {
+			g = &archiveDay{day: day}
+			byDay[day] = g
+		}
+		g.files = append(g.files, archiveFile{name: name, seq: seq})
+	}
+	days := make([]archiveDay, 0, len(byDay))
+	for _, g := range byDay {
+		sort.Slice(g.files, func(i, j int) bool { return g.files[i].seq > g.files[j].seq })
+		days = append(days, *g)
+	}
+	sort.Slice(days, func(i, j int) bool { return days[i].day > days[j].day })
+	return days
+}
+
+// archiveTailChunk 反向扫描的分块大小（测试可覆盖以强制跨块边界）。
+var archiveTailChunk int64 = 256 << 10
+
+// readFileTail 从文件尾向前分块扫描，凑够 need 条匹配就停（不必读完整个文件）。
+//
+// 为什么反向读：日志只有追加，越靠文件尾越新；找"最近 N 条"从尾往前扫命中率最高，
+// 大文件下能把读取量从"整个文件"降到"最后几十 KB"。
+//
+// 跨块处理：块边界会切开某一行——被切开的那行，前半在本次块尾、后半在上一次读到
+// （更新）的块里。所以用 tailPartial（本块尾部半行）+ carry（上一块的续接部分）
+// 拼回完整行再解析；拼不上的整块并入 carry 继续往前。丢了这一步就会零星丢记录。
+func readFileTail(path string, filter Filter, need int) ([]Event, error) {
+	if need <= 0 {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := st.Size()
+	var (
+		out    []Event
+		carry  []byte // 上一块（更新侧）留下的半行续接部分
+		offset = size
+	)
+	for offset > 0 && len(out) < need {
+		n := archiveTailChunk
+		if offset < n {
+			n = offset
+		}
+		offset -= n
+		buf := make([]byte, n)
+		if _, err := f.ReadAt(buf, offset); err != nil && err != io.EOF {
+			return out, err
+		}
+		data := buf
+		var tailPartial []byte
+		// 本块尾部（较新一侧）被切开：摘出来等和 carry 拼。
+		if offset+n < size {
+			if j := lastIndexByte(data, '\n'); j >= 0 {
+				tailPartial = data[j+1:]
+				data = data[:j+1]
+			} else {
+				tailPartial = data
+				data = nil
+			}
+		}
+		// 先处理"跨块那一行"（它是本块里最新的一行）。
+		if len(carry) > 0 {
+			if tailPartial != nil {
+				line := make([]byte, 0, len(tailPartial)+len(carry))
+				line = append(line, tailPartial...)
+				line = append(line, carry...)
+				appendEvent(&out, line, filter)
+			}
+			carry = nil
+		}
+		// 本块头部（较旧一侧）也可能是半行：留到下一块（更旧）拼。
+		if offset > 0 {
+			if i := indexByte(data, '\n'); i >= 0 {
+				carry = append([]byte{}, data[:i+1]...)
+				data = data[i+1:]
+			} else {
+				carry = append([]byte{}, data...)
+				continue
+			}
+		}
+		// 本块剩下的都是完整行：从后往前解析（= 时间倒序）。
+		lines := splitLines(data)
+		for i := len(lines) - 1; i >= 0 && len(out) < need; i-- {
+			if len(lines[i]) == 0 {
+				continue
+			}
+			appendEvent(&out, lines[i], filter)
+		}
+	}
+	return out, nil
+}
+
+func appendEvent(out *[]Event, line []byte, filter Filter) {
+	if len(line) == 0 {
+		return
+	}
+	var e Event
+	if json.Unmarshal(line, &e) != nil || !filter.match(e) {
+		return
+	}
+	*out = append(*out, e)
+}
+
+func lastIndexByte(b []byte, c byte) int {
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexByte(b []byte, c byte) int {
+	for i := range b {
+		if b[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// splitLines 按 '\n' 切分，保留每行原始字节（不拷贝整行，只切片）。
+func splitLines(b []byte) [][]byte {
+	out := make([][]byte, 0, 64)
+	start := 0
+	for i := range b {
+		if b[i] == '\n' {
+			out = append(out, b[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(b) {
+		out = append(out, b[start:])
+	}
+	return out
 }
 
 func readFile(path string, filter Filter) ([]Event, error) {

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -110,6 +111,10 @@ type Panel struct {
 	// 不同账号之间不互斥（并行照旧）。TryLock 语义，锁条目常驻（账号数有界）。
 	taskMu    sync.Mutex
 	taskLocks map[string]*sync.Mutex
+
+	// balanceBusy 手动全量余额刷新的单飞标记：连点/多标签页同时点「刷新余额」时，
+	// 只允许一轮在跑，其余请求立即返回"进行中"，避免每点一次就放大 N 次上游 RPC。
+	balanceBusy atomic.Bool
 
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
@@ -234,7 +239,9 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.applyCORS(w, r) {
 		return // 预检请求已在此应答
 	}
-	p.mux.ServeHTTP(w, r)
+	// /panel/api/* 走 gzip：请求日志这类接口动辄几百 KB 明文 JSON，
+	// 服务端 10ms 出结果、公网却要 5s，瓶颈全在传输。
+	withGzipAPI(p.mux).ServeHTTP(w, r)
 }
 
 // applyCORS 处理前后端分离部署的跨域访问。
@@ -786,15 +793,45 @@ func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 // balanceAll 手动全量刷新余额：并发查上游、写回池内 credits（含解冻语义），
 // 完成后返回——面板紧接着拉 overview 即是最新值。账号量小（个位数），
 // 同步等待（上限受短 RPC 超时约束）比"触发后盲刷"体验更确定。
+// balanceAllDeadline 手动刷新的响应等待上限。
+//
+// 为什么必须有：余额 RPC 走的是通用 HTTP client（总超时 120s），一个卡住的号会把
+// RunBalanceRefreshNow 的 wg.Wait() 拖到几十秒——面板按钮"卡五秒"就是这么来的。
+// 现在到点就先回（数据是池内当前值，刷新在后台继续写入），前端不会白等。
+const balanceAllDeadline = 3 * time.Second
+
 func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	p.cfg.Scheduler.RunBalanceRefreshNow()
-	p.syncNicknames()
-	log.Printf("panel: 手动全量余额刷新完成")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
+	// 单飞：已经有一轮在跑就直接告诉前端"进行中"，不叠加新的上游请求。
+	if !p.balanceBusy.CompareAndSwap(false, true) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "running": true, "accounts": p.cfg.Pool.List(),
+		})
+		return
+	}
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer p.balanceBusy.Store(false)
+		p.cfg.Scheduler.RunBalanceRefreshNow()
+		p.syncNicknames()
+		log.Printf("panel: 手动全量余额刷新完成（%.1fs）", time.Since(start).Seconds())
+	}()
+
+	select {
+	case <-done:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
+	case <-time.After(balanceAllDeadline):
+		// 到点先回：刷新仍在后台跑完并写回池内，面板下次拉 overview 就是新值。
+		log.Printf("panel: 手动全量余额刷新超过 %s，先返回当前快照（后台继续）", balanceAllDeadline)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "slow": true, "accounts": p.cfg.Pool.List(),
+		})
+	}
 }
 
 // syncNicknames 手动刷新时的昵称同步（issue #94：上游改名免重登）。
