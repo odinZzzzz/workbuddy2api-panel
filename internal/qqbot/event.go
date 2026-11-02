@@ -37,6 +37,8 @@ type segment struct {
 		QQ   string `json:"qq"`
 		File string `json:"file"`
 		URL  string `json:"url"`
+		// ID 引用回复（reply）与合并转发（forward）的消息 id，见 quote.go。
+		ID string `json:"id"`
 	} `json:"data"`
 }
 

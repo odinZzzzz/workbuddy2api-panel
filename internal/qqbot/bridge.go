@@ -210,6 +210,16 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 引用回复 / 合并转发：把被引用的正文回填进 userText。
+	// reply / forward 段本身只带 id，正文要 get_msg / get_forward_msg 拉回来，
+	// 否则模型只看到"（回复了一条消息）"而答非所问。失败静默（不阻断对话）。
+	if quote := b.quoteContext(ev.Message); quote != "" {
+		if text == "" {
+			text = quote
+		} else {
+			text = quote + " " + text
+		}
+	}
 	// 到达即记一行：排查"为什么没回复"时，必须先能区分"事件没到"与"规则挡掉"。
 	log.Printf("[qqbot] event type=%s group=%d user=%d at=%v len=%d",
 		ev.MessageType, ev.GroupID, ev.UserID, atBot, len([]rune(text)))
@@ -995,18 +1005,27 @@ func (b *Bridge) sendImage(ev *Event, ref string) error {
 	return b.callAction(action, payload)
 }
 
-// callAction 通用 OneBot 动作调用（send/poke 共用）。
+// callAction 通用 OneBot 动作调用（send/poke 共用，不关心返回数据）。
 func (b *Bridge) callAction(action string, payload map[string]any) error {
+	_, err := b.callActionResult(action, payload)
+	return err
+}
+
+// callActionResult 通用 OneBot 动作调用，并返回 data 字段。
+//
+// 为什么要有它：get_msg / get_forward_msg 这类"取内容"的动作需要读返回结果，
+// 原来的 callAction 只返回 error，把 body 丢了。两者共用同一套超时/鉴权逻辑。
+func (b *Bridge) callActionResult(action string, payload map[string]any) (map[string]any, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	url := b.cfg().OneBotAPI + "/" + action
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if tok := b.cfg().OneBotToken; tok != "" {
@@ -1014,18 +1033,22 @@ func (b *Bridge) callAction(action string, payload map[string]any) error {
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	var r struct {
-		RetCode int    `json:"retcode"`
-		Msg     string `json:"message"`
+		RetCode int            `json:"retcode"`
+		Msg     string         `json:"message"`
+		Data    map[string]any `json:"data"`
 	}
-	if json.Unmarshal(body, &r) == nil && r.RetCode != 0 {
-		return fmt.Errorf("onebot %s retcode=%d msg=%s", action, r.RetCode, r.Msg)
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, fmt.Errorf("onebot %s 返回解析失败: %w", action, err)
 	}
-	return nil
+	if r.RetCode != 0 {
+		return nil, fmt.Errorf("onebot %s retcode=%d msg=%s", action, r.RetCode, r.Msg)
+	}
+	return r.Data, nil
 }
 
 // pickSticker 从表情包目录随机挑一张（目录为空返回空串）。

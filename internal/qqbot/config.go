@@ -170,7 +170,7 @@ func Default() Config {
 		MemoryScope:        "per_user",
 		MemoryFile:         "data/users.json",
 		MemoryNotesPerUser: 5,
-		MaxHistoryPairs:    3,
+		MaxHistoryPairs:    8,
 		SessionTTLMinutes:  30,
 		RatePerMinute:      6,
 		MaxReplyRunes:      1200,
