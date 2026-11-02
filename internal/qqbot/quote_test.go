@@ -65,3 +65,46 @@ func TestParseIntAny(t *testing.T) {
 		t.Errorf("非数字应为 0，实际 %d", n)
 	}
 }
+
+// 被引用的消息如果是合并转发，必须能取出 forward id 去展开正文。
+func TestForwardIDOf(t *testing.T) {
+	body := []any{
+		map[string]any{"type": "forward", "data": map[string]any{"id": "7703400622907597409"}},
+	}
+	if got := forwardIDOf(body); got != "7703400622907597409" {
+		t.Errorf("forwardIDOf = %q", got)
+	}
+	// 普通文本消息没有 forward
+	if got := forwardIDOf([]any{
+		map[string]any{"type": "text", "data": map[string]any{"text": "hi"}},
+	}); got != "" {
+		t.Errorf("普通消息应为空，实际 %q", got)
+	}
+	// 非数组不 panic
+	if got := forwardIDOf("str"); got != "" {
+		t.Errorf("非数组应为空，实际 %q", got)
+	}
+}
+
+// 合并转发的正文嵌在 forward.data.content 里（实测 NapCat 结构），必须展开。
+func TestFlattenNestedForward(t *testing.T) {
+	inner := []any{
+		map[string]any{"type": "text", "data": map[string]any{"text": "第一句"}},
+		map[string]any{"type": "image", "data": map[string]any{"file": "a.jpg"}},
+	}
+	outer := []any{
+		map[string]any{"type": "forward", "data": map[string]any{"id": "1", "content": inner}},
+	}
+	got := flattenSegments(outer)
+	if !strings.Contains(got, "第一句") || !strings.Contains(got, "[图片]") {
+		t.Fatalf("嵌套转发未展开: %q", got)
+	}
+	if strings.Contains(got, "[聊天记录]") {
+		t.Errorf("有内容时不该只剩占位符: %q", got)
+	}
+	// 没有 content（只有 id）时回落到占位符
+	noContent := []any{map[string]any{"type": "forward", "data": map[string]any{"id": "9"}}}
+	if g := flattenSegments(noContent); !strings.Contains(g, "[聊天记录]") {
+		t.Errorf("无 content 应回落到占位符: %q", g)
+	}
+}

@@ -78,6 +78,11 @@ func (b *Bridge) quoteContext(raw json.RawMessage) string {
 }
 
 // fetchQuotedMessage 用 get_msg 取被引用消息的正文。
+//
+// 特例：被引用的可能是**别人转发的聊天记录合集**（forward）。那种消息 get_msg
+// 只会返回一个 forward 段（里面只有一个 id），正文要再 get_forward_msg 展开。
+// 实测这就是"引用了聊天记录却读不到"的原因：只回填成 [聊天记录] 占位符。
+// 只展开一层（嵌套转发不再递归），避免套娃把 prompt 撑爆。
 func (b *Bridge) fetchQuotedMessage(id int64) string {
 	res, err := b.callActionResult("get_msg", map[string]any{"message_id": id})
 	if err != nil {
@@ -94,6 +99,13 @@ func (b *Bridge) fetchQuotedMessage(id int64) string {
 		}
 	}
 	body := flattenSegments(res["message"])
+
+	// 被引用的是合并转发 → 展开聊天记录正文（一层）
+	if fid := forwardIDOf(res["message"]); fid != "" {
+		if inner := b.fetchForwardMessages(fid); inner != "" {
+			body = "聊天记录：" + inner
+		}
+	}
 	if body == "" {
 		return ""
 	}
@@ -101,6 +113,28 @@ func (b *Bridge) fetchQuotedMessage(id int64) string {
 		return truncateRunes(sender+"说："+body, maxQuoteRunes)
 	}
 	return truncateRunes(body, maxQuoteRunes)
+}
+
+// forwardIDOf 从消息体里取 forward 段的 id（没有则空）。
+func forwardIDOf(v any) string {
+	arr, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	for _, it := range arr {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t != "forward" {
+			continue
+		}
+		data, _ := m["data"].(map[string]any)
+		if id, _ := data["id"].(string); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // fetchForwardMessages 用 get_forward_msg 取合并转发里的前若干条。
@@ -145,8 +179,18 @@ func (b *Bridge) fetchForwardMessages(id string) string {
 }
 
 // flattenSegments 把 message 字段（数组段或纯字符串）压成纯文本。
-// 图片等无法取回正文的段用占位标记，避免模型以为"什么都没有"。
+//
+// 关键：**合并转发的内容直接嵌在 forward 段的 data.content 里**（实测 NapCat 的
+// get_forward_msg 返回就是这样，嵌套时 content 里还有 content），不用再请求一次。
+// 之前这里只输出 "[聊天记录]" 占位符 —— 那就是"引用了聊天记录却读不到"的根因。
 func flattenSegments(v any) string {
+	return flattenSegmentsDepth(v, 0)
+}
+
+// maxForwardDepth 转发嵌套展开层数上限（实测有套娃转发，防无限递归）。
+const maxForwardDepth = 3
+
+func flattenSegmentsDepth(v any, depth int) string {
 	switch t := v.(type) {
 	case string:
 		return strings.TrimSpace(t)
@@ -171,6 +215,17 @@ func flattenSegments(v any) string {
 			case "reply":
 				// 不递归展开引用，避免无限套娃
 			case "forward":
+				// 展开聊天记录正文（content 里是消息数组）
+				if depth >= maxForwardDepth {
+					parts = append(parts, "[聊天记录]")
+					continue
+				}
+				if content, ok := data["content"]; ok {
+					if inner := flattenSegmentsDepth(content, depth+1); inner != "" {
+						parts = append(parts, "〔聊天记录："+inner+"〕")
+						continue
+					}
+				}
 				parts = append(parts, "[聊天记录]")
 			}
 		}
