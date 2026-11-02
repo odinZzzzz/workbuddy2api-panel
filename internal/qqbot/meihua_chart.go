@@ -67,13 +67,21 @@ func RenderMeihuaChart(r MeihuaResult, fontPath string) ([]byte, error) {
 			name := fitText(fontPath, 24, p.name, cardW-36)
 			drawText(img, fontPath, 24, x+18, y+66, name, mhInk)
 		}
-		// 六爻：自下而上，第 1 爻画在最下面
+		// 六爻：自下而上，第 1 爻画在最下面。
+		// **上卦（4-6爻）与下卦（1-3爻）分成两组**，中间留明显间隔——
+		// 传统画法就是上下两卦分开看，6 条连成一排会读错卦。
 		yaoW, yaoH := 120, 13
 		cx := x + cardW/2
 		for k := 0; k < 6; k++ {
 			// k=0 → 第 1 爻（最下）
 			lineIdx := k // Lines[0] 是最下爻
-			yy := y + cardH - 50 - k*30
+			// 位置：最上爻从卡片顶部 90px 起（避开卦名），爻距 28px，
+			// 下卦整体再下移 18px → 上下卦之间出现明显间隔。
+			sep := 0
+			if k < 3 {
+				sep = 18
+			}
+			yy := y + 90 + (5-k)*28 + sep
 			yang := p.lines[lineIdx]
 			isMoving := p.mark == k+1
 			col := mhInk
@@ -159,11 +167,13 @@ func asciiHexagram(lines [6]bool, moving int) string {
 		if k+1 == moving {
 			sb.WriteString("   ← 动")
 		}
-		if k > 0 {
+		sb.WriteString("\n")
+		// 上卦（4-6爻）与下卦（1-3爻）之间空一行：传统画法要分开看
+		if k == 3 {
 			sb.WriteString("\n")
 		}
 	}
-	return sb.String()
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // meihuaSummary 图之后单独发的那条文字解析：简化六爻图 + 体用 + 断语。
