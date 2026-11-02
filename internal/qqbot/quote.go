@@ -202,6 +202,30 @@ func flattenSegmentsDepth(v any, depth int) string {
 				continue
 			}
 			typ, _ := m["type"].(string)
+			// 转发 content 里装的是**完整消息对象**（{sender, message:[…]}），
+			// 没有 type 字段。之前只认 type → 全部跳过，展开结果只剩占位符
+			// （用线上真实样本一测就暴露了）。这里补上这种形态。
+			if typ == "" {
+				if inner, ok := m["message"]; ok {
+					nick := ""
+					if s, ok := m["sender"].(map[string]any); ok {
+						if n, _ := s["nickname"].(string); n != "" {
+							nick = n
+						} else if c, _ := s["card"].(string); c != "" {
+							nick = c
+						}
+					}
+					body := flattenSegmentsDepth(inner, depth)
+					if body != "" {
+						if nick != "" {
+							parts = append(parts, nick+"："+body)
+						} else {
+							parts = append(parts, body)
+						}
+					}
+					continue
+				}
+			}
 			data, _ := m["data"].(map[string]any)
 			switch typ {
 			case "text":
