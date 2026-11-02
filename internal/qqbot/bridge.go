@@ -444,9 +444,10 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 	case "/summary", "/whois":
 		out = b.summaryOf(ev, arg, atTargets)
 	case "/meihua":
-		// 梅花易数：确定性起卦（时间/报数），卦象与断语由规则算出，
-		// 不靠模型编——占卜的可信度全在规则上。
-		out = meihuaReply(arg)
+		// 梅花易数：先发卦象图（画板），再单独发一条文字解析。
+		// 卦象与断语由规则算出，不靠模型编——占卜的可信度全在规则上。
+		b.sendMeihua(ev, arg)
+		return
 	case "/rap":
 		// 先试记忆型锐评（@某人 / QQ 号）；""
 		// 表示要锐评的是话题 → 交给模型现写一句。

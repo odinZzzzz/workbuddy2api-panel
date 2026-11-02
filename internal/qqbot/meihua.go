@@ -17,6 +17,7 @@ package qqbot
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +115,28 @@ func MeihuaByTime(t time.Time) MeihuaResult {
 	r := buildMeihua(upper, lower, moving)
 	r.Method = fmt.Sprintf("时间起卦（公历 %04d-%02d-%02d %s时）",
 		year, month, day, shichenName(shi))
+	return r
+}
+
+// MeihuaByUserTime QQ号 + 时间起卦（**默认**：用户没报数时用这个）。
+//
+// 规则：上卦 = QQ号，下卦 = 时间（年月日+时辰），动爻 = (QQ号+时间)%6。
+// 为什么用 QQ 号：卦要绑到人——同一时间不同人问同一件事，卦象应当不同；
+// 同一个人的卦又会随时间推移而变（时间在变），符合"随时起卦"的本意。
+func MeihuaByUserTime(qq int64, t time.Time) MeihuaResult {
+	year, month, day := t.Year(), int(t.Month()), t.Day()
+	shi := shichen(t.Hour())
+	tsum := year + month + day + shi
+	qqNum := int(qq % 8)
+	if qqNum <= 0 {
+		qqNum += 8
+	}
+	upper := qqNum
+	lower := cyc(tsum, 8)
+	moving := cyc(int(qq%100000)+tsum, 6)
+	r := buildMeihua(upper, lower, moving)
+	r.Method = fmt.Sprintf("QQ号+时间起卦（%d / 公历 %04d-%02d-%02d %s时）",
+		qq, year, month, day, shichenName(shi))
 	return r
 }
 
@@ -236,12 +259,12 @@ func (r MeihuaResult) Text() string {
 //   - 「占卜 明天面试能过吗」→ 字数起卦（问题字数 + 当前时辰）
 //   - 「起卦 3,8」→ 报数起卦
 //   - 「占卜」→ 纯时间起卦
-func meihuaReply(arg string) string {
+//
+// meihuaResult 按参数决定起卦方式，返回卦象结果。
+//   - 报数（"3,8" / "7"）→ 数字起卦
+//   - 其他（有问事或空）→ **QQ号 + 时间起卦**（默认，用户指定）
+func meihuaResult(uid int64, arg string) MeihuaResult {
 	arg = strings.TrimSpace(arg)
-	if arg == "" {
-		return MeihuaByTime(time.Now()).Text()
-	}
-	// 报数：全角/半角逗号、空格、斜杠分隔的两个数
 	nums := strings.FieldsFunc(arg, func(c rune) bool {
 		return c == ',' || c == '，' || c == ' ' || c == '/' || c == '、'
 	})
@@ -249,14 +272,43 @@ func meihuaReply(arg string) string {
 		a, err1 := strconv.Atoi(strings.TrimSpace(nums[0]))
 		b, err2 := strconv.Atoi(strings.TrimSpace(nums[1]))
 		if err1 == nil && err2 == nil && a > 0 && b > 0 {
-			return MeihuaByNumber(a, b).Text()
+			return MeihuaByNumber(a, b)
 		}
 	}
-	// 单个纯数字：也按报数（第二个数用当前时辰补）
+	// 单个纯数字：第二个数用当前时辰补
 	if len(nums) == 1 {
 		if a, err := strconv.Atoi(strings.TrimSpace(nums[0])); err == nil && a > 0 {
-			return MeihuaByNumber(a, shichen(time.Now().Hour())).Text()
+			return MeihuaByNumber(a, shichen(time.Now().Hour()))
 		}
 	}
-	return MeihuaByText(arg, time.Now()).Text()
+	return MeihuaByUserTime(uid, time.Now())
+}
+
+// meihuaReply 纯文本版（保留给测试/调试用）。
+func meihuaReply(uid int64, arg string) string {
+	return meihuaResult(uid, arg).Text()
+}
+
+// sendMeihua 占卜输出：**先发卦象图，再单独发一条文字解析**（用户要求）。
+// 图走 chart 那套渲染（能画中文），文字只留关键结论，避免一条超长消息。
+func (b *Bridge) sendMeihua(ev *Event, arg string) {
+	r := meihuaResult(ev.UserID, arg)
+
+	// 1) 卦象图
+	if png, err := RenderMeihuaChart(r, b.cfg().ChartFont); err != nil {
+		log.Printf("[qqbot] 卦象图渲染失败: %v", err)
+	} else if path, err := b.SaveGeneratedSticker(png); err != nil {
+		log.Printf("[qqbot] 卦象图落盘失败: %v", err)
+	} else if err := b.sendImage(ev, path); err != nil {
+		log.Printf("[qqbot] 卦象图发送失败: %v", err)
+	}
+
+	// 2) 文字解析（单独一条）
+	if txt := meihuaSummary(r); strings.TrimSpace(txt) != "" {
+		if err := b.send(ev, txt); err != nil {
+			log.Printf("[qqbot] 占卜解析发送失败: %v", err)
+		}
+	}
+	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
+		User: ev.UserID, Action: "cmd_meihua"})
 }

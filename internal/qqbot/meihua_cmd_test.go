@@ -36,24 +36,24 @@ func TestCommandMeihua(t *testing.T) {
 
 func TestMeihuaReplyForms(t *testing.T) {
 	// 报数起卦
-	got := meihuaReply("3,8")
+	got := meihuaReply(941628696, "3,8")
 	if !strings.Contains(got, "数字起卦") {
 		t.Errorf("报数应走数字起卦: %s", got[:60])
 	}
 	// 单个数字：第二个数用时辰补
-	got2 := meihuaReply("7")
+	got2 := meihuaReply(941628696, "7")
 	if !strings.Contains(got2, "数字起卦") {
 		t.Errorf("单数字也应走数字起卦: %s", got2[:60])
 	}
-	// 带问题文字：字数起卦
-	got3 := meihuaReply("明天面试能过吗")
-	if !strings.Contains(got3, "字数起卦") {
-		t.Errorf("带文字应走字数起卦: %s", got3[:60])
+	// 带问题文字（无报数）：QQ号+时间起卦
+	got3 := meihuaReply(941628696, "明天面试能过吗")
+	if !strings.Contains(got3, "QQ号+时间起卦") {
+		t.Errorf("默认应走 QQ号+时间起卦: %s", got3[:80])
 	}
-	// 空参数：时间起卦
-	got4 := meihuaReply("")
-	if !strings.Contains(got4, "时间起卦") {
-		t.Errorf("空参数应走时间起卦: %s", got4[:60])
+	// 空参数：同样是 QQ号+时间
+	got4 := meihuaReply(941628696, "")
+	if !strings.Contains(got4, "QQ号+时间起卦") {
+		t.Errorf("空参数也应走 QQ号+时间起卦: %s", got4[:80])
 	}
 	// 三种路径都必须给出完整卦象
 	for _, s := range []string{got, got2, got3, got4} {
