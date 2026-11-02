@@ -303,12 +303,96 @@ func (b *Bridge) sendMeihua(ev *Event, arg string) {
 		log.Printf("[qqbot] 卦象图发送失败: %v", err)
 	}
 
-	// 2) 文字解析（单独一条）
-	if txt := meihuaSummary(r); strings.TrimSpace(txt) != "" {
+	// 2) 文字解析（单独一条）：卦象简写 + 结合近况/诉求的解读
+	txt := meihuaSummary(r)
+	if interp := b.meihuaInterpret(ev, r, arg); interp != "" {
+		txt += "\n" + interp
+	}
+	if txt = strings.TrimSpace(txt); txt != "" {
 		if err := b.send(ev, txt); err != nil {
 			log.Printf("[qqbot] 占卜解析发送失败: %v", err)
 		}
 	}
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Action: "cmd_meihua"})
+}
+
+// shortHexName 卦名简写：去掉前面的两字「象」（天泽火雷风水山地），只留卦名。
+//
+//	火地晋 → 晋　天火同人 → 同人　火雷噬嗑 → 噬嗑
+//
+// 八纯卦（乾为天/坤为地…）格式不同，取「为」前面的字：乾为天 → 乾。
+func shortHexName(full string) string {
+	if i := strings.Index(full, "为"); i > 0 {
+		return full[:i]
+	}
+	r := []rune(full)
+	if len(r) <= 2 {
+		return full
+	}
+	return string(r[2:])
+}
+
+// Symbol 上下卦符号，如 ☲☷（上离下坤）。
+func (r MeihuaResult) Symbol() string {
+	return r.Upper.Symbol + r.Lower.Symbol
+}
+
+// ShortName 本卦简写：单字卦名，如「晋」。
+//
+// 不用 ☰☱☲… 这些 Unicode 八卦符号：simhei.ttf 里没有该区段字形，
+// 渲染出来是豆腐块（实测踩到）。中文简写更稳，也够简。
+func (r MeihuaResult) ShortName() string {
+	return shortHexName(r.Name)
+}
+
+// TrigramPair 上下卦名，如「离上坤下」。
+func (r MeihuaResult) TrigramPair() string {
+	return r.Upper.Name + "上" + r.Lower.Name + "下"
+}
+
+// shortOf 任意卦全名 → 简写（含符号需要上下卦，这里只给卦名）。
+func shortOf(full string) string { return shortHexName(full) }
+
+// meihuaInterpret 让模型写一段"落地"的解读。
+//
+// 用户要求：解读默认结合**最近的生活工作状态**，或者**这次问的诉求**，
+// 而不是泛泛的"所问之事易成"。所以把两样东西喂给模型：
+//   - 记忆里这个人的近况（说过什么/印象/好感）
+//   - 本次的问题（可能为空）
+//
+// 卦象本身仍由规则算出（不交给模型编），模型只负责"翻译成对他有用的话"。
+func (b *Bridge) meihuaInterpret(ev *Event, r MeihuaResult, question string) string {
+	memo := ""
+	if b.mem != nil {
+		memo = strings.TrimSpace(b.mem.Describe(ev.UserID))
+	}
+	ask := strings.TrimSpace(question)
+	if ask == "" {
+		ask = "（没具体说问什么，按他最近的状态给点方向）"
+	}
+	prompt := fmt.Sprintf(`占卜结果（已按梅花易数规则算出，不要改动卦象）：
+本卦 %s，动爻第 %d 爻；互卦 %s；变卦 %s。
+体卦 %s（%s），用卦 %s（%s），%s，判为「%s」。
+
+他这次问的是：%s
+%s
+
+请用龙王腔（自称本王）给一段解读：结合他最近的状态或这次问的事，说清该注意什么、往哪走。
+要求：不超过 80 字，不编造具体事实，不复述卦象术语，不带括号动作描写。`,
+		r.ShortName(), r.Moving,
+		shortHexName(r.MutualName), shortHexName(r.ChangedName),
+		r.BodyName, r.BodyElem, r.UseName, r.UseElem, r.Relation, r.Verdict,
+		ask, memo)
+
+	msgs := []chatMsg{
+		{Role: "system", Content: strings.TrimSpace(b.cfg().PersonaDefaultPrompt)},
+		{Role: "user", Content: prompt},
+	}
+	msg, err := b.doChat(msgs, nil)
+	if err != nil {
+		log.Printf("[qqbot] 占卜解读生成失败: %v", err)
+		return ""
+	}
+	return stripStageDirections(strings.TrimSpace(msg.Content))
 }
