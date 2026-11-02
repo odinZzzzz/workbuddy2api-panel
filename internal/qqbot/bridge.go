@@ -440,9 +440,13 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 	var out string
 	switch cmd {
 	case "/help":
-		out = "指令：/help｜/clear 清空上下文｜/model 看模型｜/ping｜总结（或 总结 <QQ号>/@某人）看本王记得他什么｜锐评 <话题/@某人> 让本王毒舌一句"
+		out = "指令：/help｜/clear｜/model｜/ping｜总结 <QQ号/@某人>｜锐评 <话题>｜占卜 <要问的事>（或 起卦 3,8 报数）"
 	case "/summary", "/whois":
 		out = b.summaryOf(ev, arg, atTargets)
+	case "/meihua":
+		// 梅花易数：确定性起卦（时间/报数），卦象与断语由规则算出，
+		// 不靠模型编——占卜的可信度全在规则上。
+		out = meihuaReply(arg)
 	case "/rap":
 		// 先试记忆型锐评（@某人 / QQ 号）；""
 		// 表示要锐评的是话题 → 交给模型现写一句。
@@ -479,6 +483,9 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 	}
 	b.state.note(RecentEvent{Time: time.Now(), Type: ev.MessageType, Group: ev.GroupID,
 		User: ev.UserID, Nick: name, Action: "cmd_" + strings.TrimPrefix(cmd, "/")})
+	// 成功也记一行：之前只在失败时打日志，导致"日志里没有 = 以为没发"的误判
+	// （实测占卜指令正常发出，但日志看不到任何痕迹）。
+	log.Printf("[qqbot] cmd %s → %s: %s", cmd, ev.MessageType, truncateRunes(strings.ReplaceAll(out, "\n", " / "), 100))
 	if err := b.send(ev, out); err != nil {
 		log.Printf("[qqbot] command send failed: %v", err)
 	}

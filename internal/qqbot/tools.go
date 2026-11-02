@@ -71,7 +71,7 @@ func (b *Bridge) buildTools() *toolRegistry {
 		return m
 	}
 
-	add("daily_password", "查三角洲行动今日地图密码（零号大坝/长弓溪谷/巴克什/航天基地/潮汐监狱/AZ3）。数据来自 kkrb.net 实时接口，有 10 分钟缓存。有人问密码、密码门、今天密码时调用。",
+	add("daily_password", "今日地图密码（六图）。问密码/密码门时用。",
 		obj(map[string]any{}),
 		func(tc toolContext, args json.RawMessage) (string, error) {
 			if !tc.b.cfg().KkrbEnabled {
