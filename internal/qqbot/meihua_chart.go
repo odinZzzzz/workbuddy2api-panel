@@ -41,7 +41,7 @@ func RenderMeihuaChart(r MeihuaResult, fontPath string) ([]byte, error) {
 	// 顶部标题条
 	fillRect(img, image.Rect(0, 0, W, 76), mhTitle)
 	if fontPath != "" {
-		drawText(img, fontPath, 30, 28, 50, "梅花易数 · "+r.ShortName(), color.White)
+		drawText(img, fontPath, 30, 28, 50, "梅花易数 · "+r.Name, color.White)
 	}
 
 	// 三个卦卡片
@@ -64,7 +64,7 @@ func RenderMeihuaChart(r MeihuaResult, fontPath string) ([]byte, error) {
 		fillRect(img, image.Rect(x, y, x+cardW, y+cardH), mhCard)
 		if fontPath != "" {
 			drawText(img, fontPath, 17, x+18, y+30, p.title, mhMuted)
-			name := fitText(fontPath, 24, shortHexName(p.name), cardW-36)
+			name := fitText(fontPath, 24, p.name, cardW-36)
 			drawText(img, fontPath, 24, x+18, y+66, name, mhInk)
 		}
 		// 六爻：自下而上，第 1 爻画在最下面
@@ -144,13 +144,35 @@ func drawYao(dst *image.RGBA, cx, y, w, h int, yang bool, col color.Color) {
 	fillRect(dst, image.Rect(cx+gapW/2, y, cx+w/2, y+h), col)
 }
 
-// meihuaSummary 图之后单独发的那条文字解析（简短，图里已有卦象）。
+// asciiHexagram 用简化线条画六爻（从上到下，第 6 爻在最上）。
+//
+// 为什么用字符而不是 ☰☱☲ 这类符号：中文字体（simhei）没有 U+2630-2637 区段，
+// 渲染出来是豆腐块；用「—」「— —」画线条零字体依赖，任何环境都显示得出来。
+func asciiHexagram(lines [6]bool, moving int) string {
+	var sb strings.Builder
+	for k := 5; k >= 0; k-- {
+		if lines[k] {
+			sb.WriteString("———")
+		} else {
+			sb.WriteString("— —")
+		}
+		if k+1 == moving {
+			sb.WriteString("   ← 动")
+		}
+		if k > 0 {
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
+}
+
+// meihuaSummary 图之后单独发的那条文字解析：简化六爻图 + 体用 + 断语。
 func meihuaSummary(r MeihuaResult) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s\n", r.Method)
-	fmt.Fprintf(&sb, "本卦 %s（%s，动 %d）｜互 %s ｜变 %s\n",
-		r.ShortName(), r.TrigramPair(), r.Moving,
-		shortHexName(r.MutualName), shortHexName(r.ChangedName))
+	fmt.Fprintf(&sb, "本卦 %s（%s）\n", r.Name, r.TrigramPair())
+	sb.WriteString(asciiHexagram(r.Lines, r.Moving))
+	fmt.Fprintf(&sb, "\n互卦 %s ｜ 变卦 %s\n", r.MutualName, r.ChangedName)
 	fmt.Fprintf(&sb, "体 %s（%s）· 用 %s（%s）→ %s，%s\n", r.BodyName, r.BodyElem, r.UseName, r.UseElem, r.Relation, r.Verdict)
 	sb.WriteString(r.Detail)
 	return sb.String()
