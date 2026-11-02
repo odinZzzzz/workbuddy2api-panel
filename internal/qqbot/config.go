@@ -36,6 +36,13 @@ type Config struct {
 	GatewayKey string `json:"gateway_key"`
 	// Model 模型名，支持网关的域前缀：cn:/global:/auto:。
 	Model string `json:"model"`
+	// ReasoningEffort 思考档位（透传给网关的 reasoning_effort）。
+	//
+	// 为什么要可配：不同模型支持的档位不一样（实测 deepseek-v4-flash 是
+	// low/high/xhigh，kimi-k3.1-pro 是 low/high/max）。空 = 不传，用上游默认档；
+	// 传了但模型不支持时，网关会按 supported_efforts 自动降档，不会报错。
+	// 想要"思考拉满"就填该模型的最高档（v4-flash 填 xhigh，kimi 填 max）。
+	ReasoningEffort string `json:"reasoning_effort"`
 	// SystemPrompt 给模型的人设（空则不注入 system）。
 	SystemPrompt string `json:"system_prompt"`
 
@@ -187,12 +194,14 @@ func Default() Config {
 		// 只留明确的直接辱骂：蠢/垃圾/sb/笨蛋/白痴 这类容易误伤（"垃圾回收器"、
 		// "这设计真蠢"），一律不算攻击——宁可漏判，也不要动不动切龙王。
 		AttackKeywords: []string{"傻逼", "煞笔", "智障", "弱智", "你妈", "去死", "滚蛋", "狗东西", "人工智障", "蠢货"},
-		ToolsEnabled:   true,
-		MaxToolRounds:  3,
-		ProfileEnabled: true,
-		StickerCommand: []string{"表情", "来个表情", "发表情"},
-		PokeBack:       true,
-		PokeReply:      "戳什么戳？手痒就跪下。",
+		// 默认把思考开到当前模型的最高档（deepseek-v4-flash 支持 low/high/xhigh）。
+		ReasoningEffort: "xhigh",
+		ToolsEnabled:    true,
+		MaxToolRounds:   3,
+		ProfileEnabled:  true,
+		StickerCommand:  []string{"表情", "来个表情", "发表情"},
+		PokeBack:        true,
+		PokeReply:       "戳什么戳？手痒就跪下。",
 	}
 }
 

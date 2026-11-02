@@ -14,14 +14,16 @@ package qqbot
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 )
 
-// maxQuoteRunes 引用/转发内容回填的字符上限（超出截断，避免撑爆 prompt）。
-const maxQuoteRunes = 300
+// 上限刻意放宽（用户要求"别限制了"）：聊天记录是重要上下文，裁剪太狠等于没有。
+// 只在极端情况下兜底，避免一次转发把 prompt 撑爆（单条消息上限约 6000 字）。
+const maxQuoteRunes = 6000
 
-// maxForwardItems 合并转发最多回填多少条。
-const maxForwardItems = 12
+// maxForwardItems 合并转发最多回填多少条（放宽到 60，覆盖绝大多数聊天记录）。
+const maxForwardItems = 60
 
 // parseQuoteIDs 从消息段里提取引用回复 id 与合并转发 id。
 func parseQuoteIDs(raw json.RawMessage) (replyID int64, forwardID string) {
@@ -57,6 +59,9 @@ func parseSegments(raw json.RawMessage) []segment {
 // quoteContext 回填引用/转发内容，返回要拼进 userText 的前缀（空 = 无需拼接）。
 func (b *Bridge) quoteContext(raw json.RawMessage) string {
 	replyID, forwardID := parseQuoteIDs(raw)
+	if replyID != 0 || forwardID != "" {
+		log.Printf("[qqbot] quote ids: reply=%d forward=%q", replyID, forwardID)
+	}
 	var parts []string
 
 	if replyID != 0 {
@@ -76,6 +81,7 @@ func (b *Bridge) quoteContext(raw json.RawMessage) string {
 func (b *Bridge) fetchQuotedMessage(id int64) string {
 	res, err := b.callActionResult("get_msg", map[string]any{"message_id": id})
 	if err != nil {
+		log.Printf("[qqbot] 引用回填失败 get_msg(%d): %v", id, err)
 		return ""
 	}
 	// get_msg 返回 {message_id, real_id, sender, time, message}
@@ -99,8 +105,9 @@ func (b *Bridge) fetchQuotedMessage(id int64) string {
 
 // fetchForwardMessages 用 get_forward_msg 取合并转发里的前若干条。
 func (b *Bridge) fetchForwardMessages(id string) string {
-	res, err := b.callActionResult("get_forward_msg", map[string]any{"id": id})
+	res, err := b.callActionResult("get_forward_msg", map[string]any{"message_id": id})
 	if err != nil {
+		log.Printf("[qqbot] 聊天记录回填失败 get_forward_msg(%s): %v", id, err)
 		return ""
 	}
 	items, ok := res["messages"].([]any)

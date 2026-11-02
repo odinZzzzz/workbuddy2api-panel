@@ -223,6 +223,10 @@ func (b *Bridge) handleEvent(w http.ResponseWriter, r *http.Request) {
 	// 到达即记一行：排查"为什么没回复"时，必须先能区分"事件没到"与"规则挡掉"。
 	log.Printf("[qqbot] event type=%s group=%d user=%d at=%v len=%d",
 		ev.MessageType, ev.GroupID, ev.UserID, atBot, len([]rune(text)))
+	// 调试：打印原始消息段（定位引用/转发解析问题时用；确认后可降级）
+	if s := strings.TrimSpace(string(ev.Message)); s != "" {
+		log.Printf("[qqbot] raw message: %.400s", s)
+	}
 
 	// 白名单：默认谁都不回（空名单 = 全拒），这是安全默认。
 	// 忽略名单（别的 bot / 旧 bot）：必须在白名单判断之前——否则两个 bot 会互回成环。
@@ -436,9 +440,30 @@ func (b *Bridge) runCommand(ev *Event, key, name, cmd, arg string, atTargets []i
 	var out string
 	switch cmd {
 	case "/help":
-		out = "指令：/help｜/clear 清空上下文｜/model 看模型｜/ping｜总结（或 总结 <QQ号>/@某人）看本王记得他什么"
+		out = "指令：/help｜/clear 清空上下文｜/model 看模型｜/ping｜总结（或 总结 <QQ号>/@某人）看本王记得他什么｜锐评 <话题/@某人> 让本王毒舌一句"
 	case "/summary", "/whois":
 		out = b.summaryOf(ev, arg, atTargets)
+	case "/rap":
+		// 先试记忆型锐评（@某人 / QQ 号）；""
+		// 表示要锐评的是话题 → 交给模型现写一句。
+		if rap := b.rapOf(ev, arg, atTargets); rap != "" {
+			out = rap
+		} else if strings.TrimSpace(arg) != "" {
+			// 锐评只要"一句话"，**不走工具循环**：
+			// 实测走 b.chat()（带 18 个工具）会让网关极慢甚至卡死不返回。
+			// 这里直接用 doChat(…, nil) 单次无工具调用，快且不会跑偏去调工具。
+			prompt := "用一句话锐评一下：" + strings.TrimSpace(arg) +
+				"。要求：短、毒舌、龙王腔（自称本王），不带括号动作描写，不解释，不超过 40 字。"
+			msgs := b.buildMessagesWithPrompt(key, ev.UserID, prompt, b.cfg().PersonaDefaultPrompt)
+			msg, err := b.doChat(msgs, nil)
+			if err != nil || strings.TrimSpace(msg.Content) == "" {
+				out = "本王今天嘴懒，锐评免了。"
+			} else {
+				out = stripStageDirections(strings.TrimSpace(msg.Content))
+			}
+		} else {
+			out = "锐评什么？给本王个靶子。"
+		}
 	case "/clear", "/new":
 		b.mu.Lock()
 		delete(b.sessions, key)
@@ -535,6 +560,11 @@ func (b *Bridge) doChat(msgs []chatMsg, tools *toolRegistry) (chatRespMsg, error
 		"model":    b.cfg().Model,
 		"messages": toPayloadMessages(msgs),
 		"stream":   false,
+	}
+	// 思考档位：空 = 不传（用上游默认）。用户要"思考开到 max"时配最高档
+	// （v4-flash 是 xhigh、kimi 是 max）；模型不支持时网关会按 supported_efforts 自动降档。
+	if eff := strings.TrimSpace(b.cfg().ReasoningEffort); eff != "" {
+		payload["reasoning_effort"] = eff
 	}
 	if tools != nil && len(tools.defs) > 0 {
 		payload["tools"] = tools.defs
@@ -865,13 +895,71 @@ func (b *Bridge) summaryOf(ev *Event, arg string, atTargets []int64) string {
 		sb.WriteString("。")
 	}
 	fmt.Fprintf(&sb, "好感度 %d/100（%s）。", u.Affinity, AffinityTier(u.Affinity))
-	if u.Verdict != "" {
-		sb.WriteString("本王上次印象：")
-		sb.WriteString(u.Verdict)
-		sb.WriteString("。")
-	}
 	sb.WriteString("就这点货色。")
 	return sb.String()
+}
+
+// rapOf 「锐评」：对某人/某事输出一句外发的毒舌短评。
+//
+// 与已下线的「点评」不同：点评是每轮收尾的内心活动（入库不外发），
+// 锐评是用户显式要求的、要发出去的犀利评价。
+//
+// 优先用真实记忆（见过几次 / 说过什么 / 好感），不凭空编造——
+// 没印象就直说没印象，这比瞎编更像"锐评"而不是"胡说"。
+func (b *Bridge) rapOf(ev *Event, arg string, atTargets []int64) string {
+	target := int64(0)
+	for _, uid := range atTargets {
+		if uid != ev.SelfID {
+			target = uid
+			break
+		}
+	}
+	if target == 0 {
+		if n, err := strconv.ParseInt(strings.TrimSpace(arg), 10, 64); err == nil && n > 0 {
+			target = n
+		}
+	}
+	subject := strings.TrimSpace(arg)
+
+	// 有具体对象（@ 或 QQ 号）→ 用记忆锐评这个人
+	if target != 0 {
+		if b.mem == nil {
+			return "本王记忆未开，无从下嘴。"
+		}
+		u, ok := b.mem.Lookup(target)
+		if !ok || (u.Count == 0 && len(u.Notes) == 0) {
+			return "嗤，一个本王毫无印象的蝼蚁，也配让本王浪费刻薄？"
+		}
+		name := u.Nick
+		if name == "" {
+			name = "无名凡人"
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "嗤，%s。见过 %d 次，好感 %d/100（%s）",
+			name, u.Count, u.Affinity, AffinityTier(u.Affinity))
+		if len(u.Notes) > 0 {
+			sb.WriteString("。张口就是：")
+			sb.WriteString(strings.Join(u.Notes, "；"))
+		}
+		// 按好感给不同力度的毒舌结论（不编造具体事迹，只下判断）
+		switch {
+		case u.Affinity >= 80:
+			sb.WriteString("。哼，也就你还能让本王多说两句——别得意，本王随时反悔。")
+		case u.Affinity >= 50:
+			sb.WriteString("。勉强算个能聊的，离让本王上心还差得远。")
+		case u.Affinity >= 20:
+			sb.WriteString("。存在感稀薄得像没加盐的汤，本王记你都嫌占地方。")
+		default:
+			sb.WriteString("。本王见你一次就想翻白眼一次，你自己心里没数？")
+		}
+		return sb.String()
+	}
+
+	// 没有具体对象 → 对话题锐评（走模型，用龙王腔）；失败给兜底
+	if subject == "" {
+		return "锐评什么？给本王个靶子——@ 一个人，或者写上你想让本王刻薄谁。"
+	}
+	return "" // 交给上层走模型（见 runCommand）
 }
 
 // gateSnapshot / botGuardSnapshot 供后台展示。
